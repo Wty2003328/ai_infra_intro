@@ -2,7 +2,7 @@
 
 How to approach AI-infra system design questions. Covers the framework you should run for any prompt, six fully worked example designs (LLM serving, training cluster, RAG, agent orchestrator, multi-modal pipeline, eval harness), the numbers you must memorize, and the failure modes that kill candidates.
 
-**Prerequisites**: All preceding pages, especially [Production_Architecture](../Part_6_Inference_Engines_and_Serving/Production_Architecture.md), [Inference_Frameworks](../Part_6_Inference_Engines_and_Serving/Inference_Frameworks.md), [Distributed_Training](../Part_7_Distributed_Systems_and_Scale/Distributed_Training.md).
+**Prerequisites**: All preceding pages, especially [Production_Architecture](../L8_Inference_and_Serving/Production_Architecture.md), [Inference_Frameworks](../L8_Inference_and_Serving/Inference_Frameworks.md), [Distributed_Training](../L7_Training_Stack/Distributed_Training.md).
 
 ---
 
@@ -46,7 +46,7 @@ Most candidates rush to step 4. Strong candidates spend ~30% of the interview on
 | Tokens/sec/H100 (70B FP8 decent batch) | ~1500 |
 | Cost (cloud H100/hour) | $20-30/8-GPU node |
 
-For full derivations see [Memory_Hierarchy_and_Roofline](../Part_2_Microarchitecture/Memory_Hierarchy_and_Roofline.md), [GPU_Architecture](../Part_2_Microarchitecture/GPU_Architecture.md), [Networking_and_Interconnect](../Part_3_Hardware_Systems_and_Interconnects/Networking_and_Interconnect.md).
+For full derivations see [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md), [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md), [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md).
 
 ---
 
@@ -75,7 +75,7 @@ For full derivations see [Memory_Hierarchy_and_Roofline](../Part_2_Microarchitec
 
 ### Architecture
 
-(Cribbed from [Production_Architecture](../Part_6_Inference_Engines_and_Serving/Production_Architecture.md).)
+(Cribbed from [Production_Architecture](../L8_Inference_and_Serving/Production_Architecture.md).)
 
 - Edge: TLS, WAF, auth, rate limit, anycast routing to nearest region.
 - Frontend / Router: tokenize, choose model, locality-aware backend selection.
@@ -260,7 +260,7 @@ query → embed (1ms) → vector search (10ms) → rerank (20ms) →
 
 ```
 Input image → ViT encoder → image tokens →
-                                          ──► LLM context → text out
+                                          --> LLM context --> text out
 Input text → tokenizer → text tokens   →
 ```
 
@@ -440,4 +440,4 @@ A: Batch: maximize throughput, longer chunks, no SLO, reuse GPU 100%. Online: re
 ---
 
 **Next:** [Common_Interview_Questions](Common_Interview_Questions.md).
-**See also:** [Production_Architecture](../Part_6_Inference_Engines_and_Serving/Production_Architecture.md), [Inference_Frameworks](../Part_6_Inference_Engines_and_Serving/Inference_Frameworks.md), [Distributed_Training](../Part_7_Distributed_Systems_and_Scale/Distributed_Training.md).
+**See also:** [Production_Architecture](../L8_Inference_and_Serving/Production_Architecture.md), [Inference_Frameworks](../L8_Inference_and_Serving/Inference_Frameworks.md), [Distributed_Training](../L7_Training_Stack/Distributed_Training.md).

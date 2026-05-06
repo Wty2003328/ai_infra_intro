@@ -2,7 +2,7 @@
 
 The coding rounds for AI-infra roles are unusual: kernel writing, parallel reduction patterns, scheduler algorithms, and only sometimes leetcode-style. This page collects the patterns that come up most often, with reference implementations.
 
-**Prerequisites**: [CUDA_Programming](../Part_4_GPU_Kernel_Engineering/CUDA_Programming.md), [CUDA_Optimization](../Part_4_GPU_Kernel_Engineering/CUDA_Optimization.md), [Triton_and_Kernels](../Part_4_GPU_Kernel_Engineering/Triton_and_Kernels.md), [Batching_and_Scheduling](../Part_6_Inference_Engines_and_Serving/Batching_and_Scheduling.md).
+**Prerequisites**: [CUDA_Programming](../L5_Kernels_and_Programming/CUDA_Programming.md), [CUDA_Optimization](../L5_Kernels_and_Programming/CUDA_Optimization.md), [Triton_and_Kernels](../L5_Kernels_and_Programming/Triton_and_Kernels.md), [Batching_and_Scheduling](../L8_Inference_and_Serving/Batching_and_Scheduling.md).
 
 ---
 
@@ -101,7 +101,7 @@ def softmax_kernel(X_ptr, Y_ptr, M, N, stride_xm, stride_ym, BLOCK_N: tl.constex
     tl.store(Y_ptr + row * stride_ym + cols, y, mask=mask)
 ```
 
-Key: subtract max **before** exp for numerical stability. Online (block-wise) softmax needed when N exceeds BLOCK_N — see [Attention_Mechanisms §3](../Part_5_Algorithms_and_Quantization/Attention_Mechanisms.md).
+Key: subtract max **before** exp for numerical stability. Online (block-wise) softmax needed when N exceeds BLOCK_N — see [Attention_Mechanisms §3](../L6_Algorithms_and_Models/Attention_Mechanisms.md).
 
 ---
 
@@ -166,7 +166,7 @@ def attn_fwd(Q, K, V, O, sm_scale,
     tl.store(O_blk, acc.to(O.dtype.element_ty))
 ```
 
-Whiteboard expectation: you should be able to write this skeleton — outer loop over Q blocks, inner over K/V, online softmax accumulator — in 20-30 minutes. See [FlashAttention_Deep_Dive §12](../Part_4_GPU_Kernel_Engineering/FlashAttention_Deep_Dive.md) for the full version.
+Whiteboard expectation: you should be able to write this skeleton — outer loop over Q blocks, inner over K/V, online softmax accumulator — in 20-30 minutes. See [FlashAttention_Deep_Dive §12](../L5_Kernels_and_Programming/FlashAttention_Deep_Dive.md) for the full version.
 
 ---
 
@@ -536,4 +536,4 @@ A: For small k (≤ 64), warp-level partial sort works. For larger or sparse, pa
 ---
 
 **Next:** [Index](../Index.md) for the master TOC.
-**See also:** [CUDA_Programming](../Part_4_GPU_Kernel_Engineering/CUDA_Programming.md), [CUDA_Optimization](../Part_4_GPU_Kernel_Engineering/CUDA_Optimization.md), [Triton_and_Kernels](../Part_4_GPU_Kernel_Engineering/Triton_and_Kernels.md), [System_Design_Interview](System_Design_Interview.md).
+**See also:** [CUDA_Programming](../L5_Kernels_and_Programming/CUDA_Programming.md), [CUDA_Optimization](../L5_Kernels_and_Programming/CUDA_Optimization.md), [Triton_and_Kernels](../L5_Kernels_and_Programming/Triton_and_Kernels.md), [System_Design_Interview](System_Design_Interview.md).
