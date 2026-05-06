@@ -1,30 +1,40 @@
-# AI Infrastructure Notebook
+# AI Infrastructure & Hardware Design Notebook
 
-A comprehensive, bottom-up technical reference covering the full AI infrastructure stack — from CMOS physics and silicon fabrication through GPU microarchitecture, CUDA kernels, transformer algorithms, distributed training, and production LLM inference serving.
+A comprehensive, bottom-up technical reference covering the full AI infrastructure stack and digital IC design — from CMOS physics and silicon fabrication through GPU microarchitecture, CUDA kernels, transformer algorithms, distributed training, production LLM inference serving, CPU design, physical implementation, and SystemVerilog verification.
 
-**65 pages | 31,000+ lines | 240 Mermaid diagrams | LaTeX math throughout**
+**92 pages | 65,000+ lines | 240 Mermaid diagrams | LaTeX math throughout**
 
-Built for senior-level interview preparation and professional reference. Target roles: LLM inference/serving engineer, GPU kernel/CUDA engineer, distributed training/MLSys engineer.
+Built for senior-level interview preparation and professional reference. Target roles: LLM inference/serving engineer, GPU kernel/CUDA engineer, distributed training/MLSys engineer, RTL design engineer, physical design/STA engineer, verification engineer.
 
 ## Structure
 
-The notebook is organized in 9 layers following a strict bottom-up dependency chain. Each layer assumes the content of all layers below it.
-
 ```
-ai_infra/
-├── L0_Silicon_and_Process/          CMOS, FinFET/GAA, process nodes, wafer economics
-├── L1_Packaging_and_Memory/         2.5D/3D packaging, HBM3/HBM4, chiplet interconnects
-├── L2_Digital_Design_for_AI/        FP units, systolic arrays, on-chip memory, dataflow
-├── L3_Microarchitecture/            GPU/TPU/ASIC architectures, roofline model, ISA
-├── L4_Systems_and_Interconnects/    Networking, rack-scale design, storage, model loading
-├── L5_Kernels_and_Programming/      CUDA, Triton, FlashAttention, CUTLASS, Hopper kernels
-├── L6_Algorithms_and_Models/        Transformers, attention, MoE, quantization, SSMs
-├── L7_Training_Stack/               Parallelism, collectives, FSDP/ZeRO, post-training, RL
-├── L8_Inference_and_Serving/        KV cache, batching, disaggregation, frameworks, production
-└── interview_prep/                  System design walkthroughs, Q&A, coding patterns
+notebook/
+├── ai_infra/                         AI infrastructure (silicon → inference serving)
+│   ├── L0_Silicon_and_Process/
+│   ├── L1_Packaging_and_Memory/
+│   ├── L2_Digital_Design_for_AI/
+│   ├── L3_Microarchitecture/
+│   ├── L4_Systems_and_Interconnects/
+│   ├── L5_Kernels_and_Programming/
+│   ├── L6_Algorithms_and_Models/
+│   ├── L7_Training_Stack/
+│   ├── L8_Inference_and_Serving/
+│   └── interview_prep/
+└── hardware_design/                  Digital IC design & verification
+    ├── Fundamentals/
+    ├── Architecture/
+    ├── Implementation/
+    ├── Clocking_and_Signals/
+    ├── Power/
+    └── SystemVerilog/
 ```
 
-### Page Index
+---
+
+## AI Infrastructure (`ai_infra/`)
+
+65 pages organized in 9 layers following a strict bottom-up dependency chain. Each layer assumes the content of all layers below it.
 
 | Layer | Pages | Lines | Coverage |
 |-------|-------|-------|----------|
@@ -39,6 +49,53 @@ ai_infra/
 | L8 — Inference & Serving | 14 | 8,435 | vLLM, SGLang, KV cache, disaggregation, K8s, prod |
 | Interview Prep | 3 | 1,384 | System design, Q&A, CUDA coding patterns |
 
+**Topics:** GPU/TPU/ASIC architectures, CUDA/Triton kernels, transformer internals, MoE, quantization (FP8/FP4/MX), distributed training (FSDP/ZeRO/3D parallelism), KV cache, continuous batching, speculative decoding, prefill-decode disaggregation, vLLM/SGLang/TRT-LLM internals, Kubernetes orchestration, production serving.
+
+See [ai_infra/Index.md](ai_infra/Index.md) for the full page index and reading paths.
+
+---
+
+## Hardware Design (`hardware_design/`)
+
+27 pages organized in 6 thematic sections covering digital IC design from transistor physics through verification signoff.
+
+| Section | Pages | Lines | Coverage |
+|---------|-------|-------|----------|
+| Fundamentals | 5 | ~5,669 | CMOS physics, fabrication, logic basics, adders, floating point |
+| Architecture | 3 | ~3,593 | CPU pipeline, memory design, AMBA bus protocols |
+| Implementation | 6 | ~8,009 | Synthesis, PnR, STA, DFT/ATPG, formal verification, IC packaging |
+| Clocking & Signals | 3 | ~4,827 | Clock dividers, async/CDC, signal integrity, reliability |
+| Power | 5 | ~5,697 | Power fundamentals, reduction, analysis/signoff, UPF, low-power design |
+| SystemVerilog | 5 | ~5,336 | Data types, processes, OOP, assertions/coverage, IPC/verification |
+
+**Topics:** MOSFET/FinFET physics, fab process (DUV/EUV), adder architectures, IEEE 754, 5-stage CPU pipeline, branch prediction, MESI coherence, AXI4/AHB/APB, SRAM/DRAM design, synthesis, place-and-route, static timing analysis (OCV/POCV), scan chains/ATPG, formal verification (LEC/model checking), async FIFOs, CDC, crosstalk/EM/IR drop, power gating/DVFS, UPF, SystemVerilog OOP/randomization, UVM-style testbench, SVA.
+
+See [hardware_design/Index.md](hardware_design/Index.md) for the full page index and reading paths.
+
+---
+
+## Reading Paths
+
+### AI Infrastructure
+
+**2-week interview sprint:** GPU Architecture → Memory Hierarchy → Transformer Internals → Attention → KV Cache → Batching → Parallelism → Prefill-Decode Disaggregation → Quantization → vLLM Internals → Kubernetes → System Design Interview
+
+**CUDA/kernel interview:** CUDA Programming → CUDA Optimization → Triton → FlashAttention → Cutting-Edge Kernels → Coding Patterns
+
+**Distributed training interview:** GPU Architecture → Networking → Parallelism → NCCL → Distributed Training → Training Optimization
+
+### Hardware Design
+
+**RTL design interview:** CMOS Fundamentals → Basic Knowledge → Adders → Floating Point → CPU Architecture → Synthesis → STA → SystemVerilog basics
+
+**Physical design / STA interview:** CMOS → Synthesis → Physical Design → STA → Signal Integrity → Power Analysis → Clock Division
+
+**Verification interview:** Data Types → Procedural → OOP → Assertions → IPC and Verification → Formal Verification → Async/CDC
+
+**Power-aware design interview:** Power Fundamentals → Low Power Design → Power Reduction → UPF → Power Analysis and Signoff
+
+---
+
 ## Content Style
 
 Every page follows the same structure:
@@ -48,30 +105,10 @@ Every page follows the same structure:
 - **Mermaid diagrams** — architecture, dataflow, cause-effect chains
 - **LaTeX math** — all formulas fully derived, not just stated
 - **Numbers to memorize** — tables of constants that come up in interviews
-- **Worked problems** — 4–5 interview-style problems with full solutions
+- **Worked problems** — interview-style problems with full solutions
 - **Cross-references** — links to prerequisite and downstream pages
 
 The tone is declarative: "here is the mechanism, the math, the numbers, and the tradeoffs" — written for a senior engineer, not a beginner tutorial.
-
-## Reading Paths
-
-**2-week interview sprint:**
-
-Week 1 (mechanism): GPU Architecture → Memory Hierarchy → Transformer Internals → Attention → KV Cache → Batching → Parallelism
-
-Week 2 (production): Prefill-Decode Disaggregation → Quantization → vLLM Internals → Kubernetes → Observability → System Design Interview
-
-**CUDA/kernel interview:**
-
-CUDA Programming → CUDA Optimization → Triton → FlashAttention → Cutting-Edge Kernels → Coding Patterns
-
-**Distributed training interview:**
-
-GPU Architecture → Networking → Parallelism Strategies → NCCL → Distributed Training → Training Optimization
-
-**Frontier crash course (weekend):**
-
-Frontier Models → MoE → Reasoning Models → Long Context → KV Compression → Disaggregated Serving → Blackwell → Quantization Frontier
 
 ## How to Use
 
@@ -80,20 +117,6 @@ Frontier Models → MoE → Reasoning Models → Long Context → KV Compression
 **GitHub:** All pages are readable directly on GitHub. Mermaid diagrams and LaTeX math render in the GitHub markdown preview.
 
 **Any markdown viewer:** Pages use standard markdown with relative links — they work anywhere.
-
-## Topics Covered
-
-**Hardware:** CMOS physics, FinFET/GAA transistors, TSMC N5/N3/N2, CoWoS/SoIC packaging, HBM3E/HBM4, GPU SM architecture, tensor cores, NVLink 4/5, NVL72/NVL576, InfiniBand NDR/XDR, PCIe Gen5, CXL, UALink, Grace-Blackwell superchips, AMD MI300/MI400, Google TPU v5p/v6, Huawei Ascend 910, cloud ASICs (Trainium2, Inferentia2, MTIA)
-
-**Kernels:** CUDA thread hierarchy, memory coalescing, bank conflicts, occupancy, TMA (Hopper), warp specialization, Triton DSL, CUTLASS 3.x/CuTe, FlashAttention v1/v2/v3, FlashInfer, DeepEP, Liger Kernel, ThunderKittens
-
-**Algorithms:** Transformer forward pass, RoPE/ALiBi, MHA/MQA/GQA/MLA, online softmax, MoE gating & routing, aux-loss-free balancing, Mamba-2/RWKV-7, GPTQ/AWQ/SmoothQuant, FP8/FP4/MXFP4 quantization, Transformer Engine
-
-**Training:** Data/tensor/pipeline/expert/sequence parallelism, AllReduce algorithms, NCCL internals, SHARP, FSDP/ZeRO-1/2/3, gradient checkpointing, mixed precision, fault tolerance, PPO/DPO/GRPO, reasoning models (o1/o3/R1), test-time compute
-
-**Inference:** KV cache memory math, PagedAttention, prefix caching, continuous batching, chunked prefill, speculative decoding (Medusa/EAGLE), prefill-decode disaggregation, long context (YaRN/NSA/MoBA), multimodal inference, vLLM/SGLang/TRT-LLM/Dynamo/llm-d internals, Kubernetes GPU orchestration, observability, production architecture
-
-**Interview:** System design walkthroughs (LLM API, training cluster, RAG, agent orchestrator), conceptual Q&A, CUDA kernel coding patterns, scheduler algorithms, capacity math
 
 ## License
 
