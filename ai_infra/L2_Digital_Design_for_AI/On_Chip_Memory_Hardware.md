@@ -72,7 +72,7 @@ Bandwidth grows ~10× per tier as you climb. The "bandwidth cliff" is what happe
 ```mermaid
 flowchart TB
     subgraph CELL["6T SRAM bitcell — two cross-coupled inverters + two access transistors"]
-        direction LR
+        direction TB
         WL[Wordline WL]:::wl
         BL[Bitline BL]:::bl
         BLB[Bitline BLB]:::bl

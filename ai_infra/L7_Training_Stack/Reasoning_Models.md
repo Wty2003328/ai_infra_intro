@@ -143,20 +143,20 @@ DeepSeek-R1 is the most thoroughly documented reasoning model. Its training has 
 ```mermaid
 flowchart TD
     subgraph STAGE1["Stage 1: Cold-Start SFT"]
-        direction LR
+        direction TB
         C1["~1K high-quality<br/>long-CoT examples<br/>(human curated + filtered)"]
         C1 --> SFT1["Supervised fine-tuning<br/>on V3 base<br/>~1--2 epochs"]
     end
 
     subgraph STAGE2["Stage 2: Long-CoT RL (GRPO)"]
-        direction LR
+        direction TB
         RL1["GRPO reinforcement learning<br/>on verifiable tasks<br/>(math, code, logic)"]
         RL1 --> RL2["Model learns to produce<br/>long reasoning traces<br/>(self-evolves to 10K+ tokens)"]
         RL2 --> RL3["Reject sampling +<br/>language consistency reward<br/>(prevent CoT language mixing)"]
     end
 
-    subgraph STAGE3["Stage 3: Distillation + Alignment"]
-        direction LR
+    subgraph STAGE3["Stage 3: Distill + Align"]
+        direction TB
         D1["RL-trained R1 as teacher"]
         D1 --> D2["Distill into smaller models<br/>(R1-Distill-Qwen-7B/14B/32B,<br/>R1-Distill-Llama-8B/70B)"]
         D2 --> D3["Optional: further RL on<br/>distilled models for<br/>quality refinement"]

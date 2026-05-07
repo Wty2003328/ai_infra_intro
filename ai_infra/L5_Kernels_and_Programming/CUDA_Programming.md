@@ -19,7 +19,7 @@ CUDA maps a C/C++ function onto a hierarchy of threads (grid $\to$ block $\to$ w
 ```mermaid
 flowchart TD
     subgraph GRID["Grid (kernel launch)"]
-        direction LR
+        direction TB
         subgraph B0["Block (0,0) — mapped to one SM"]
             W0["Warp 0<br/>threads 0–31"]:::warp
             W1["Warp 1<br/>threads 32–63"]:::warp

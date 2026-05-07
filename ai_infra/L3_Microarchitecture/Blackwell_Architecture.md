@@ -32,11 +32,11 @@ gantt
     section Blackwell
     B100 sample / DGX            :2024-04, 2024-12
     B200 mainstream              :2024-09, 2026-12
-    B300 (Ultra; 288 GB HBM3e)   :2025-Q1, 2026-Q4
+    B300 (Ultra; 288 GB HBM3e)   :2025-01, 2026-12
     section Rubin
-    R100 sampling                :2026-Q3, 2027-Q1
-    R100 production              :2027-Q1, 2028-12
-    R-Ultra                      :2027-Q4, 2029-Q4
+    R100 sampling                :2026-09, 2027-03
+    R100 production              :2027-03, 2028-12
+    R-Ultra                      :2027-12, 2029-12
 ```
 
 | Family | First ship | Process | Die config | HBM | TDP | Highlights |
@@ -65,8 +65,8 @@ flowchart TD
         H1[HBM 1]:::hbm
         H4[HBM 4]:::hbm
         H5[HBM 5]:::hbm
-        DA["Compute die A<br/>~144 SMs<br/>~800 mm²"]:::die
-        DB["Compute die B<br/>~144 SMs<br/>~800 mm²"]:::die
+        DA["Compute die A<br/>≈144 SMs<br/>≈800 mm²"]:::die
+        DB["Compute die B<br/>≈144 SMs<br/>≈800 mm²"]:::die
         H2[HBM 2]:::hbm
         H3[HBM 3]:::hbm
         H6[HBM 6]:::hbm

@@ -183,7 +183,7 @@ Spatial dataflow lays the *graph* of a neural network onto the physical mesh of 
 ```mermaid
 flowchart TD
     subgraph CHIP["Spatial dataflow on a mesh"]
-        direction LR
+        direction TB
         L0[Layer 0<br/>tiles 0..15<br/>weights resident]:::tile
         L1[Layer 1<br/>tiles 16..31<br/>weights resident]:::tile
         L2[Layer 2<br/>tiles 32..47]:::tile

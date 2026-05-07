@@ -104,7 +104,7 @@ This is a remarkable result: the ring AllReduce cost is *independent of $N$* for
 ```mermaid
 flowchart TD
     subgraph RS["Reduce-Scatter Phase (N−1 steps)"]
-        direction LR
+        direction TB
         R0S["Rank 0"] -->|"chunk (0−k) mod N"| R1S["Rank 1"]
         R1S --> R2S["Rank 2"]
         R2S --> R3S["Rank 3"]
@@ -112,7 +112,7 @@ flowchart TD
     end
 
     subgraph AG["All-Gather Phase (N−1 steps)"]
-        direction LR
+        direction TB
         R0A["Rank 0"] -->|"reduced chunk"| R1A["Rank 1"]
         R1A --> R2A["Rank 2"]
         R2A --> R3A["Rank 3"]
@@ -418,7 +418,7 @@ For $N = 32$: ratio $= 2 \times 31^2 / 33 \approx 58$. SHARP reduces network tra
 ```mermaid
 flowchart TB
     subgraph Without_SHARP["Without SHARP (Ring AllReduce)"]
-        direction LR
+        direction TB
         G0["GPU 0"] -->|"M/N"| G1["GPU 1"]
         G1 -->|"M/N"| G2["GPU 2"]
         G2 -->|"M/N"| G3["GPU 3"]

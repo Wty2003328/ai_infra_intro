@@ -43,7 +43,7 @@ flowchart TB
     subgraph CHIP["TPU v5p chip"]
         direction TB
         subgraph TC[1 × TensorCore]
-            direction LR
+            direction TB
             VMEM[VMEM<br/>~96 MB SRAM<br/>vector register-style]:::vmem
             MXU0["MXU 0<br/>128×128 systolic<br/>weight-stationary"]:::mxu
             MXU1[MXU 1<br/>128×128]:::mxu

@@ -74,17 +74,17 @@ Mooncake (Qin et al., 2024) extended disaggregation from a per-node or per-rack 
 ```mermaid
 flowchart TB
     subgraph Splitwise["Splitwise (ISCA 2024)"]
-        direction LR
+        direction TB
         SP["Prefill<br/>A100-80GB"] -->|"KV transfer"| SD["Decode<br/>A100-40GB"]
     end
 
     subgraph DistServe["DistServe (OSDI 2024)"]
-        direction LR
+        direction TB
         DP["Prefill replicas<br/>Same GPU type"] -->|"RDMA"| DD["Decode replicas<br/>Same GPU type"]
     end
 
     subgraph Sarathi["Sarathi-Serve (OSDI 2024)"]
-        direction LR
+        direction TB
         CB["Single pool<br/>Chunked prefill<br/>+ stall-free batching"]
     end
 

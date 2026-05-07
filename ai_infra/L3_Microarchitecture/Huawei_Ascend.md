@@ -42,7 +42,7 @@ Unlike NVIDIA's small-tile 2D tensor cores or TPU's large 2D MXU, DaVinci uses a
 
 ```mermaid
 flowchart TB
-    subgraph CUBE["DaVinci 3D Cube — 16×16×16 = 4 096 MACs<br/>(8 192 FLOPs/cycle at FP16)"]
+    subgraph CUBE["DaVinci 3D Cube · 16×16×16 = 4096 MACs · 8192 FLOPs/cycle FP16"]
         direction TB
         L0["Layer 0: 16×16 MAC plane"]:::layer
         L1["Layer 1: 16×16 MAC plane"]:::layer

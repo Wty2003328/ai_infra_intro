@@ -33,9 +33,9 @@ This page covers CDNA 3 (MI300X), CDNA 4 (MI355X), and the rack-scale Helios arc
 
 ```mermaid
 flowchart TB
-    subgraph PKG["MI300X package — 8 XCDs + 4 IODs on CoWoS-S"]
+    subgraph PKG["MI300X — 8 XCDs / 4 IODs / CoWoS-S"]
         direction TB
-        subgraph X[8 XCDs (compute, TSMC N5)]
+        subgraph X["8 XCDs (compute, TSMC N5)"]
             direction LR
             X0[XCD 0<br/>40 CUs]:::xcd
             X1[XCD 1<br/>40 CUs]:::xcd
@@ -46,7 +46,7 @@ flowchart TB
             X6[XCD 6]:::xcd
             X7[XCD 7]:::xcd
         end
-        subgraph I[4 IODs (I/O, TSMC N6)]
+        subgraph I["4 IODs (I/O, TSMC N6)"]
             direction LR
             I0["IOD 0<br/>2 HBM controllers<br/>+ Infinity Cache slice"]:::iod
             I1[IOD 1]:::iod
@@ -114,7 +114,7 @@ AMD's tensor-core equivalent. CDNA 3 supports FP16/BF16/INT8/FP8. CDNA 4 adds FP
 ```mermaid
 flowchart TD
     subgraph CU["CDNA-4 Compute Unit"]
-        direction LR
+        direction TB
         WS[Wavefront scheduler<br/>up to 10 wavefronts]:::sch
         VRF[VRF<br/>128 KB]:::rf
         SIMD0[SIMD0]:::simd

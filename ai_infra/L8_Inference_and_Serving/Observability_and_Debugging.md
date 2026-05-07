@@ -163,7 +163,7 @@ Nsight Systems (`nsys`) provides a system-wide timeline showing kernel launches,
 ```mermaid
 flowchart TB
     subgraph NSYS["Nsight Systems Timeline"]
-        direction LR
+        direction TB
         subgraph GPU0["GPU 0"]
             K1["GEMM kernel"]:::k
             G1["GPU idle gap"]:::gap
