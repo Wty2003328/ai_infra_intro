@@ -1,8 +1,8 @@
 # AI Infrastructure & Hardware Design Notebook
 
-A comprehensive, bottom-up technical reference covering the full AI infrastructure stack and digital IC design — from CMOS physics and silicon fabrication through GPU microarchitecture, CUDA kernels, transformer algorithms, distributed training, production LLM inference serving, CPU design, physical implementation, and SystemVerilog verification.
+A comprehensive, bottom-up technical reference covering the full AI infrastructure stack and digital IC design — from CMOS physics and silicon fabrication through GPU microarchitecture, CUDA kernels, transformer algorithms, distributed training, production LLM inference serving, RISC-V CPU design, out-of-order execution, cache hierarchy, DDR controllers, and SystemVerilog verification.
 
-**92 pages | 65,000+ lines | 240 Mermaid diagrams | LaTeX math throughout**
+**100 pages | 82,000+ lines | 240+ Mermaid diagrams | LaTeX math throughout**
 
 Built for senior-level interview preparation and professional reference. Target roles: LLM inference/serving engineer, GPU kernel/CUDA engineer, distributed training/MLSys engineer, RTL design engineer, physical design/STA engineer, verification engineer.
 
@@ -57,18 +57,18 @@ See [ai_infra/Index.md](ai_infra/Index.md) for the full page index and reading p
 
 ## Hardware Design (`hardware_design/`)
 
-27 pages organized in 6 thematic sections covering digital IC design from transistor physics through verification signoff.
+35 pages organized in 6 thematic sections covering digital IC design from transistor physics through verification signoff.
 
 | Section | Pages | Lines | Coverage |
 |---------|-------|-------|----------|
-| Fundamentals | 5 | ~5,669 | CMOS physics, fabrication, logic basics, adders, floating point |
-| Architecture | 3 | ~3,593 | CPU pipeline, memory design, AMBA bus protocols |
-| Implementation | 6 | ~8,009 | Synthesis, PnR, STA, DFT/ATPG, formal verification, IC packaging |
-| Clocking & Signals | 3 | ~4,827 | Clock dividers, async/CDC, signal integrity, reliability |
+| Fundamentals | 5 | ~5,769 | CMOS physics, fabrication, logic basics, adders, floating point |
+| Architecture | 11 | ~13,973 | RISC-V ISA, OoO execution, branch prediction, caches, TLB, Xiangshan, DDR, ACE/CHI, CPU, memory, AXI |
+| Implementation | 6 | ~8,920 | Synthesis, PnR, STA, DFT/ATPG, formal verification, IC packaging |
+| Clocking & Signals | 3 | ~4,328 | Clock dividers, async/CDC, signal integrity, reliability |
 | Power | 5 | ~5,697 | Power fundamentals, reduction, analysis/signoff, UPF, low-power design |
 | SystemVerilog | 5 | ~5,336 | Data types, processes, OOP, assertions/coverage, IPC/verification |
 
-**Topics:** MOSFET/FinFET physics, fab process (DUV/EUV), adder architectures, IEEE 754, 5-stage CPU pipeline, branch prediction, MESI coherence, AXI4/AHB/APB, SRAM/DRAM design, synthesis, place-and-route, static timing analysis (OCV/POCV), scan chains/ATPG, formal verification (LEC/model checking), async FIFOs, CDC, crosstalk/EM/IR drop, power gating/DVFS, UPF, SystemVerilog OOP/randomization, UVM-style testbench, SVA.
+**Topics:** RISC-V RV64G ISA (instruction encoding, privilege modes, Sv39/Sv48), out-of-order execution (ROB, issue queue, LSQ, rename, misprediction recovery), branch prediction (TAGE, gshare, perceptron, TAGE-SC as in Xiangshan), cache microarchitecture (MSHR, prefetch, MESI/MOESI), TLB and virtual memory (hardware page walker, VIPT), Xiangshan open-source RISC-V processor case study, DDR4/DDR5 memory controller, AMBA ACE/CHI coherence protocols, multi-port SRAM, register file design, ECC (SECDED), CAM/TCAM, AXI CDC bridges, TrustZone, AXI ATOP, MOSFET/FinFET physics, adder architectures, IEEE 754, synthesis, STA (OCV/POCV), DFT/ATPG, formal verification, async FIFOs, power gating/DVFS, UPF, SystemVerilog OOP/randomization, UVM, SVA.
 
 See [hardware_design/Index.md](hardware_design/Index.md) for the full page index and reading paths.
 
@@ -86,7 +86,11 @@ See [hardware_design/Index.md](hardware_design/Index.md) for the full page index
 
 ### Hardware Design
 
-**RTL design interview:** CMOS Fundamentals → Basic Knowledge → Adders → Floating Point → CPU Architecture → Synthesis → STA → SystemVerilog basics
+**CPU design / microarchitecture interview:** RISC-V ISA → CPU Architecture → OoO Execution → Branch Prediction Deep Dive → Cache Microarchitecture → TLB and Virtual Memory → Xiangshan CPU Design
+
+**Memory subsystem / SoC interconnect interview:** Memory → Cache Microarchitecture → TLB and Virtual Memory → DDR Controller → AHB/AXI/APB → ACE and CHI
+
+**RTL design interview:** CMOS Fundamentals → Basic Knowledge → Adders → Floating Point → CPU Architecture → RISC-V ISA → Synthesis → STA → SystemVerilog basics
 
 **Physical design / STA interview:** CMOS → Synthesis → Physical Design → STA → Signal Integrity → Power Analysis → Clock Division
 
