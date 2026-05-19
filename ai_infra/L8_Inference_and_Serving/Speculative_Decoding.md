@@ -184,13 +184,27 @@ flowchart TD
 2. Continue the forward pass through the remaining layers to produce target logits $p$.
 3. Apply standard rejection sampling with $p$ and $q$.
 
+**Determining the exit layer.** The exit layer $L_{\text{exit}}$ can be fixed or adaptive:
+
+- **Fixed exit**: set $L_{\text{exit}}$ at deployment time (e.g., layer 8 of 32). Simple but suboptimal across different input distributions. The fixed point is chosen by sweeping exit layers on a validation set and picking the one with the best acceptance rate $\times$ speedup product.
+- **Confidence-based adaptive exit**: at each step, compute the draft's confidence $c = \max_x q(x)$ after the exit head. If $c > \tau_{\text{high}}$, accept the draft token from this early layer. If $c < \tau_{\text{low}}$, reject and continue to the full model. If $\tau_{\text{low}} \le c \le \tau_{\text{high}}$, try the next exit layer (e.g., $L_{\text{exit}} + 4$).
+- **Entropy-based adaptive exit**: compute the entropy $H(q) = -\sum_x q(x) \log q(x)$. Low entropy ($H < \tau_H$) indicates high confidence; high entropy suggests the intermediate layer lacks enough information. Exit early when entropy is low.
+
+**Tradeoff in exit layer selection:**
+
+| $L_{\text{exit}}$ | Draft quality ($\alpha$) | Draft cost | Net speedup |
+|-----|-----|-----|-----|
+| Too low (e.g., 4 of 32) | Low ($\alpha \approx 0.3$) | Very low | Minimal (frequent rejections) |
+| Optimal (e.g., 8--12 of 32) | Moderate ($\alpha \approx 0.5$--$0.7$) | Low | $1.3$--$1.8\times$ |
+| Too high (e.g., 24 of 32) | High ($\alpha \approx 0.8$) | Nearly full model | Minimal (draft costs too much) |
+
 **Advantages:**
 - No separate model to load or manage.
 - Draft representation is an intermediate state of the target, so distributional alignment is often good.
 
 **Disadvantages:**
 - The "draft" is not free --- it still reads all weights up to layer $L_{\text{exit}}$.
-- Exit heads need training (or calibration) to align with the target distribution.
+- Exit heads need training (or calibration) to align with the target distribution. Training the exit head requires running the base model to layer $L_{\text{exit}}$, applying the head, and computing cross-entropy loss against the correct next token. This is a lightweight fine-tuning step (100--1000 steps) on representative data.
 - Intermediate layer representations may not contain enough information for reliable multi-step drafting.
 
 Early exit works best when $\alpha$ is high and $L_{\text{exit}}$ can be set low (e.g., exiting at layer 8 of a 32-layer model). Typical speedups: $1.3$--$1.8\times$.
@@ -228,15 +242,36 @@ $$\mathcal{L}_k = -\log p_k(x_{t+k+1} \mid h_t)$$
 
 The total auxiliary loss is $\mathcal{L}_{\text{Medusa}} = \sum_{k=1}^{K} \lambda_k \mathcal{L}_k$ with $\lambda_k$ typically $0.1$--$0.5$, added to the base LM loss during fine-tuning.
 
+**Joint training procedure:**
+
+1. **Initialize heads**: each Medusa head is initialized as a random linear layer from hidden dimension $D$ to vocabulary size $V$. Head 0 is the base model's existing LM head (already trained).
+2. **Fine-tuning data**: use the same corpus used to train the base model, or a representative dataset for the target domain (e.g., chat data for a chat model). No specialized data is needed.
+3. **Training loop**: for each training example, run the base model forward to produce hidden state $h_t$ at each position. Compute all $K$ Medusa head losses simultaneously. Backpropagate through the heads but **freeze the base model** (or use a low learning rate for the base to avoid catastrophic forgetting).
+4. **Loss weighting**: $\lambda_k$ decreases with $k$ because predictions further in the future are inherently harder and noisier. Typical: $\lambda_1 = 0.5$, $\lambda_2 = 0.3$, $\lambda_3 = 0.1$, etc. The base model's next-token loss has weight 1.0.
+5. **Training steps**: 1K--5K steps is typically sufficient because the heads are small ($\sim 5\%$ additional parameters) and the base model provides strong features.
+
+**Why heads are independent.** Each head $k$ predicts $x_{t+k+1}$ conditioned on $h_t$ alone, without seeing the predictions of other heads. This is a design choice for training simplicity and inference parallelism (all heads run in parallel on the same $h_t$). The cost: heads cannot model inter-token dependencies (Head 2 does not know what Head 1 predicted), which limits acceptance rate for multi-word phrases.
+
 ### 4.2 Tree Attention
 
 With $K$ heads and top-$k$ candidates per head, the naive Cartesian product yields $k^{K}$ paths --- far too many. Pruning keeps only the $T$ highest-confidence paths, forming a tree. Verification uses a **tree-attention mask**: each candidate position attends only to its ancestors in the tree plus the original context.
+
+**Tree construction from Medusa heads:**
+
+1. Head 0 (base LM head) produces top-$k$ candidates: $a_1, a_2, \ldots, a_k$ (for position $t+1$).
+2. Head 1 produces top-$k$ candidates: $b_1, b_2, \ldots, b_k$ (for position $t+2$).
+3. Head 2 produces top-$k$ candidates: $c_1, c_2, \ldots, c_k$ (for position $t+3$).
+4. Build paths greedily: take the top-$k$ from Head 0, then for each, append the top-$k$ from Head 1, etc. The raw tree has $k^K$ leaves.
+5. **Pruning**: assign each path a score = $\prod_{i} p_i(x_i)$ (product of head probabilities along the path). Keep only the top-$T$ paths (typical $T = 40$--$80$). Discard low-score branches.
+6. The pruned tree has at most $T$ leaf nodes, with shared prefixes where different paths agree on earlier tokens.
 
 For a tree with $T$ nodes, construct a $T \times T$ boolean mask:
 
 $$M[i, j] = \begin{cases} 1 & \text{if node } j \text{ is an ancestor of node } i \text{ (or } i = j\text{)} \\ 0 & \text{otherwise} \end{cases}$$
 
 This mask replaces the standard causal mask in the attention kernel. The KV cache stores entries for all $T$ tree positions during verification; after acceptance, only the accepted prefix is retained.
+
+**Tree attention kernel implementation.** The mask is passed as a block-sparse pattern to a modified FlashAttention kernel. Each tree node attends to (1) the original context tokens (shared by all nodes) and (2) its ancestor nodes in the tree (a variable-length set specific to each node). The kernel loads the shared context once and reuses it across all tree nodes, then loads ancestor KV per-node. The per-node ancestor set is typically 1--5 entries, so the additional attention cost per tree node is minimal.
 
 ### 4.3 Properties
 
@@ -286,11 +321,28 @@ It autoregressively predicts hidden states $\hat{h}_{t+1}, \hat{h}_{t+2}, \ldots
 
 Token-level drafters (including Medusa) suffer from **cascading error**: a wrong draft token feeds into the next step, compounding the mistake. Feature-level drafting mitigates this because:
 
-1. **Hidden states carry richer information** than discrete tokens. Two different tokens can have similar hidden states if they are semantically close; the draft head can exploit this continuity.
-2. **The autoregressive draft head conditions on features, not tokens.** Even if token $\hat{x}_{t+1}$ is wrong, $\hat{h}_{t+1}$ may still be close to the true hidden state, so subsequent predictions stay on track.
-3. **Shared LM head provides exact calibration.** The draft logits come from the same projection the target uses, reducing the $p/q$ distribution gap.
+1. **Hidden states carry richer information** than discrete tokens. Two different tokens can have similar hidden states if they are semantically close; the draft head can exploit this continuity. A hidden state $\hat{h}_{t+1}$ that is "close" to the true $h_{t+1}$ in $L_2$ distance can still produce a correct or near-correct token via the shared LM head.
+2. **The autoregressive draft head conditions on features, not tokens.** Even if token $\hat{x}_{t+1}$ is wrong, $\hat{h}_{t+1}$ may still be close to the true hidden state, so subsequent predictions stay on track. The error does not compound as severely because the feature space is continuous -- a small perturbation in $\hat{h}$ produces a small perturbation in the output distribution, unlike a wrong discrete token which completely misroutes the next step.
+3. **Shared LM head provides exact calibration.** The draft logits come from the same projection the target uses, reducing the $p/q$ distribution gap. The KL divergence $D_{\text{KL}}(p \| q)$ is inherently lower when both distributions are produced by the same unembedding matrix.
+4. **Error recovery in feature space.** The draft head is trained to predict $\hat{h}_{t+1}$ given $(\hat{h}_t, \text{embed}(\hat{x}_{t+1}))$. If $\hat{x}_{t+1}$ is wrong, the embedding $\text{embed}(\hat{x}_{t+1})$ is still a valid input to the draft head (it is a real token embedding), and the draft head has been trained on noisy inputs during training. This makes the draft head robust to occasional token-level mistakes.
 
-### 5.3 EAGLE-2: Dynamic Tree Drafting
+**Quantitative advantage.** The acceptance rate for EAGLE is typically $0.85$--$0.92$ vs. $0.70$--$0.85$ for Medusa, because the feature-level draft distribution $q$ is closer to the target $p$ in total variation distance. The reduction in $\|p - q\|_1$ directly translates to higher acceptance per position:
+
+$$\alpha_{\text{EAGLE}} - \alpha_{\text{Medusa}} \approx 0.10\text{--}0.15$$
+
+Over $\gamma = 5$ draft tokens, this yields $\mathbb{E}[\text{tokens}]_{\text{EAGLE}} \approx 4.5$ vs. $\mathbb{E}[\text{tokens}]_{\text{Medusa}} \approx 3.5$, a $28\%$ improvement in tokens per step.
+
+### 5.3 EAGLE training
+
+The draft head is a lightweight transformer (1--2 layers, hidden dimension $D$) trained jointly with the base model:
+
+1. **Input features**: at each training step, collect $(h_t, \text{embed}(x_{t+1}))$ from the target model's forward pass. The draft head takes the concatenation $[h_t; \text{embed}(x_{t+1})]$ as input.
+2. **Target**: the target model's hidden state at position $t+1$: $h_{t+1}$.
+3. **Loss**: MSE loss on the predicted hidden state: $\mathcal{L} = \|f(h_t, \text{embed}(x_{t+1})) - h_{t+1}\|_2^2$.
+4. **Autoregressive rollout during training**: to simulate inference conditions, the draft head's own predictions are used as input during a fraction of training steps (scheduled sampling). This trains the head to be robust to its own prediction errors.
+5. **Training cost**: 1K--3K steps on representative data, using the base model as a frozen feature extractor. The draft head has $\sim 2\%$ additional parameters.
+
+### 5.4 EAGLE-2: Dynamic Tree Drafting
 
 EAGLE-2 adds **adaptive tree expansion**. Instead of drafting a fixed-length sequence, the draft head produces a tree whose shape depends on per-position confidence:
 
@@ -299,13 +351,13 @@ EAGLE-2 adds **adaptive tree expansion**. Instead of drafting a fixed-length seq
 3. Low-confidence branches ($c_i < \tau_{\text{low}}$) are pruned.
 4. The resulting tree is verified in one forward pass using tree attention.
 
-The dynamic tree hedges against uncertainty: it allocates verification budget where the draft is confident (likely to accept long prefixes) and avoids wasting compute on unlikely paths.
+The dynamic tree hedges against uncertainty: it allocates verification budget where the draft is confident (likely to accept long prefixes) and avoids wasting compute on unlikely paths. The tree-building strategy uses a priority queue: start with the top-$k$ candidates at position $t+1$, expand the highest-confidence leaf node, repeat until the tree reaches a maximum size $T$ (typically 40--80 nodes). This is a best-first search in confidence space.
 
-### 5.4 EAGLE-3: Multi-Layer Feature Fusion
+### 5.5 EAGLE-3: Multi-Layer Feature Fusion
 
 EAGLE-3 fuses hidden states from multiple target model layers via a cross-layer attention mechanism. The intuition is that lower layers capture syntactic patterns while higher layers capture semantic content; combining them produces richer draft features. Reported acceptance rates: $0.88$--$0.95$.
 
-### 5.5 Properties
+### 5.6 Properties
 
 | Property | Value |
 |----------|-------|

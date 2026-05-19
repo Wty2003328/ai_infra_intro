@@ -207,11 +207,59 @@ For each MoE layer and expert $i$, maintain a bias $b_i$ initialized to zero. Af
 
 Here $\gamma \in [0.01, 0.05]$. Overloaded experts get $b_i$ decreased; underloaded experts get $b_i$ increased.
 
-### 4.3 Why sigmoid (not softmax) is required
+### 4.3 EMA-based bias and training vs inference behavior
+
+The bias $b_i$ is updated using an **exponential moving average (EMA)** of the expert load deviation, not the raw per-batch load. This smooths the control signal and prevents oscillation:
+
+$$
+b_i \leftarrow b_i + \gamma \cdot \mathrm{sign}(\bar{\ell} - \hat{\ell}_i), \quad \text{where } \hat{\ell}_i = \rho \cdot \hat{\ell}_i + (1 - \rho) \cdot \ell_i
+$$
+
+with EMA decay $\rho = 0.99$ (typical). This means the bias reacts to *persistent* load imbalance, not transient fluctuations. A single batch where expert $i$ is overloaded does not significantly change $b_i$; only sustained imbalance moves the bias.
+
+**Critical: bias is added to router logits during training but NOT during inference.** During training, the bias $b_i$ is added to the sigmoid gate logits: $g_i(x) = \sigma((W_g)_i \cdot x + b_i)$. This steers token routing toward underloaded experts. During inference, $b_i$ is set to zero — the routing decision uses only the learned router weights $(W_g)_i \cdot x$, with no bias. This is a deliberate design choice:
+
+**Worked example of the bias update.** Consider $E = 8$ experts, $k = 2$, batch size $N = 128$ tokens. Target load per expert: $\bar{\ell} = Nk/E = 128 \times 2 / 8 = 32$ tokens per expert. EMA decay $\rho = 0.99$, step size $\gamma = 0.01$.
+
+Suppose actual loads for batch $t$ are: $\ell = [28, 35, 31, 30, 40, 25, 33, 26]$. Expert 4 is overloaded (40 vs target 32), expert 5 is underloaded (25 vs target 32).
+
+**EMA update** (assuming $\hat{\ell}_i$ was previously at the target 32 for all experts):
+
+$$
+\hat{\ell}_4^{(t)} = 0.99 \times 32 + 0.01 \times 40 = 31.68 + 0.40 = 32.08
+$$
+
+$$
+\hat{\ell}_5^{(t)} = 0.99 \times 32 + 0.01 \times 25 = 31.68 + 0.25 = 31.93
+$$
+
+**Bias update:**
+
+$$
+b_4 \leftarrow b_4 + 0.01 \times \mathrm{sign}(32 - 32.08) = b_4 + 0.01 \times (-1) = b_4 - 0.01
+$$
+
+$$
+b_5 \leftarrow b_5 + 0.01 \times \mathrm{sign}(32 - 31.93) = b_5 + 0.01 \times (+1) = b_5 + 0.01
+$$
+
+Expert 4's bias decreases (discouraging future tokens from routing there), expert 5's bias increases (encouraging routing). After 100 batches of sustained imbalance, $b_4 \approx -0.5$ and $b_5 \approx +0.5$. With sigmoid gating, this shifts selection probability by $\sigma(z - 0.5)$ vs $\sigma(z + 0.5)$ — a significant routing correction without any gradient-based training.
+
+At inference time: $b_i = 0$ for all $i$. The routing uses only the learned $(W_g)_i \cdot x$, which has been trained under the bias-corrected routing distribution. The model has learned to route well without the bias, because during training the bias was small ($\sim 0.5$) and the router weights adapted to the corrected distribution.
+
+1. **Why no bias at inference?** The bias is a training-time load-balancing mechanism. At inference, there is only one request at a time (or a small batch), and load balance across experts is not relevant — each token is routed to whichever expert the learned gate prefers. The bias would distort the routing quality without any load-balancing benefit.
+
+2. **Why removing aux loss improves model quality.** With auxiliary loss $\mathcal{L}_{\text{aux}}$, the training objective is $\mathcal{L}_{\text{task}} + \alpha \cdot \mathcal{L}_{\text{aux}}$. The $\mathcal{L}_{\text{aux}}$ term penalizes any deviation from uniform routing, which means the model is incentivized to route tokens equally across experts — even when the task-optimal routing is highly non-uniform. This creates a direct quality load-balance tradeoff.
+
+With bias-based balancing, the training objective is purely $\mathcal{L}_{\text{task}}$ — the model is free to route tokens to whichever experts maximize task performance, without any penalty for imbalance. The bias controller operates outside the gradient computation (it is not a loss term), so it does not interfere with the model's learned routing preferences. The model learns the optimal routing; the bias nudges it slightly toward balance during training; and at inference, the nudges are removed, leaving pure quality-optimized routing.
+
+DeepSeek V3 reports that aux-loss-free balancing with sigmoid gating achieves the same perplexity as the unconstrained model (no balancing at all), while maintaining load balance factor (max load / mean load) $< 1.05$. This is the key architectural innovation that enables V3's quality at 671 B scale — without it, the auxiliary loss would degrade perplexity by 0.2--0.5 points.
+
+### 4.4 Why sigmoid (not softmax) is required
 
 With softmax, adding a bias $b_i$ to expert $i$'s logit changes every expert's probability (normalization couples them), making per-expert control unstable. Sigmoid decouples experts: adjusting $b_i$ changes only $P(i \in \text{Top}_k)$ without affecting others' rankings. Since $\sigma$ is monotone, increasing $b_i$ raises the selection probability for expert $i$ across all tokens — a simple, stable control loop.
 
-### 4.4 Results
+### 4.5 Results
 
 DeepSeek V3 reports that aux-loss-free balancing achieves comparable load balance to $\alpha = 0.01$ auxiliary loss, but with **no degradation in model quality** — the bias update is invisible to the training loss gradient. This is one of the key architectural innovations enabling V3's quality at scale.
 
@@ -347,7 +395,85 @@ DeepSeek's DeepEP kernel (open-sourced 2025) optimizes the MoE all-to-all for NV
 
 DeepEP reports ~1.6× speedup over naive NCCL all-to-all for MoE workloads at $P = 72$.
 
-### 7.4 NVL72 and Helios as MoE machines
+### 7.4 DeepEP dual-kernel design — low-latency vs normal-throughput
+
+DeepEP provides two distinct communication kernels optimized for different MoE serving scenarios:
+
+**Low-latency kernel (for decode / small batch):**
+- Optimized for minimum latency, not throughput.
+- Uses a direct RDMA-based dispatch that bypasses NCCL's collective framework.
+- Each GPU directly writes dispatched tokens to the target GPU's receive buffer via NVLink, without going through a shared buffer.
+- Latency: $\approx 15$--$20\,\mu\text{s}$ per all-to-all at $P = 72$ (vs $\approx 50\,\mu\text{s}$ for NCCL-based).
+- Tradeoff: lower throughput (only $\approx 60\%$ link utilization) because the direct-write pattern cannot saturate all NVLink ports simultaneously.
+
+**Normal-throughput kernel (for prefill / training / large batch):**
+- Optimized for maximum bandwidth utilization.
+- Uses the chunked dispatch strategy described above: tokens are grouped into fixed-size chunks, and the all-to-all is decomposed into a series of synchronized NVLink transfers.
+- Throughput: $> 90\%$ of peak NVLink bandwidth.
+- Tradeoff: higher latency ($\approx 40$--$60\,\mu\text{s}$) due to synchronization overhead.
+
+**When to use which:** During decode (batch size 1--8, small token count), the all-to-all latency dominates the MoE layer time, so the low-latency kernel is preferred. During prefill or training (batch size 64+, large token count), the all-to-all throughput matters more, so the normal-throughput kernel is used. DeepEP auto-selects based on token count per expert.
+
+### 7.5 Communication volume formula — Detailed
+
+The total communication volume for expert parallelism over $P$ GPUs with $E$ routed experts, $k$ selections per token, and batch of $N$ tokens is:
+
+$$
+V_{\text{total}} = \underbrace{N \cdot d \cdot k \cdot (P-1)/P}_{\text{dispatch}} + \underbrace{N \cdot d \cdot k \cdot (P-1)/P}_{\text{gather}} = 2 \cdot N \cdot d \cdot k \cdot \frac{P-1}{P}
+$$
+
+This is per MoE layer. The $(P-1)/P$ factor accounts for local experts — tokens routed to an expert on the same GPU do not traverse the network.
+
+**Key scaling properties:**
+1. **Linear in batch size $N$**: more tokens means more data to route. This is why MoE prefill is communication-intensive.
+2. **Linear in hidden dim $d$**: each token sends its full hidden representation. This is fundamental — you cannot compress the token representation without losing information.
+3. **Linear in $k$**: each token routes to $k$ experts, so each token generates $k$ dispatch messages.
+4. **Sub-linear in $P$**: the $(P-1)/P$ factor approaches 1 as $P$ grows, meaning nearly all tokens must be sent over the network at large scale.
+
+The factor of 2 (dispatch + gather) means every token's hidden vector traverses the network twice per MoE layer — once to reach its expert, once to return the result. For DeepSeek V3 with 61 MoE layers: $2 \times 61 = 122$ network traversals per forward pass.
+
+### 7.6 Worked Example — Token Dispatch and Gather on Expert Parallelism
+
+Consider a simplified setup: $P = 4$ GPUs, $E = 8$ routed experts (2 per GPU), $k = 2$, $d = 4$, batch of $N = 4$ tokens.
+
+**Expert placement:**
+- GPU 0: experts 0, 1
+- GPU 1: experts 2, 3
+- GPU 2: experts 4, 5
+- GPU 3: experts 6, 7
+
+**Routing decisions** (top-2 per token):
+| Token | Selected experts | Destination GPUs |
+|---|---|---|
+| $t_0$ | 1, 5 | GPU 0, GPU 2 |
+| $t_1$ | 2, 7 | GPU 1, GPU 3 |
+| $t_2$ | 0, 3 | GPU 0, GPU 1 |
+| $t_3$ | 5, 6 | GPU 2, GPU 3 |
+
+**Dispatch (all-to-all):** Each GPU sends its tokens to the GPUs hosting their selected experts.
+
+| Source GPU | Tokens held | Sends to GPU 0 | Sends to GPU 1 | Sends to GPU 2 | Sends to GPU 3 |
+|---|---|---|---|---|---|
+| GPU 0 | $t_0, t_1$ | $t_0$ (expert 1) | $t_1$ (expert 2) | $t_0$ (expert 5) | $t_1$ (expert 7) |
+| GPU 1 | $t_2$ | $t_2$ (expert 0) | $t_2$ (expert 3) | — | — |
+| GPU 2 | $t_3$ | — | — | $t_3$ (expert 5) | $t_3$ (expert 6) |
+| GPU 3 | — | — | — | — | — |
+
+Communication volume (dispatch): each token sends $d = 4$ floats to $k = 2$ GPUs. Total data: $4 \times 4 \times 2 \times (P-1)/P = 32 \times 3/4 = 24$ floats = 96 bytes (FP32). With FP8: 24 bytes.
+
+**Local expert computation:** After dispatch, each GPU processes the received tokens through its local experts:
+- GPU 0: $t_0$ through expert 1, $t_2$ through expert 0
+- GPU 1: $t_1$ through expert 2, $t_2$ through expert 3
+- GPU 2: $t_0$ through expert 5, $t_3$ through expert 5
+- GPU 3: $t_1$ through expert 7, $t_3$ through expert 6
+
+**Gather (all-to-all, reverse):** Each GPU returns expert outputs to the originating GPU. Same communication volume as dispatch.
+
+**Total communication per MoE layer:** $2 \times N \times d \times k \times (P-1)/P = 2 \times 4 \times 4 \times 2 \times 0.75 = 48$ floats $= 192$ bytes (FP32).
+
+Scaling to DeepSeek V3: $N = 4096$, $d = 7168$, $k = 8$, $P = 72$, per layer: $2 \times 4096 \times 7168 \times 8 \times 71/72 = 46.1$ M floats $= 46.1$ MB (FP8).
+
+### 7.6 NVL72 and Helios as MoE machines
 
 NVL72 (72 GB200 GPUs fully connected via NVLink-5) is architecturally optimized for MoE:
 
@@ -384,6 +510,42 @@ At $C_f = 1.0$: the bound is vacuous — drops are guaranteed. At $C_f = 1.5$: $
 ### 8.3 The tradeoff
 
 Higher $C_f$ reduces drops but wastes memory. At $C_f = 1.5$ on NVL72 with FP8: buffer per GPU per layer $\approx 4.6$ MB. Over 61 layers $\times$ 2 buffers = 560 MB — manageable against 192 GB HBM. DeepSeek V3 uses $C_f = 1.0$ (no drops, perfect balance). Mixtral uses $C_f = 1.25$. GShard used $C_f = 1.5$.
+
+### 8.4 Load balancing at serving time — dynamic capacity, token dropping, and expert replication
+
+During inference (serving), load balancing takes a different character than during training:
+
+**Dynamic capacity factor.** At serving time, batch composition changes every step as new requests arrive and old ones complete. The load per expert varies unpredictably. Production systems use a *dynamic* capacity factor that adjusts per-step:
+
+$$
+C_f^{(t)} = \max\!\left(1.0,\; \frac{\max_i \ell_i^{(t)}}{N \cdot k / P}\right)
+$$
+
+where $\ell_i^{(t)}$ is the actual load on GPU $i$ at step $t$. When an expert is overloaded, $C_f$ increases to accommodate the excess. When load is balanced, $C_f = 1.0$.
+
+**Worked example: token dropping and expert overload.** Consider DeepSeek V3 serving on $P = 8$ GPUs, $E = 256$ routed experts, $k = 8$, batch $N = 256$ tokens. Each GPU hosts $256/8 = 32$ experts. Expected tokens per GPU: $256 \times 8 / 8 = 256$.
+
+With $C_f = 1.0$: buffer capacity per GPU = 256 tokens. If GPU 3 receives 300 tokens (because its experts are popular for the current batch), 44 tokens are dropped — their expert computation is skipped. The output for those tokens uses only the remaining $k - d$ experts (where $d$ is the number of drops for that token).
+
+With DeepSeek V3's near-perfect balance (load imbalance factor $< 1.05$), the maximum load per GPU is $\leq 256 \times 1.05 = 269$. At $C_f = 1.1$ (modest padding): buffer = 282, and no tokens are dropped.
+
+For a code-generation workload where expert 37 (say, a Python-syntax specialist) is selected by 20% of tokens instead of the expected $8/256 = 3.1\%$:
+- Expert 37's GPU receives $256 \times 20\% / k \times k = 51$ tokens for expert 37 alone, plus tokens for its other 31 experts.
+- Without replication: this GPU is overloaded.
+- With expert 37 replicated on GPU 5: tokens for expert 37 are split round-robin between GPU 3 and GPU 5. Each gets $\approx 26$ tokens for expert 37. Load rebalanced.
+
+**Token dropping quality impact.**
+
+- **Training:** Token dropping during training is catastrophic — it creates a train/serve mismatch and prevents gradient flow. All production MoE models avoid drops during training via proper balancing.
+- **Inference:** Occasional drops ($< 1\%$ of tokens) have minimal quality impact because the shared expert still processes every token. The shared expert provides a "floor" of computation that prevents any token from receiving zero expert output.
+
+**Expert replication across GPUs.** For frequently-selected experts (hot experts), production systems replicate the expert's weights on multiple GPUs. This reduces the load per GPU for that expert and decreases the probability of token dropping:
+
+1. **Identify hot experts:** Track routing frequency over a moving window. Experts consistently receiving $> 1.5 \times$ the expected load are candidates for replication.
+2. **Replicate:** Copy the expert's FFN weights to an additional GPU. The routing is then split between the original and replica (round-robin or least-loaded).
+3. **Memory cost:** Each expert replica adds $2 d \cdot d_{\text{ff,r}}$ parameters in memory. For DeepSeek V3: $2 \times 7168 \times 1792 \approx 25.7$ MB per expert replica — negligible against the 192 GB per GPU.
+
+In practice, expert replication is used only for the top 2--3 most popular experts, and only during peak load periods. The bias-based balancing in DeepSeek V3 reduces the need for replication by achieving near-perfect balance, but some workloads (e.g., code generation where certain expert specializations are disproportionately useful) still benefit from targeted replication.
 
 ---
 

@@ -156,9 +156,93 @@ For a 70B-parameter model on $N_{\mathrm{DP}} = 64$ DP ranks:
 
 ZeRO-3 at 64 DP ranks brings the per-GPU memory to 17.5 GB — trivially fitting in 80 GB HBM with room for activations, CUDA context, and temporary buffers. Adding activation memory (~10 GB without recomputation, ~0.3 GB with) gives total per-GPU memory of 17.8–27.5 GB, well within the 80 GB budget.
 
+### 2.7 ZeRO stages worked example: 70B on 8 GPUs
+
+A senior engineer should be able to compute these numbers from memory. For a 70B-parameter model ($P = 70 \times 10^9$) trained in mixed-precision BF16 with AdamW, the per-parameter cost is 16 bytes. On $N_{\mathrm{DP}} = 8$ DP ranks:
+
+**DDP (ZeRO-0) — every rank holds everything:**
+
+$$M_{\text{DDP}} = 16P = 16 \times 70 = 1{,}120 \;\text{GB per GPU}$$
+
+Breakdown: 140 GB params (BF16) + 140 GB grads (BF16) + 280 GB master params (FP32) + 280 GB Adam $m$ (FP32) + 280 GB Adam $v$ (FP32). Does not fit on any GPU. With 8 H100s, total cluster memory is $8 \times 80 = 640$ GB — only 57% of the requirement. You need at least 14 GPUs just for state.
+
+**ZeRO-1 — shard optimizer states only:**
+
+$$M_{\text{ZeRO-1}} = 4P + \frac{12P}{N} = 4 \times 70 + \frac{12 \times 70}{8} = 280 + 105 = 385 \;\text{GB per GPU}$$
+
+Breakdown: 140 GB params (full) + 140 GB grads (full) + 35 GB master params shard + 35 GB Adam $m$ shard + 35 GB Adam $v$ shard. Still does not fit on 80 GB. ZeRO-1 alone is insufficient for 70B on 8 GPUs.
+
+**ZeRO-2 — shard optimizer states and gradients:**
+
+$$M_{\text{ZeRO-2}} = 2P + \frac{14P}{N} = 2 \times 70 + \frac{14 \times 70}{8} = 140 + 122.5 = 262.5 \;\text{GB per GPU}$$
+
+Breakdown: 140 GB params (full) + 17.5 GB grad shard + 35 GB master params shard + 35 GB Adam $m$ shard + 35 GB Adam $v$ shard. Still 3.3x the HBM budget. ZeRO-2 alone is also insufficient for 70B on 8 GPUs.
+
+**ZeRO-3 — shard everything:**
+
+$$M_{\text{ZeRO-3}} = \frac{16P}{N} = \frac{16 \times 70}{8} = 140 \;\text{GB per GPU}$$
+
+Breakdown: 17.5 GB param shard + 17.5 GB grad shard + 35 GB master params shard + 35 GB Adam $m$ shard + 35 GB Adam $v$ shard. Still exceeds 80 GB. Even ZeRO-3 on 8 GPUs is not enough for 70B when activations are included.
+
+**Conclusion for 70B:** The minimum practical configuration is ZeRO-3 with $N_{\mathrm{DP}} \geq 16$, giving $16 \times 70 / 16 = 70$ GB plus ~5 GB activations = 75 GB (tight fit on 80 GB). A comfortable fit requires $N_{\mathrm{DP}} \geq 32$ (35 GB state + 5 GB activations = 40 GB). Alternatively, combine TP=8 with ZeRO-3: TP=8 already reduces weights to 17.5 GB, and ZeRO-3 across DP=4 (32 GPUs total) gives $16 \times 70 / (8 \times 4) = 35$ GB total state per GPU — comfortable.
+
+| ZeRO Stage | Formula | Memory/GPU (70B, N=8) | Fits 80 GB? |
+|---|---|---|---|
+| DDP (ZeRO-0) | $16P$ | 1,120 GB | No (14:1 oversubscribed) |
+| ZeRO-1 | $4P + 12P/N$ | 385 GB | No (4.8:1 oversubscribed) |
+| ZeRO-2 | $2P + 14P/N$ | 262.5 GB | No (3.3:1 oversubscribed) |
+| ZeRO-3 | $16P/N$ | 140 GB | No (1.75:1 oversubscribed) |
+| ZeRO-3, N=16 | $16P/16$ | 70 GB | Barely (with activation recomp) |
+| ZeRO-3, N=32 | $16P/32$ | 35 GB | Yes (comfortable) |
+| TP=8 + ZeRO-3, N=32 | $16P/(8 \times 4)$ | 35 GB | Yes |
+
 ---
 
 ## 3. FSDP mechanics — how ZeRO-3 is implemented
+
+### 3.0 FSDP detailed dataflow with concrete numbers
+
+FSDP wraps each `nn.Module` (typically each transformer layer). When a module is wrapped, its parameters are flattened and partitioned into $N_{\mathrm{DP}}$ equal shards. Here is the exact dataflow for a single training step on a 70B model with $N_{\mathrm{DP}} = 64$, FP8 forward/BF16 optimizer, sequence parallelism off:
+
+**Per-layer parameter budget.** Each transformer layer of a 70B model ($L = 80$ layers) has approximately $70\text{B} / 80 = 875\text{M}$ parameters. In BF16, each layer's weight tensor is $2 \times 875\text{M} = 1.75$ GB. Each rank holds a shard of $1.75 / 64 = 27.3$ MB per layer.
+
+**Forward pass, layer $i$:**
+
+1. **All-gather parameters:** Before the forward computation of layer $i$, each rank contributes its 27.3 MB shard. The all-gather reconstructs the full 1.75 GB parameter tensor on every rank. The all-gather volume per rank: $(N-1)/N \times 1.75\text{ GB} \approx 1.72$ GB received.
+
+2. **Compute:** The forward computation for layer $i$ executes against the full parameter tensor. FLOPs per layer: $\approx 2 \times 875\text{M} \times B \times S = 2 \times 875\text{M} \times 64 \times 4096 \approx 460$ GFLOPs per microbatch. At 990 TFLOPS (H100 FP16): ~0.47 ms per rank.
+
+3. **Free:** Immediately after the layer completes, the gathered parameters are freed. Only the 27.3 MB local shard remains in memory.
+
+**Backward pass, layer $i$ (in reverse order):**
+
+1. **All-gather parameters:** Same as forward — reconstruct full 1.75 GB.
+
+2. **Compute gradients:** $\nabla_{W_i} \mathcal{L}$ computed against the full parameter set. Backward FLOPs are ~2x forward: ~0.94 ms per rank.
+
+3. **Reduce-scatter gradients:** The gradient tensor (1.75 GB in BF16) is reduce-scattered across all 64 ranks. Each rank receives its 27.3 MB gradient shard. Volume per rank: $(N-1)/N \times 1.75\text{ GB} \approx 1.72$ GB sent. The reduce-scatter simultaneously sums gradient contributions from all ranks and partitions the result.
+
+4. **Free:** Discard full parameters and full gradients. Only the 27.3 MB gradient shard is accumulated.
+
+5. **Optimizer step (delayed):** Each rank updates its local shard of FP32 master parameters, Adam $m$ and $v$ moments. The optimizer shard per rank: $(4+4+4) \times 875\text{M} / 64 \approx 41$ MB per layer. This happens after all layers complete backward.
+
+**Memory timeline for a single rank during one step:**
+
+| Phase | In-memory state | Peak memory |
+|---|---|---|
+| Before forward | All 80 layer param shards (27.3 MB each) + all optimizer shards (41 MB each) | $80 \times (27.3 + 41) = 5.46$ GB |
+| Forward layer $i$ | + full params for layer $i$ (1.75 GB) + activations for layer $i$ (~0.13 GB with recomp) | 5.46 + 1.75 + 0.13 = 7.34 GB |
+| Between layers | Activations accumulate; gathered params freed | ~5.5 GB + cumulative activations |
+| Backward layer $i$ | + full params (1.75 GB) + full grads (1.75 GB) briefly | Peak ~9 GB |
+| After backward | Only shards remain + gradient shards | $80 \times (27.3 + 27.3 + 41) = 7.65$ GB |
+
+At no point does any single rank hold more than ~10 GB — well under 80 GB HBM.
+
+**Total communication per step:**
+
+$$V_{\text{FSDP}} = \underbrace{80 \times 1.72 \;\text{GB}}_{\text{fwd all-gather}} + \underbrace{80 \times 1.72 \;\text{GB}}_{\text{bwd all-gather}} + \underbrace{80 \times 1.72 \;\text{GB}}_{\text{bwd reduce-scatter}} = 413 \;\text{GB per rank per step}$$
+
+Compare to DDP's single all-reduce: $2 \times 140 = 280$ GB. FSDP moves 47% more bytes, but the communication is spread across the forward and backward passes and overlapped with compute (Section 3.3). The effective blocking time is much lower than DDP's monolithic all-reduce.
 
 ### 3.1 Module wrapping and sharding
 
@@ -346,6 +430,17 @@ On restore, each rank reads only its own shard. This eliminates the need for any
 
 **Resharding.** If the world size changes between save and restore (elastic training, different cluster), a reshard utility re-partitions the checkpoint. The metadata file contains enough information to reconstruct the full parameter set on a single node and re-shard.
 
+**Resharding in detail.** Consider a 70B model saved with ZeRO-3 on $N_{\text{save}} = 64$ ranks and restored on $N_{\text{restore}} = 128$ ranks. Each saved shard covers $P / 64 = 1.09\text{B}$ parameters. The resharding process:
+
+1. Each new rank reads the metadata file to determine the original sharding layout.
+2. Each new rank identifies which original shard(s) contain its portion of the parameter space. With $N_{\text{save}} = 64$ and $N_{\text{restore}} = 128$, each new rank needs half of one original shard.
+3. Ranks coordinate via a shared filesystem or object store. Rank $i$ of the new world reads the relevant portion of the original shard(s), extracts its $P / 128 = 547\text{M}$ parameters, and constructs its local optimizer state (initializing Adam moments to zero for the portion it newly owns, or reading them if the checkpoint includes per-shard optimizer state).
+4. If optimizer state was checkpointed per-shard, the reshard utility must split or merge Adam $m_t$ and $v_t$ tensors. For a split (64 -> 128), each original shard's optimizer state is sliced in half. For a merge (128 -> 64), two shards' optimizer states are concatenated.
+
+The resharding time is dominated by I/O, not compute. For a 70B model with 1.12 TB of checkpoint data on NVMe at 5 GB/s per rank: $1.12\text{ TB} / (128 \times 5\text{ GB/s}) \approx 1.75$ seconds. On S3 at 1 GB/s per rank: ~8.75 seconds. PyTorch's `torch.distributed.checkpoint` utilities handle this automatically via `reshard` APIs.
+
+**Sharded checkpoint on different GPU counts.** A practical concern: can I save on 64 GPUs and resume on 48? Yes, but the resharding logic must handle non-divisor relationships. If $N_{\text{save}} = 64$ and $N_{\text{restore}} = 48$, each new rank needs parameters from $\lceil 64/48 \rceil = 2$ original shards (with partial reads). The metadata file maps new rank IDs to original shard ranges. PyTorch DCP handles this; custom checkpoint formats may not.
+
 ---
 
 ## 5. Fault tolerance
@@ -412,7 +507,64 @@ Elastic training adjusts the parallelism configuration when the number of availa
 - **Learning rate:** the per-step learning rate depends on the global batch size, which depends on $N_{\mathrm{DP}}$. When $N_{\mathrm{DP}}$ changes, the learning rate schedule must be adjusted.
 - **Gradient accumulation:** if $N_{\mathrm{DP}}$ decreases, gradient accumulation steps must increase to maintain the same effective batch size.
 
-PyTorch Elastic (torchrun) provides the infrastructure for dynamic world size management, re-spawning worker processes, and rendezvous on the new configuration.
+**torchrun — how RANK/WORLD_SIZE are reassigned:**
+
+PyTorch Elastic (`torchrun`) provides the infrastructure for dynamic world size management. The key mechanism:
+
+1. **Rendezvous:** When a failure is detected (or a new node joins), `torchrun` triggers a rendezvous. All surviving workers reach a barrier. The rendezvous assigns new `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, and `MASTER_ADDR`/`MASTER_PORT` environment variables.
+
+2. **Rank reassignment example:** Suppose 8 workers (RANK 0-7) are training, and the node hosting RANK 3 fails. The surviving 6 workers rendezvous. The new assignment:
+   - Original RANKs 0, 1, 2 become new RANKs 0, 1, 2 (unchanged).
+   - Original RANK 4 becomes new RANK 3.
+   - Original RANK 5 becomes new RANK 4.
+   - Original RANK 6 becomes new RANK 5.
+   - Original RANK 7 becomes new RANK 6.
+   - WORLD_SIZE changes from 8 to 6.
+
+3. **State reconstruction:** Each surviving worker loads the most recent checkpoint. Because the checkpoint is sharded, the workers must collectively reconstruct the state for the missing rank. With ZeRO-3, each rank's shard is $16P/N$; the missing shard must be loaded from the checkpoint on shared storage.
+
+4. **Process group rebuild:** The NCCL communicator (`torch.distributed.new_group()`) is destroyed and recreated with the new world size. This requires a full NCCL re-initialization (topology discovery, ring construction, channel allocation) which takes 5-30 seconds depending on scale.
+
+5. **torchrun configuration:**
+
+```bash
+torchrun \
+  --nnodes=4:8 \           # min 4, max 8 nodes (elastic)
+  --nproc_per_node=8 \     # 8 GPUs per node
+  --rdzv_id=job-42 \       # unique job ID for rendezvous
+  --rdzv_backend=c10d \    # rendezvous backend (c10d = TCP store)
+  --rdzv_endpoint=mgmt:29500 \  # rendezvous server
+  --max_restarts=3 \       # restart limit per worker
+  --timeout=120 \          # seconds before watchdog fires
+  train.py
+```
+
+The `--nnodes=4:8` allows the job to run with 4 to 8 nodes. When a node fails, `torchrun` automatically shrinks the world size to the surviving nodes (as long as it stays above 4). When a spare node is provisioned, the next rendezvous expands to include it.
+
+**Rebuilding the process group after a failure:**
+
+The process group rebuild is the most latency-sensitive step. At scale:
+
+| Scale | NCCL init time | Checkpoint load | Optimizer reshard | Total recovery |
+|---|---|---|---|---|
+| 8 GPUs (1 node) | ~2 s | ~1 s | ~0.5 s | ~3.5 s |
+| 64 GPUs (8 nodes) | ~5 s | ~3 s | ~2 s | ~10 s |
+| 512 GPUs (64 nodes) | ~15 s | ~5 s | ~5 s | ~25 s |
+| 4096 GPUs (512 nodes) | ~30 s | ~10 s | ~15 s | ~55 s |
+
+At 4096 GPUs, a single failure costs ~55 seconds of recovery. With MTBF of 4 hours and 55 seconds recovery: overhead = $55 / (4 \times 3600) = 0.38\%$ — acceptable. But if recovery is buggy (stuck NCCL init, corrupt checkpoint), the cascading cost can be much higher.
+
+**Straggler/hung rank detection:**
+
+Production systems use multiple watchdog layers:
+
+1. **Application-level watchdog:** Each rank updates a shared counter in the rendezvous store after every step. A monitoring thread checks that all ranks advance within $3\times$ the median step time. If a rank has not advanced after $T_{\text{watchdog}} = 3 \times T_{\text{median}}$, it is declared a straggler.
+
+2. **NCCL timeout:** `NCCL_COMM_BLOCKING=1` with `NCCL_TIMEOUT=1800` (30 minutes default). Production systems reduce this to 60-120 seconds via `NCCL_TIMEOUT=120`.
+
+3. **Hardware health:** NVIDIA DCGM (Data Center GPU Manager) monitors ECC errors, temperature, and power. A GPU with $> 10$ double-bit ECC errors in 60 seconds is automatically excluded.
+
+4. **Heartbeat:** Each rank sends a UDP heartbeat to the `torchrun` agent every 5 seconds. If 3 consecutive heartbeats are missed (15 seconds), the agent declares the rank dead and triggers a rendezvous.
 
 ### 5.5 Cost model for checkpoint interval
 

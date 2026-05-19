@@ -182,7 +182,48 @@ A request with a prompt longer than the remaining token budget is split across s
 
 The interleaving of prefill chunks with decode tokens is governed by the token budget. If 32 decode sequences consume 32 tokens from the budget and $B_{\text{tok}} = 4096$, the prefill chunk gets at most 4064 tokens. This ensures decode TPOT is not disrupted by large prefills, as analyzed in [Batching_and_Scheduling](Batching_and_Scheduling.md) Section 5.
 
-### 3.4 Preemption decisions
+### 3.4 V1 vs V0 scheduler differences
+
+The V0 scheduler was a single Python class (`Scheduler`) that maintained separate `self.waiting`, `self.running`, and `self.swapped` deques. It ran inside the same Python process as the API server and workers, serialized by the GIL. The V1 scheduler introduces several fundamental changes:
+
+| Dimension | V0 Scheduler | V1 Scheduler |
+|-----------|-------------|--------------|
+| Process | Same Python process as API server + workers | Dedicated EngineCore process |
+| Language | Pure Python (Scheduler class) | C++ core with Python bindings |
+| Queue structure | Separate `waiting`, `running`, `swapped` deques | Unified priority queue with state flags |
+| Prefill/decode distinction | Explicit: requests move between `waiting` (prefill) and `running` (decode) | Implicit: every request in the running set has a `num_computed_tokens` counter; prefill vs decode is determined by whether `num_computed_tokens < total_num_tokens` |
+| Scheduling overhead | ~500 $\mu$s/step (Python iteration + GIL contention) | ~50 $\mu$s/step (C++ iteration, no GIL) |
+| Chunked prefill | Supported but required explicit `running_queue` management for partial prefills | Native: partial-prefill sequences stay in the unified queue with their `num_computed_tokens` counter |
+| Communication | Python `multiprocessing.Queue` (pickle serialization) | Zero-copy shared-memory queues (zmq) |
+
+**Unified scheduling in V1.** The V0 scheduler treated prefill and decode as distinct phases with separate code paths. In V1, the scheduler makes no explicit distinction: it simply iterates over all requests in the running set and checks each request's state:
+
+```
+for req in running_set:
+    if req.num_computed_tokens < req.num_prompt_tokens:
+        # This request still needs prefill
+        chunk = min(remaining_tokens, tokens_budget)
+        schedule_prefill_chunk(req, chunk)
+        tokens_budget -= chunk
+    else:
+        # This request is in decode phase
+        if tokens_budget >= 1:
+            schedule_decode(req)
+            tokens_budget -= 1
+```
+
+This eliminates the V0 pattern of shuffling requests between separate waiting/running/swapped lists. The unified queue simplifies the code and avoids list-management overhead.
+
+**How V1 handles chunked prefill internally.** When a request with a 6K-token prompt arrives and the token budget is 4096 with 48 active decodes:
+
+1. V1 computes the available prefill budget: $4096 - 48 = 4048$ tokens.
+2. The first chunk processes 4048 tokens. After the forward pass, `req.num_computed_tokens = 4048`.
+3. The request stays in the running set. On the next step, the scheduler sees `num_computed_tokens (4048) < num_prompt_tokens (6144)` and schedules the remaining 1952 tokens as chunk 2.
+4. After chunk 2, `num_computed_tokens = 6144 = num_prompt_tokens`. The first output token is sampled. On subsequent steps, the request is decoded normally.
+
+No explicit state machine transitions between "waiting," "prefilling," and "decoding" -- the `num_computed_tokens` counter implicitly encodes the phase.
+
+### 3.5 Preemption decisions
 
 When the block pool is exhausted but a higher-priority request must be admitted, the scheduler selects a victim for preemption. The decision matrix:
 
@@ -195,7 +236,7 @@ When the block pool is exhausted but a higher-priority request must be admitted,
 
 Victim selection among equal-priority candidates: largest KV footprint first (maximizes freed blocks per eviction). Among different priorities: always preempt the lowest priority.
 
-### 3.5 Scheduling policy
+### 3.6 Scheduling policy
 
 V1 uses FCFS (first-come-first-served) as the default admission policy. Priority can be set per-request via the API, mapping to integer priority levels. Within the same priority level, FCFS applies. The scheduler does not implement SRJF or EDF natively; these are left to the routing layer above (see [Production_Architecture](Production_Architecture.md)).
 
@@ -212,6 +253,45 @@ Each Worker is a Python subprocess pinned to one GPU. It holds:
 - **ModelRunner**: the object that orchestrates the forward pass.
 
 The Worker receives a `ModelInput` from the EngineCore, calls `ModelRunner.execute()`, and returns `SampleResult` (sampled token IDs and related metadata).
+
+### 4.1.1 How the LLMEngine dispatches to workers
+
+The EngineCore communicates with Workers via shared-memory queues (V1) or multiprocessing queues (V0). The dispatch flow:
+
+1. **EngineCore** runs the scheduler (Section 3), producing a `SchedulerOutput` containing: which sequences are scheduled, their prefill chunks, and any preemption/swapping directives.
+2. The `SchedulerOutput` is serialized into a `ModelInput` proto containing packed `input_ids`, `positions`, `block_tables`, `slot_mapping`, and `seq_lens` tensors.
+3. The `ModelInput` is pushed to each Worker's input queue via zero-copy shared memory. Under TP, all workers receive the *same* `ModelInput` (identical input IDs and block tables; each worker uses its own weight shard).
+4. Each Worker's `ModelRunner.execute()` deserializes the `ModelInput`, moves tensors to GPU, and runs the forward pass.
+5. After the forward pass, the sampler produces `SampleResult` (one token ID per sequence). This is pushed back to the EngineCore via a return queue.
+6. The EngineCore updates sequence states, emits streaming outputs, and begins the next scheduling step.
+
+Under TP, Workers execute in lockstep because the forward pass includes NCCL all-reduce operations that synchronize all ranks. The EngineCore does not proceed to the next step until all Workers have returned their `SampleResult`.
+
+### 4.1.2 Model weight loading
+
+At startup, each Worker loads model weights through the following path:
+
+1. **Safetensors scan**: read the model's `model.safetensors.index.json` to determine the weight file layout and tensor metadata.
+2. **Shard selection**: under TP, each Worker loads only its shard of each tensor. For column-parallel layers (QKV, gate, up projections), Worker $i$ loads column range $[i \cdot H/\text{TP}, (i+1) \cdot H/\text{TP})$. For row-parallel layers (output, down projections), Worker $i$ loads row range $[i \cdot d/\text{TP}, (i+1) \cdot d/\text{TP})$.
+3. **Quantization**: if `--quantization` is set, weights are quantized during loading (e.g., FP16 $\to$ FP8 via absmax per-tensor or per-channel).
+4. **GPU transfer**: each weight tensor is moved to GPU via `cudaMemcpy` (PCIe) or direct HBM mapping. Total load time: ~30 seconds for a 70B model from local NVMe, dominated by storage read bandwidth.
+5. **Memory accounting**: after all weights are loaded, the remaining GPU memory is computed and the KV cache tensor is allocated to fill the available space (subject to `gpu_memory_utilization`).
+
+### 4.1.3 Attention backend selection
+
+vLLM supports multiple attention backends, selected at startup based on GPU architecture, block size, and kernel availability:
+
+| Backend | When selected | Implementation |
+|---------|--------------|----------------|
+| FlashAttention v3 | Hopper GPUs (H100+), FP16/BF16 KV | `flash_attn_varlen_func` with paged KV support |
+| FlashAttention v2 | Ampere+ GPUs (A100+), FP16/BF16 KV | `flash_attn_varlen_func` with block-table wrapper |
+| xFormers | Ampere GPUs, custom block sizes | `memory_efficient_attention_forward` with paged wrapper |
+| ROCm FlashAttention | AMD MI300X, MI250 | ROCm-ported FlashAttention kernel |
+| PagedAttention v1/v2 (custom CUDA) | Fallback for all GPUs | `csrc/attention/attention_kernels.cu` |
+
+Selection priority: FlashAttention v3 > FlashAttention v2 > xFormers > custom PagedAttention. The selection happens in `vllm/attention/selector.py` based on `torch.cuda.get_device_capability()`, KV dtype, and block size. Users can override via `--attention-backend`.
+
+The PagedAttention kernel wraps the selected backend by: (1) resolving block tables to physical memory addresses, (2) constructing the `seq_lens` and `block_tables` tensors in the format expected by the backend, and (3) handling the slot mapping for KV writes. The backend kernel itself is unaware of paging -- the indirection is handled in the wrapper layer.
 
 ### 4.2 ModelRunner forward pass
 
@@ -376,6 +456,47 @@ For a chat application with a 2048-token shared system prompt and 512-token aver
 - **Savings**: $(2560 - 512) / 2560 = 80\%$ of prefill compute eliminated.
 
 TTFT drops proportionally. At 1000 req/s, this frees approximately one GPU's worth of prefill capacity.
+
+### 6.7 APC integration with the V1 scheduler and block manager
+
+APC in V1 is not a separate subsystem -- it is deeply integrated into the scheduler's admission path and the block manager's allocation path.
+
+**Integration at admission time.** When the scheduler considers admitting a new request from the waiting queue (Section 3.1), the prefix cache lookup happens *before* block allocation:
+
+1. The block manager walks the request's prompt tokens, computing hash chain values $h_0, h_1, \ldots$.
+2. For each hash hit, the block manager increments the physical block's refcount and appends the block ID to the request's block table -- **without allocating new blocks**.
+3. At the first hash miss, the walk stops. The remaining suffix length determines how many new blocks to allocate.
+4. The scheduler now knows the *effective* prefill cost: only the suffix tokens need computation. If the suffix is small enough to fit in the remaining token budget, the request is admitted even if the full prompt would not fit.
+
+This means APC directly affects admission control: a request with a 90% prefix cache hit has 10% of the prefill cost and requires 10% of the new blocks. The scheduler can admit more such requests than cold requests.
+
+**Integration with KV block manager V1.** The block manager maintains:
+
+- **Free list**: a stack (LIFO) of available physical block IDs, stored as a bitmask for $O(1)$ pop/push.
+- **Block tables**: `Dict[request_id, List[int]]` -- one list per sequence, mapping logical block index to physical block ID.
+- **Reference counts**: `Dict[int, int]` -- tracks how many sequences and cache entries reference each physical block.
+- **Hash table**: `Dict[Tuple[int, bytes], int]` -- maps `(parent_hash, token_ids)` to physical block ID. The parent hash is the hash of the preceding block, ensuring positional uniqueness.
+- **LRU list**: a doubly-linked list of unreferenced cached blocks, ordered by last access time. Supports $O(1)$ move-to-front on cache hit and $O(1)$ eviction of the tail.
+
+**GPU memory pool management.** At startup, the block manager computes the total number of physical blocks:
+
+$$N_{\text{blk}} = \left\lfloor \frac{M_{\text{GPU}} \times \text{gpu\_mem\_util} - W - M_{\text{act}}}{B_s \times 2 \times (n_{\text{kv}} / \text{TP}) \times d_h \times b \times n_l} \right\rfloor$$
+
+The KV cache is allocated as a single contiguous tensor of shape $(N_{\text{blk}}, 2, B_s, n_{\text{kv}} / \text{TP}, d_h)$ per layer. The total memory reserved is:
+
+$$M_{\text{KV}} = N_{\text{blk}} \times 2 \times B_s \times (n_{\text{kv}} / \text{TP}) \times d_h \times b \times n_l$$
+
+This memory is pre-allocated at startup and never grows or shrinks. The block manager never calls `cudaMalloc` during serving -- all allocation is a metadata operation (pop from free list). This eliminates GPU memory fragmentation and makes allocation latency deterministic ($< 1\;\mu$s per block).
+
+The split between KV cache memory and activation memory is determined by `gpu_memory_utilization` (default 0.90). The remaining 10% is reserved for activation tensors (intermediate layer outputs during the forward pass). If the activation spikes exceed this reservation, the forward pass triggers a CUDA OOM. This is why the default is 0.90 rather than 0.99.
+
+**How APC reduces prefill compute.** When the prefix cache hits $M$ blocks for a new request:
+
+1. The request's block table is pre-populated with $M$ shared physical blocks.
+2. The scheduler constructs the `ModelInput` with `input_ids` containing only the suffix tokens (positions $M \cdot B_s$ through $S-1$).
+3. The `positions` tensor maps these suffix tokens to their correct positions in the sequence (not starting from 0).
+4. The PagedAttention kernel during the forward pass reads the cached prefix KV from the shared blocks and the newly computed suffix KV from the freshly allocated blocks.
+5. The forward pass computes FLOPs proportional to the suffix length, not the full prompt length. For a 90% cache hit: 10% of the FLOPs.
 
 ---
 
@@ -663,7 +784,69 @@ Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_
 
 ---
 
-## 15. Common Failure Modes
+## 15. Speculative Decoding Integration
+
+Speculative decoding (draft-then-verify) accelerates decode throughput by having a small draft model propose $k$ candidate tokens that the target model verifies in a single batched forward pass. In vLLM, this flows through the scheduler and block manager as follows.
+
+### 15.1 Draft token generation and speculative slots
+
+When speculative decoding is enabled, the scheduler allocates **speculative slots** in the block table for $k$ draft tokens (typically $k = 5$) *before* verification. The draft model (a smaller model sharing the same tokenizer) runs a lightweight forward pass to produce the $k$ candidates. These tokens are appended to the sequence's KV cache speculatively -- the block manager allocates blocks for them as if they were real decode output, but marks them as unverified.
+
+### 15.2 Block manager handling of draft tokens
+
+Draft tokens are written into the KV cache immediately. The block manager appends them to the sequence's block table using the normal allocation path (pop from free list). If the verification pass rejects some or all draft tokens, the block manager **truncates back** to the last verified position: the blocks beyond the accepted length have their reference counts decremented and return to the free list. If all $k$ tokens are accepted, the blocks are committed and the sequence advances by $k+1$ positions (the $k$ draft tokens plus the one token the target model itself produces at the acceptance boundary).
+
+### 15.3 Verification pass
+
+The target model runs a single batched verification forward pass over all $k$ draft tokens simultaneously -- not sequentially. The acceptance check produces a mask that determines how many tokens to keep. The acceptance criterion is the standard rejection-sampling check: draft token $t_i$ is accepted iff the target model's probability $p_{\text{target}}(t_i) \ge p_{\text{draft}}(t_i)$, with a resampled token drawn from $p_{\text{target}} - p_{\text{draft}}$ (clamped to non-negative) at the first rejection point.
+
+### 15.4 Scheduler changes
+
+The token budget must account for both draft and verified tokens. When a speculative sequence is scheduled for verification, the scheduler reserves $k$ tokens in the budget (one per draft position to verify), not just the single decode token. The scheduler must know the draft model's speculative length $k$ at configuration time (`--speculative-max-model-len` or `num_speculative_tokens`). Prefill sequences are never speculatively decoded -- only decode-phase sequences participate.
+
+### 15.5 Integration with PagedAttention
+
+Speculative blocks use the same block pool as normal decode blocks. Rejected draft tokens simply free their blocks via the standard free-list return path. No copy-on-write is needed because speculative blocks are only referenced by one sequence -- there is no sharing scenario. The slot mapping for draft tokens uses the same `physical_block * B_s + offset` computation as regular decode tokens.
+
+---
+
+## 16. V1 vs V0 Benchmark Comparison
+
+The V1 architectural changes (Section 1.3) yield measurable throughput and latency improvements. The table below summarizes approximate figures from public benchmarks (vLLM blog posts, SGLang comparison papers, and community benchmarks). Exact numbers vary by hardware, model, and workload.
+
+| Metric | V0 (async engine) | V1 (single-process) | Improvement |
+|--------|-------------------|---------------------|-------------|
+| TTFT (Llama-3-8B, $S=1024$) | ~45 ms | ~32 ms | 1.4x |
+| Decode throughput (8B, $B=256$) | ~12,000 tok/s | ~18,500 tok/s | 1.54x |
+| Decode throughput (70B, $B=64$) | ~1,100 tok/s | ~1,400 tok/s | 1.27x |
+| End-to-end latency (streaming) | Higher (IPC overhead) | Lower (no IPC) | ~30% |
+| GIL contention (Python-heavy) | Present | Eliminated | Major |
+| Scheduling overhead per step | ~500 $\mu$s | ~50 $\mu$s | 10x |
+
+**Sources of V1 gains:**
+
+1. **Eliminating inter-process IPC.** The V0 engine used Python `multiprocessing.Queue` between the API server, scheduler, and workers. Each queue hop added serialization and deserialization overhead. V1 uses zero-copy shared-memory queues.
+2. **Removing the Python GIL from the scheduling hot path.** V0's scheduler ran in the same Python interpreter as post-processing code. V1 isolates scheduling into a dedicated path with minimal Python.
+3. **Fused scheduling + sampling kernel.** V1 co-designs the scheduler output format with the sampler input, avoiding redundant tensor construction.
+4. **Zero-copy tensor sharing.** The scheduler and model runner share GPU tensor memory directly, avoiding host-device copies for metadata.
+
+---
+
+## 17. KV Transfer for Disaggregated Prefill
+
+vLLM supports a KV transfer API (`--kv-transfer-config` or the `kv_transfer` flag) that serializes KV blocks from dedicated prefill workers to dedicated decode workers, enabling **disaggregated prefill** (see [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md)).
+
+**Block-level granularity.** Entire PagedAttention blocks are transferred, not individual token KV vectors. When a prefill worker finishes computing the prompt's KV cache, it serializes the filled blocks (physical block IDs + their KV tensor data) and sends them to the decode worker pool.
+
+**Transport.** Intra-node transfer uses NCCL (GPU-to-GPU over NVLink or PCIe). Inter-node transfer uses PyNIXL or custom RDMA transports. The transfer is pipelined: the prefill worker begins sending completed blocks before the full prefill finishes.
+
+**Decode-side allocation.** The decode worker allocates matching blocks in its local pool and populates them from the received data. The block table on the decode side mirrors the prefill worker's logical-to-physical mapping, but with the decode worker's own physical block IDs.
+
+**Mooncake-style disaggregation.** This enables architectures where prefill runs on a pool of high-compute GPUs (e.g., H100 with high tensor-core FLOPS) and decode runs on a pool of high-bandwidth GPUs (e.g., H100 with high HBM bandwidth), connected via RDMA. The prefill workers never run decode steps; the decode workers never run prefill. KV transfer is the bridge.
+
+---
+
+## 18. Common Failure Modes
 
 | Symptom | Root cause | Fix |
 |---------|-----------|-----|
@@ -677,7 +860,7 @@ Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_
 
 ---
 
-## 16. References
+## 19. References
 
 1. Kwon, W. et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention." *SOSP 2023*.
 2. vLLM Project. "vLLM: Easy, Fast, and Cheap LLM Serving." [GitHub](https://github.com/vllm-project/vllm).
@@ -689,7 +872,7 @@ Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_
 
 ---
 
-## 17. Stack Links
+## 20. Stack Links
 
 **Up (deeper):**
 - [KV_Cache](KV_Cache.md) -- PagedAttention memory layout, block math, prefix caching derivations

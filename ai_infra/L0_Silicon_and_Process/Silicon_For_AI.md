@@ -316,6 +316,44 @@ pie showData
 
 Wafer edges have higher defect density due to edge-bead effects, handler scratches, and uneven CMP. A 300 mm wafer hosts ~70 reticle-sized dies; the outer ring of ~14 dies typically yields 30–40% lower than the center. This is why a wafer's *edge dies* often end up in the deepest bin regardless of design.
 
+### 5.6 Wafer cost per die: why H100 costs $25 K
+
+Process wafers are the raw material; everything downstream (packaging, HBM, testing) is where the margin multiplies.
+
+**Wafer prices (2025–2026, approximate):**
+
+| Node | Wafer price | Notes |
+|---|---|---|
+| TSMC N5 / N4 | ~$16,000 | Mature volume, multi-source mask sets |
+| TSMC N3E / N3P | ~$20,000 | EUV-heavy (20+ layers), tight supply |
+| TSMC N2 (projected) | ~$25,000 | First GAAFET, mask cost dominates |
+
+**Dies per wafer.** A 300 mm wafer has area $\pi \cdot 150^2 \approx 70{,}686$ mm². A reticle-limited H100-class die at ~814 mm² yields ~72 gross dies after accounting for wafer-edge exclusion and die-to-die scribe streets (simple geometric packing; real layouts lose the perimeter ring).
+
+**Yield at N5 for large dies.** With $D_0 \approx 0.1/\text{cm}^2$ and $\alpha = 2$ (§5.2), raw yield for an 8 cm² die is ~51%. With 8 spare SMs (§5.3), recoverable yield is ~80%. Net good dies: $72 \times 0.80 \approx 58$.
+
+**Die cost, unpackaged:**
+
+$$
+C_{\text{die}} \;=\; \frac{\$16{,}000}{58} \;\approx\; \$276\ \text{per die}
+$$
+
+Just the silicon — before packaging, testing, or HBM.
+
+**Assembled GPU cost buildup (H100-class, approximate):**
+
+| Component | Cost |
+|---|---|
+| Silicon die (N4) | ~$275 |
+| CoWoS-S / CoWoS-L packaging | $500–1{,}000$ |
+| 6× HBM3 stacks | $2{,}000–4{,}000$ |
+| Burn-in + functional test | ~$200 |
+| **Total, pre-markup** | **~$3{,}000–5{,}500** |
+
+NVIDIA sells the H100 for $25{,}000–40{,}000. The 5–10× markup reflects software-ecosystem lock-in (CUDA), supply scarcity (CoWoS capacity), and the fact that the buyer is valuing the *FLOP-year*, not the silicon. The wafer cost is a rounding error in the final price — which is why TSMC's pricing power over NVIDIA is weaker than it appears, and why NVIDIA can absorb a 25% wafer-price increase without flinching.
+
+**High-NA EUV impact on die economics.** The reticle shrinks from 858 mm² to ~429 mm². A B200-class monolithic die (2 × ~800 mm²) cannot be printed in a single exposure. The options are stitched exposures (yield risk) or splitting into chiplets (packaging cost). This is a major driver of chiplet adoption in the Blackwell/Rubin era: not a design preference, but a lithographic necessity that restructures the cost model toward more dies at smaller area, with higher inter-die connectivity cost absorbed by advanced packaging.
+
 ---
 
 ## 6. Advanced packaging (preview — full detail in L1)
@@ -492,6 +530,32 @@ Backside PDN (TSMC's term) / PowerVia (Intel's term) moves all power rails to th
 
 Both of these compound: lower droop ⇒ can run at lower V_dd_nom ⇒ V² lever harvested again ⇒ another ~10% dynamic power reduction. This is why **A16 and 18A are the first nodes where 2.5 GHz tensor cores at <1 W per FMA pipeline are seriously projected**.
 
+### 7.6 BSPDN implementations: Super Power Rail and PowerVia
+
+The concept of §7.5 is realized in two production-grade flows:
+
+**TSMC A16 "Super Power Rail" (SPR).** Power rails are routed on the **backside** of the wafer — below the transistor layer — while all signal routing stays on the front side. After front-end-of-line (FEOL) transistor fabrication, the wafer is flipped, thinned, and backside silicon is etched to expose buried oxide contacts. Thick copper or tungsten metallization on the back forms a low-resistance power mesh that connects to front-side transistors through nano-TSVs (nTSVs) punched through the buried oxide. Front-side metal layers M0–M14 are then dedicated entirely to signal routing.
+
+**Intel PowerVia (Intel 4 / Intel 3).** The same structural idea: a dedicated power layer on the die backside, connected to transistors through through-silicon vias that pass through the buried oxide layer. Intel demonstrated PowerVia on a test chip in mid-2023, with production integration on Intel 18A for 2025–2026 products.
+
+**Quantified benefits:**
+
+| Metric | Front-side PDN (N3) | Back-side PDN (A16 / 18A) |
+|---|---|---|
+| $R_{\text{PDN}}$ | ~50 $\mu\Omega$ | ~10 $\mu\Omega$ (~5× lower) |
+| IR drop at 1 430 A | ~71 mV (10% of 0.7 V) | ~14 mV (~2% of 0.7 V) |
+| Front-side metal for signals | ~85% (power steals 15%) | ~100% |
+| Signal routing layers freed | — | 2–3 layers recovered |
+| Max current density | ~1 A/$\mu$m² (EM-limited) | ~5 A/$\mu$m² (thicker backside metal) |
+
+The IR drop reduction of ~30% at the transistor level is the headline number, but the routability gain is equally important: freeing 2–3 metal layers on the front side directly alleviates the pin-access bottleneck of §2.3, raising achievable utilization from ~50% to ~65% on N2-class standard cells.
+
+**Manufacturing challenge.** Thinning the wafer to ~500 $\mu$m after FEOL, then selectively removing more silicon to expose backside contacts, is a high-risk step. The wafer becomes fragile and must be handled on a carrier substrate. Alignment of backside vias to frontside contacts requires sub-10 nm overlay accuracy — comparable to the metal-layer alignment budget itself. Defect density on the backside metal adds a new yield term that did not previously exist.
+
+**Production timeline:** Intel PowerVia on 18A in 2025; TSMC A16 SPR in 2026–2027. This is the most significant process innovation since FinFET for high-power designs.
+
+**Why BSPDN is not optional for 1 000 W+ accelerators.** At 1 000 W per die, the IR drop budget is ~5% of $V_{dd}$. On a front-side PDN at N3 dimensions, power delivery alone would consume 3–4% of $V_{dd}$ in IR drop, leaving almost no margin for di/dt transients (§7.3) and voltage-guardband variation. The B300 targets 1 000 W at 0.65 V — that's ~1 540 A through a PDN that simply cannot exist on the front side at these dimensions. BSPDN is a prerequisite, not an optimization, for the Blackwell/Rubin power envelope.
+
 ---
 
 ## 8. Thermal: the 500 W/cm² wall
@@ -557,6 +621,46 @@ Traditional data centers provision **10–20 kW/rack**. Hosting NVL72 requires:
 
 **Implication for L4 (rack-scale design):** the network topology and the cooling loop are co-designed. NVL72 happens to have 72 GPUs partly because that's what the cooling loop and the NVLink-5 switch fabric agreed they could support inside one cabinet's thermal envelope.
 
+### 8.4 Data-center-level thermal and power context
+
+The die-level and rack-level thermal math of §8.1–8.3 exists within a facility envelope that constrains what is economically deployable.
+
+**Cooling regimes by rack power density:**
+
+| Regime | Inlet temperature | $\Delta T$ to exhaust | Max rack power | Typical deployment |
+|---|---|---|---|---|
+| Air, ASHRAE A1 | 35 °C max inlet | ~15 °C | ~40 kW | Legacy enterprise, inference |
+| Direct-to-chip liquid (D2C) | 25–40 °C coolant | ~10–15 °C | 100–150 kW | H100, B200, MI355X clusters |
+| Rear-door heat exchanger | 35 °C air in | 20–30 °C drop at door | ~60 kW (hybrid) | Retrofit air-cooled facilities |
+
+Air cooling hits a hard ceiling around 40 kW/rack due to the heat capacity of air (~1.2 kg/m³, ~1.0 kJ/kg·K). Above 40 kW, the volumetric airflow required exceeds what is practical in a raised-floor plenum. NVL72 at 120–140 kW mandates direct-to-chip liquid cooling — not as a preference, but as a thermodynamic necessity.
+
+**Liquid cooling plumbing.** Each accelerator's cold plate connects via blind-mate quick-disconnect fittings to an in-rack CDU (coolant distribution unit). The CDU circulates facility water at 15–25 °C through a heat exchanger that dumps 100–150 kW to the building chilled-water loop. A single CDU typically serves 2–4 racks; the facility side requires cooling towers or dry coolers sized for the total IT load.
+
+**PUE (Power Usage Effectiveness):**
+
+$$
+\text{PUE} \;=\; \frac{P_{\text{total facility}}}{P_{\text{IT equipment}}}
+$$
+
+| Facility class | PUE | Overhead fraction |
+|---|---|---|
+| State-of-art (Google, Meta, hyperscale purpose-built) | 1.05–1.15 | 5–15% |
+| Good enterprise AI cluster | 1.2–1.4 | 20–40% |
+| Average data center (mixed workload) | 1.5–1.8 | 50–80% |
+
+For a 100 MW AI training cluster at PUE 1.1: 91 MW goes to compute, 9 MW to cooling, lighting, power-distribution losses, and networking overhead. At PUE 1.5 (an older retrofit facility), the split is 67 MW compute / 33 MW overhead — the same 100 MW of utility feed delivers 27% fewer FLOP-years.
+
+**Electricity cost in TCO.** At $0.05–0.12/kWh (US industrial rates, 2025), a 100 MW cluster running 90% uptime at $0.08/kWh:
+
+$$
+C_{\text{electricity}} \;=\; 100\,\text{MW} \cdot 8{,}760\,\text{h} \cdot 0.9 \cdot \$0.08/\text{kWh} \;\approx\; \$63\,\text{M/year}
+$$
+
+At PUE 1.1: ~$70 M/year. For a 3-year deployment with $500 M in GPU hardware, electricity is ~14% of TCO. In regions with $0.12/kWh and PUE 1.5, electricity rises to ~25% of TCO — which is why training-cluster siting is increasingly driven by power cost and PUE rather than by network latency.
+
+**Why NVL72 is the thermal unit.** Liquid cooling is most efficient when the CDU serves a complete, self-contained thermal zone. A single NVL72 rack at 120 kW can be cooled by one in-rack CDU with two supply/return connections to the facility loop. Decomposing into smaller units (e.g., 8-GPU pods) would multiply plumbing connections, leak points, and CDU overhead. The rack is the smallest unit that can be efficiently liquid-cooled as a system — and that is why the NVLink fabric, the cooling loop, and the rack form factor were co-designed as a single product.
+
 ---
 
 ## 9. Bringing it together: cross-layer cause-and-effect
@@ -613,6 +717,13 @@ Every higher-layer optimization in this notebook is, somewhere, a workaround for
 | Heat flux, D2C water ceiling | ~500 W/cm² | Current frontier |
 | Junction-temp degradation threshold | ~105 °C | TIM materials margin |
 | Rack power, GB200 NVL72 | ~140 kW | Forces facility re-engineering |
+| BSPDN $R_{\text{PDN}}$ reduction | ~5× vs front-side | Enables 1 000 W+ at 0.65 V |
+| TSMC N5 wafer price | ~$16,000 | Die cost is a fraction of assembled-GPU price |
+| H100-class die cost (silicon only) | ~$275 | Packaging + HBM = 10× the silicon cost |
+| High-NA reticle field | 429 mm² | Forces chiplet disaggregation in Rubin+ |
+| Air-cooling rack ceiling | ~40 kW | Below NVL72's 120 kW; liquid mandatory |
+| PUE, state-of-art AI cluster | 1.05–1.15 | 5–15% overhead on top of IT load |
+| 100 MW cluster electricity | ~$70 M/year at PUE 1.1 | 10–25% of 3-year TCO depending on region |
 
 ---
 

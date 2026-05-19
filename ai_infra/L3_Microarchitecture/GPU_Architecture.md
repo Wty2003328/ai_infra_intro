@@ -40,25 +40,30 @@ Before dissecting the SM, we must map the software hierarchy to the hardware tha
 flowchart TB
     subgraph SM["Streaming Multiprocessor (SM) - Hopper / Blackwell"]
         direction TB
-        L1I["L1 Instruction Cache"]:::ic
+        L1I["L1 Instruction Cache<br/>~128 KB, 4-way set-associative"]:::ic
+        IBUF["Instruction Buffer<br/>Per-warp 6-entry queue"]:::ic
         
         subgraph PBs["Processing Blocks (4 per SM)"]
             direction LR
             subgraph PB0["Processing Block 0"]
                 direction TB
-                SCHED0["Warp Scheduler & Dispatch Unit<br/>(Scoreboard, LRR/GTO)"]:::sched
-                OC0["Operand Collector<br/>(Crossbar Arbiter)"]:::mem
-                RF0["Register File Slice (16 KB)<br/>(Banked SRAM)"]:::rf
+                SCHED0["Warp Scheduler<br/>(Scoreboard + GTO/LRR)"]:::sched
+                DISP0["Dispatch Unit<br/>(1 instr/cycle, dual-issue capable)"]:::sched
+                OC0["Operand Collector<br/>(Crossbar Arbiter, 8 Collector Units)"]:::mem
+                RF0["Register File Slice (16 KB)<br>(65,536/4 = 16,384 x 32-bit regs)<br>(Banked SRAM, ~32 banks)"]:::rf
                 
-                subgraph EX0["Execution Units"]
+                subgraph EX0["Execution Units — 4 Sub-units in Parallel"]
                     direction LR
-                    CUDA0["16× FP32/INT32<br/>CUDA Cores"]:::cuda
-                    TC0["1× 4th-Gen<br/>Tensor Core"]:::tc
-                    SFU0["4× Special<br/>Function Units"]:::sfu
-                    LSU0["Load/Store<br/>Unit"]:::lsu
+                    subgraph ALU0["ALU Sub-slice"]
+                        CUDA0["16× FP32<br/>OR 16× INT32<br/>(Shared datapath)"]:::cuda
+                    end
+                    TC0["1× 4th-Gen<br/>Tensor Core<br/>(MMA engine)"]:::tc
+                    SFU0["4× Special Function Units<br/>(sin, cos, exp, log, sqrt, rcp)"]:::sfu
+                    LSU0["Load/Store Unit<br/>(8 KB L0 cache, coalescing)"]:::lsu
                 end
                 
-                SCHED0 --> OC0
+                SCHED0 --> DISP0
+                DISP0 --> OC0
                 OC0 <--> RF0
                 OC0 --> EX0
                 RF0 -.-> EX0
@@ -69,18 +74,28 @@ flowchart TB
             PB3["Processing Block 3<br/>(Identical)"]:::pb
         end
         
-        L1I --> PBs
+        L1I --> IBUF --> PBs
         
-        SMEM["Shared Memory (SMEM) / L1 Data Cache<br/>(256 KB Unified, 32 Banks)"]:::mem
+        SMEM["Shared Memory / L1 Data Cache<br/>(256 KB total, configurable split)<br/>(32 Banks, 4-byte interleaved)"]:::mem
         TMA["Tensor Memory Accelerator (TMA)<br/>(Async Copy Engine)"]:::tma
+        TMEM["TMEM (Blackwell+)<br/>(256 KB, tensor-core-only)"]:::tmem
         
         PBs <--> SMEM
+        PBs <-.-> TMEM
         TMA --> SMEM
+        TMA --> TMEM
     end
     
-    HBM["High Bandwidth Memory (HBM3/HBM3e)<br/>(via L2 Cache Network)"]:::hbm
-    SMEM <--> HBM
-    TMA <--> HBM
+    subgraph L2MC["L2 / Memory Controller Layer"]
+        L2["L2 Cache (~50 MB)<br/>(32-64 slices, partitioned)"]:::l2
+        MC["Memory Controllers<br/>(32 HBM channels)"]:::mc
+        L2 <--> MC
+    end
+    
+    HBM["High Bandwidth Memory (HBM3/HBM3e)"]:::hbm
+    MC <--> HBM
+    SMEM <--> L2
+    TMA <--> L2
 
     classDef ic fill:#fbcfe8,stroke:#9d174d,stroke-width:2px,color:#000,rx:5px,ry:5px
     classDef sched fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#000,rx:5px,ry:5px
@@ -92,25 +107,37 @@ flowchart TB
     classDef pb fill:#f3f4f6,stroke:#9ca3af,stroke-width:2px,stroke-dasharray: 5 5,color:#000
     classDef mem fill:#fef08a,stroke:#a16207,stroke-width:2px,color:#000,rx:5px,ry:5px
     classDef tma fill:#99f6e4,stroke:#047857,stroke-width:2px,color:#000,rx:5px,ry:5px
+    classDef tmem fill:#c7d2fe,stroke:#4338ca,stroke-width:2px,color:#000,rx:5px,ry:5px
+    classDef l2 fill:#fed7aa,stroke:#c2410c,stroke-width:2px,color:#000,rx:5px,ry:5px
+    classDef mc fill:#fecaca,stroke:#991b1b,stroke-width:2px,color:#000,rx:5px,ry:5px
     classDef hbm fill:#fca5a5,stroke:#991b1b,stroke-width:3px,color:#000,rx:10px,ry:10px
 ```
 
 The Hopper / Blackwell SM is structurally divided to sustain massive concurrency:
 
-- **4 Processing Blocks (Warp Schedulers):** The SM is partitioned into four independent PBs. Each PB manages its own pool of active warps and issues 1 instruction per cycle.
-- **Compute Density (Per PB):** Each PB contains 16 FP32 CUDA cores, 16 INT32 cores, 4 Special Function Units (SFUs for transcendentals like `sin`, `exp`), and 1 Tensor Core.
-- **Unified L1/SMEM:** A massive 256 KB SRAM structure acts as both software-managed Shared Memory and hardware-managed L1 cache.
-- **Register File:** 256 KB of total registers (65,536 × 32-bit registers), distributed equally as 16 KB slices per PB.
+- **4 Processing Blocks (Warp Schedulers):** The SM is partitioned into four independent PBs. Each PB manages its own pool of active warps and issues 1 instruction per cycle (2 instructions with dual-issue on some datapath combinations).
+- **Compute Density (Per PB):** Each PB contains 16 FP32 CUDA cores (shared with INT32 — the 16 ALUs can dispatch either FP32 or INT32 per cycle, not both simultaneously), 4 Special Function Units (SFUs for transcendentals like `sin`, `exp`, `log2`, `rcp`), 1 Tensor Core (MMA engine), and 1 Load/Store Unit (with coalescing hardware and a small L0 data cache).
+- **Instruction Buffer:** Between the shared L1 instruction cache and each warp scheduler sits a per-warp instruction buffer (typically 6 entries). The L1 I-cache is ~128 KB, 4-way set-associative, shared across all four PBs. On an I-cache miss, the warp stalls until the fill completes — this is a rare but catastrophic event for throughput.
+- **Unified L1/SMEM:** A massive 256 KB SRAM structure acts as both software-managed Shared Memory and hardware-managed L1 cache. The split is configurable at kernel launch (e.g., 0/256, 8/248, 16/240, 32/224, 64/192, 100/156 KB SMEM/L1). The 32 banks are 4-byte interleaved: bank index = `(addr >> 2) & 0x1F`.
+- **Register File:** 256 KB of total registers (65,536 x 32-bit registers), distributed equally as 16,384 registers (16 KB) per PB. The RF is banked (~32 single-ported SRAM banks) to achieve the aggregate ~100 TB/s/SM read bandwidth needed for 3-operand FMA instructions across 32 threads.
 
-### 1.3 Issue Rate and the Instruction Mix
+### 1.3 Issue Rate, Dual-Issue, and the Instruction Mix
 
-Each Processing Block issues exactly 1 instruction per cycle. Across the 4 PBs, the SM hits an **issue ceiling** of 4 instructions/SM/cycle. This dispatch limit defines the fundamental bounds of the GPU:
+Each Processing Block dispatches instructions through a **Dispatch Unit** that can issue up to 2 instructions per cycle under certain conditions (**dual-issue**). The dispatch rules vary by architecture but follow a general pattern:
+
+**Ampere/Hopper dual-issue rules:**
+- One instruction can go to the FP32/INT32 ALUs while a second goes to the Tensor Core or LSU simultaneously.
+- Two FP32 FMAs cannot dual-issue (they share the same dispatch port).
+- An FP32 FMA and an independent memory load (LSU) can dual-issue — this is the most important dual-issue pairing for compute-bound kernels.
+- Tensor Core `wgmma` instructions are dispatched alone (they monopolize the PB's issue slot for the duration of the async operation, but the warp can continue issuing other instructions to other units while wgmma runs in the background).
+
+Across the 4 PBs, the SM hits a **peak issue ceiling** of 8 instructions/SM/cycle with perfect dual-issue, though 4–6 is more typical in practice. This dispatch limit defines the fundamental bounds of the GPU:
 
 - A single `FMA` instruction computes 64 FLOPs (32 threads × 2 ops).
-- A single `wgmma.mma_async` (Tensor Core) instruction computes $64 \times 16 \times 16 = 16,384$ FLOPs.
-- Therefore, hitting 100+ TFLOPS/SM relies entirely on mixing standard instructions with ultra-dense Tensor Core instructions that amortize a single "issue slot" over thousands of mathematical operations. 
+- A single `wgmma.mma_async` (Tensor Core) instruction computes $64 \times 256 \times 16 = 524{,}288$ FLOPs (Hopper FP16).
+- Therefore, hitting 100+ TFLOPS/SM relies entirely on mixing standard instructions with ultra-dense Tensor Core instructions that amortize a single "issue slot" over hundreds of thousands of mathematical operations.
 
-If a kernel relies heavily on scalar address arithmetic or standard CUDA cores, it will hit the issue ceiling long before it hits the theoretical compute ceiling.
+If a kernel relies heavily on scalar address arithmetic or standard CUDA cores, it will hit the issue ceiling long before it hits the theoretical compute ceiling. The ratio of tensor-core-to-ALU issue density is the primary reason CUDA kernels for AI are structured around massive MMA instructions with minimal scalar overhead.
 
 ### 1.4 Expert-Level Pipeline Mechanics: From Fetch to Execute
 
@@ -123,16 +150,30 @@ The Warp Scheduler does not randomly guess which warp is ready; it relies on a h
 - A warp is mathematically ineligible for scheduling if the source registers for its *next* instruction have their pending bits set. 
 - When the memory controller finally writes the payload from HBM back to the Register File, it signals the scoreboard to clear the pending bit. On the very next clock cycle, the warp enters the "Ready/Eligible" pool.
 
-#### B. Scheduling Policies: GTO vs. LRR
+#### B. Scheduling Policies: GTO vs. LRR, and Warp Stall Causes
 Once the scoreboard identifies the pool of eligible warps, the scheduler must select exactly one warp to issue to the execution units. The choice of algorithm profoundly impacts L1 cache hit rates:
 
-1. **Loose Round Robin (LRR):** Iterates through all eligible warps fairly. 
+1. **Loose Round Robin (LRR):** Iterates through all eligible warps fairly.
    - *The Hardware Flaw:* Because all warps progress at the exact same rate, they all reach memory-fetch instructions simultaneously. This creates a "thundering herd" effect that completely saturates the L1 cache, evicting each other's data, causing massive pipeline stalls.
 2. **Greedy-Then-Oldest (GTO):** The dominant scheduling policy for modern throughput architectures.
    - *Greedy:* The scheduler selects one warp and hammers instructions from it back-to-back as long as it remains eligible. This maximizes temporal locality in the L1 Instruction Cache and keeps the internal data pathways warm.
    - *Then-Oldest:* When the "greedy" warp inevitably hits a scoreboard stall, the scheduler falls back and selects the *oldest* ready warp (typically based on arrival time or Warp ID) to become the new greedy warp.
    - *The Rationale:* GTO aggressively staggers execution. It forces some warps to run far ahead of others. While the leading warps are stalled waiting on HBM, the trailing warps are busy executing math, perfectly hiding the DRAM latency.
 3. **Two-Level Scheduling:** Modern schedulers (Volta+) dynamically toggle between GTO and LRR depending on real-time SMEM queue saturation and register pressure.
+
+**What causes a warp to stall (lose eligibility):**
+
+| Stall type | Cause | Duration | Scoreboard behavior |
+|---|---|---|---|
+| **Memory dependency** | `LDG`/`STG` instruction awaiting HBM or L2 response | 30–400+ cycles | Destination register marked pending; scoreboard blocks any instruction reading that register |
+| **Barrier stall** | `bar.sync` or `membar` — warp waits for other warps in the CTA | Indeterminate (until all arrive) | Special barrier register, not a general scoreboard entry |
+| **Long ALU operation** | SFU transcendental (`sin`, `exp`), integer divide | 8–20 cycles | Single-issue through SFU; scoreboard holds destination pending |
+| **Tensor core occupancy** | Previous `wgmma` still executing in background | 16–32 cycles for wgmma | The warp is NOT stalled — wgmma is async. The warp stalls only on `wgmma.wait_group` if results are not ready |
+| **Instruction fetch miss** | L1 I-cache miss, waiting for fill from L2 | 50–100 cycles | The entire PB stalls; no warp can issue |
+| **Register bank conflict** | Operand Collector detects SRAM bank collision | 1–3 extra cycles injected | The dispatch unit inserts bubbles; not visible at scoreboard level |
+| **Structural hazard** | Target execution unit busy (e.g., all SFUs occupied) | 1–2 cycles | Warp is eligible but dispatch fails; scheduler tries next warp |
+
+The critical insight: in a well-optimized GEMM or FlashAttention kernel, the **dominant stall is memory dependency** on HBM, and the latency is hidden entirely by having 40–60 active warps per SM. With ~80 warps (H100 max is 64 per SM), the scheduler always has eligible warps to issue while the memory-bound ones wait. The "zero-cycle context switch" (Section 1.4E) makes this possible.
 
 #### C. The Operand Collector and Register Bank Conflicts
 Before an instruction reaches the ALU, its operands must be fetched from the Register File (RF). For a 32-thread `FFMA` instruction, the hardware requires 3 source operands per thread simultaneously. That is **96 registers per cycle**.
@@ -169,8 +210,9 @@ A Tensor Core is not merely a wider ALU; it is a **tightly coupled matrix-proces
 
 Unlike standard scalar CUDA cores where each thread computes independently, Tensor Cores operate strictly at the **warp level**. A single instruction (e.g., `HMMA` or `WGMMA`) is a cooperative operation: the hardware expects all 32 threads in a warp to provide fragments of the input matrices $A$ and $B$, and the accumulator $C$, in a highly specific register layout.
 
-### 2.2 Microarchitecture: Datapath and "Systolic" Flow
-While frequently marketed as systolic arrays, Tensor Cores (Volta through Ampere) are physically implemented using **Four-Element Dot Product (FEDP)** units. 
+### 2.2 Microarchitecture: Datapath and the MMA Dataflow
+
+While frequently marketed as systolic arrays, Tensor Cores (Volta through Ampere) are physically implemented using **Four-Element Dot Product (FEDP)** units.
 
 **The Inner Product (Volta/Ampere):**
 A $4 \times 4 \times 4$ MMA is executed by 16 parallel FEDP units. Each unit calculates one element of the $4 \times 4$ output tile. The datapath is a 4-stage pipeline:
@@ -180,9 +222,44 @@ A $4 \times 4 \times 4$ MMA is executed by 16 parallel FEDP units. Each unit cal
 4. **Write-back:** The resulting tile fragments are distributed back to the register file.
 
 **The Outer Product Shift (Hopper/Blackwell):**
-To scale up throughput for the massive $16 \times 8 \times 16$ and $64 \times 256 \times 16$ tile sizes, newer architectures transition toward an **Outer Product datapath**. 
+To scale up throughput for the massive $16 \times 8 \times 16$ and $64 \times 256 \times 16$ tile sizes, newer architectures transition toward an **Outer Product datapath**.
 - Instead of computing dot products (inner-joins), the hardware takes a "tall and skinny" column of $A$ and a "short and wide" row of $B$, broadcasting them across a grid of accumulators.
 - **TMEM (Blackwell):** Because the outer product flow requires immense, sustained bandwidth, Blackwell introduces **Tensor Memory (TMEM)**. TMEM acts as a staging ground strictly for Tensor Cores, feeding the outer product accumulators directly without saturating the standard Register File or SMEM crossbars.
+
+### 2.2.1 The MMA Dataflow in Detail: From Registers to Accumulator
+
+A Matrix Multiply-Accumulate (MMA) operation computes $C += A \times B$ where $A \in \mathbb{R}^{M \times K}$, $B \in \mathbb{R}^{K \times N}$, and $C \in \mathbb{R}^{M \times N}$. The hardware decomposes this into a tiled outer product over the $K$ dimension. Here is the dataflow for a `wgmma.mma_async.m64n256k16` (Hopper FP16):
+
+**Step 1 — Fragment layout in registers.** The 32 threads of a warp (or 128 threads of a warp-group for wgmma) each hold "fragments" — non-contiguous tiles of the input matrices distributed in a specific register layout defined by the PTX spec:
+
+- **Matrix A fragment (M=64, K=16):** The 64×16 tile is distributed across 128 threads (4 warps × 32 threads). Each thread holds an $8 \times 1$ column (8 elements from 8 rows of one K-column). Total: 8 registers per thread for A.
+- **Matrix B fragment (K=16, N=256):** Each thread holds a $1 \times 16$ row (16 elements from one row of the K×N tile). Total: 8 registers per thread for B (BF16, packed as pairs in 32-bit registers).
+- **Accumulator C fragment (M=64, N=256):** Each thread holds elements scattered across the output tile. Total: 32 FP32 registers per thread.
+
+The fragment layout is *not* a simple row-major split — it follows a swizzled pattern that maps directly to the physical register file banks, minimizing bank conflicts during operand collection.
+
+**Step 2 — Operand fetch from TMEM/SMEM (Hopper+).** On Hopper, the `wgmma` instruction specifies a 64-bit **tensor map descriptor** pointing to the A and B tiles in SMEM (or TMEM on Blackwell). The hardware TMA engine fetches the tiles asynchronously. On Volta–Ampere, fragments are explicitly loaded into registers by the programmer using `ldmatrix` (Ampere) or manual `LDG` + `LDS` sequences.
+
+**Step 3 — Outer product computation.** For each $k = 0, 1, \ldots, K-1$ (K=16 in one wgmma), the tensor core:
+1. Broadcasts the $k$-th column of A (shape M×1 = 64×1) across all N=256 multiplier columns.
+2. Broadcasts the $k$-th row of B (shape 1×N = 1×256) down all M=64 multiplier rows.
+3. Computes $M \times N = 16{,}384$ parallel multiply-accumulate operations: $C_{m,n} += A_{m,k} \times B_{k,n}$.
+4. This repeats for all 16 values of $k$ in a pipelined fashion — 16 cycles of outer product accumulation.
+
+**Step 4 — Write-back to accumulator registers.** After all K=16 outer products complete, the result is written back to the C accumulator registers in the same fragment layout. The warp can then issue another `wgmma` to accumulate further partial products (e.g., tiling over the full K dimension of a GEMM).
+
+**Instruction encoding:**
+
+| Instruction | Architecture | MMA Shape (M×N×K) | Operands per thread | Accumulator dtype |
+|---|---|---|---|---|
+| `HMMA.1688` | Volta | 16×8×8 | 4 FP16 per input | FP16 or FP32 |
+| `HMMA.16816` | Ampere | 16×8×16 | 8 FP16 per input | FP32 |
+| `IMMA.8816` | Turing+ | 8×8×16 | 4 INT8 per input | INT32 |
+| `wgmma.mma_async.m64n256k16` | Hopper | 64×256×16 | In SMEM/TMEM (not registers) | FP32 |
+| `wgmma.mma_async.m64n256k32` | Hopper FP8 | 64×256×32 | In SMEM/TMEM | FP32 |
+| `wgmma.mma_async` (FP4) | Blackwell | 64×256×64 | In TMEM | FP32 |
+
+The FP8 instruction doubles K to 32 because each register/SMEM word holds twice as many FP8 values as FP16. Similarly, FP4 doubles K again to 64. The accumulator remains FP32 throughout to preserve numerical precision during the long reduction chain.
 
 ### 2.3 Generation History
 
@@ -301,8 +378,36 @@ flowchart TD
     - *Transaction Count (tx-count):* The exact number of bytes expected from the TMA.
 5.  **Phase Bit Parity:** The `mbarrier` uses a "Phase Bit" (0 or 1) to enable seamless double-buffering. When the expected bytes arrive from the TMA and all threads check in, the hardware flips the phase bit. Threads polling the barrier simply execute `mbarrier.test_wait(phase)`—they sleep in a low-power state until the hardware flips the bit, indicating the payload is ready.
 
-### 3.6 L2 Cache
-L2 is ~50 MB on Hopper / Blackwell, distributed across 32–64 slices around the die. Address hashing distributes traffic uniformly. Hit latency ~30 cycles for nearest slice, ~80 cycles for far slice. For LLMs, weights almost never hit L2 (working set $\gg$ 50 MB), but L2 captures crucial transient reductions (FlashAttention partial sums). Hit rate: 5–15% for decode, 60–80% for training.
+### 3.6 L2 Cache and Memory Controller Organization
+
+L2 is ~50 MB on Hopper / Blackwell, physically distributed across 32–64 slices around the die periphery, each co-located with a memory controller. The L2 + memory controller subsystem is the critical bridge between the SMs and HBM.
+
+**L2 Cache Organization:**
+- **Partitioned design:** Each L2 slice is 1–2 MB, associated with one HBM channel (2 pseudo-channels per stack). On H100 with 5 HBM3 stacks (10 pseudo-channels, 32 memory controllers total), each controller owns an L2 slice.
+- **Address hashing:** Global addresses are hashed across all L2 slices using a proprietary XOR-based hash. This prevents hotspots: consecutive cache lines land on different slices, distributing traffic from a single SM across the full L2. The hash is invisible to software.
+- **Near vs. far slices:** An SM's memory requests are routed via the NoC to the L2 slice that owns the target address. A "near" slice (physically adjacent to the requesting SM) has ~30 cycle hit latency. A "far" slice (opposite side of the die) requires ~80 cycles due to NoC traversal. The hash spreads requests uniformly, so on average each SM sees ~50–60 cycle L2 hit latency.
+- **L2 bandwidth:** Aggregate L2 bandwidth is ~10 TB/s on H100 (each slice provides ~200–300 GB/s). This is ~3× the HBM bandwidth, making L2 the primary bandwidth amplifier for working sets that fit.
+
+**Memory Controller → HBM Path:**
+- **32 memory controllers** (H100) each manage one HBM channel. Each channel provides ~100 GB/s (HBM3 at 3.35 TB/s / 32 channels).
+- **Request flow:** SM → NoC → L2 slice → (miss) → Memory Controller → HBM stack → return. Total round-trip on an L2 miss: ~300–500 cycles.
+- **L2 hit rate impact estimation:** The performance difference between L2 hit and L2 miss is dramatic:
+
+$$T_{\text{access}} = h \cdot T_{\text{L2,hit}} + (1 - h) \cdot T_{\text{HBM}}$$
+
+where $h$ is the L2 hit rate. For H100: $T_{\text{L2,hit}} \approx 50$ cycles, $T_{\text{HBM}} \approx 400$ cycles. At $h = 0.8$ (training): average access = 120 cycles. At $h = 0.1$ (decode): average access = 365 cycles — 3× worse latency per access.
+
+**Practical hit rates by workload:**
+
+| Workload | L2 hit rate | Reason |
+|---|---|---|
+| Dense GEMM (large) | 5–15% | Weight working set >> 50 MB; activations stream through |
+| FlashAttention | 60–80% | Q, K, V tiles reused across attention heads; partial scores accumulate in L2 |
+| Decode (bs=1) | <5% | Every weight is touched once and evicted before reuse |
+| Prefill (large batch) | 15–30% | Weights stream through, but activation reuse helps |
+| Training backward | 30–50% | Activation recomputation stores layer inputs; gradient accumulators hit L2 |
+
+The key takeaway: for LLM decode, L2 is essentially transparent (weights miss every time). For training and FlashAttention, L2 hit rate is a significant performance factor. Kernel developers use Nsight Compute's `l2tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` and `l2tex__t_requests_pipe_lsu_mem_global_op_ld.sum` to measure actual L2 hit rates and validate assumptions.
 
 ### 3.7 Virtual Memory, TLBs, and Unified Memory (UVM)
 Modern GPUs do not deal in physical addresses directly; they utilize a robust Virtual Memory subsystem managed by the **GPU Memory Management Unit (GMMU)**.

@@ -151,6 +151,81 @@ loop forever:
 
 Each iteration of this loop is one GPU forward pass. The set of participating sequences changes across iterations; no two consecutive steps necessarily have the same batch.
 
+### 3.3 Per-iteration scheduler algorithm
+
+The scheduler maintains three data structures:
+
+- **Waiting queue**: FIFO of requests not yet admitted, sorted by priority then arrival time.
+- **Running set**: requests currently generating tokens (decode phase) or being prefilled (prefill phase with partial progress).
+- **Swap pool**: preempted sequences with KV in CPU DRAM, sorted by priority (highest priority re-admitted first).
+
+The per-iteration algorithm:
+
+```
+function schedule_step():
+    tokens_remaining = B_tok     # per-step token budget
+    num_seqs_remaining = B_seq   # per-step sequence budget
+
+    # Phase 1: Swap in preempted sequences (if any)
+    for seq in swap_pool (sorted by priority desc):
+        if tokens_remaining < 1: break
+        if not enough_free_blocks(seq.kv_blocks): break
+        swap_in(seq)             # DMA KV from CPU to GPU
+        move seq to running_set
+        tokens_remaining -= 1    # will decode this step
+
+    # Phase 2: Schedule all active decode sequences
+    decode_seqs = [s for s in running_set if s.phase == DECODE]
+    num_decodes = min(len(decode_seqs), num_seqs_remaining)
+    tokens_remaining -= num_decodes   # each decode costs 1 token
+
+    # Phase 3: Admit new requests and schedule prefill chunks
+    for req in waiting_queue:
+        if tokens_remaining <= 0: break
+        if num_seqs_remaining <= 0: break
+
+        # Check admission: KV budget
+        needed_blocks = ceil(req.remaining_prompt_tokens / block_size)
+        if needed_blocks > free_block_count:
+            # Try preemption (Section 9)
+            if not preempt_victim(needed_blocks):
+                break   # cannot admit, stop
+
+        # Prefix cache lookup (reduce prefill work)
+        cached_blocks = prefix_cache_lookup(req)
+        req.cached_kv_blocks = cached_blocks
+        remaining_prefill = req.prompt_length - cached_blocks * block_size
+
+        # Determine chunk size
+        chunk = min(remaining_prefill, tokens_remaining)
+        if chunk == 0: continue    # no budget left for this step
+
+        req.prefill_chunk = chunk
+        move req to running_set
+        tokens_remaining -= chunk
+        num_seqs_remaining -= 1
+
+    # Phase 4: Schedule continuation of partially-prefilled sequences
+    for seq in running_set where seq.phase == PREFILL_PARTIAL:
+        if tokens_remaining <= 0: break
+        chunk = min(seq.remaining_prefill, tokens_remaining)
+        seq.prefill_chunk = chunk
+        tokens_remaining -= chunk
+
+    return build_model_input(running_set)
+```
+
+**Prefill vs decode budget balancing.** The key design choice is in Phase 2 vs Phase 3 ordering. The algorithm above prioritizes decodes (Phase 2) over prefills (Phase 3). This is called **decode-first scheduling**: every running decode sequence gets a slot before any new prefill is admitted. The rationale is that decode sequences have active users streaming tokens; a missed decode step is visible as a TPOT spike. Prefill sequences have not yet produced output; delaying their first token is less user-visible than stalling an in-progress stream.
+
+An alternative is **prefill-priority scheduling** (used by some TRT-LLM configurations): admit prefills first to minimize TTFT. This trades TPOT smoothness for lower TTFT. Production systems almost universally prefer decode-first because chat users are more sensitive to streaming stalls than to initial wait time.
+
+**How many new requests to admit per step.** The admission loop (Phase 3) is bounded by:
+- Token budget: each new prefill chunk consumes `chunk` tokens from $B_{\text{tok}}$.
+- Sequence budget: each new request consumes 1 slot from $B_{\text{seq}}$.
+- KV block budget: each new request needs `ceil(remaining_tokens / block_size)` blocks. If the free block count is below a watermark (typically 5--10% of total blocks), admission pauses and preemption is triggered instead.
+
+The number of new requests admitted per step is typically 0--3 at steady state (the token budget is mostly consumed by ongoing decodes) and 5--15 during ramp-up when the decode count is low.
+
 ### 3.3 Enabling mechanisms
 
 | Mechanism | Role |
@@ -238,6 +313,26 @@ For a prompt of length $S$ split into $K = \lceil S / C \rceil$ chunks:
 - **Chunk $i$** (1-indexed) processes tokens at positions $[(i-1)C + 1,\; iC]$.
 - It attends over all positions seen so far: $[1, \; iC]$. (The KV cache accumulates across chunks.)
 - Compute per chunk: $\propto C \times (i \cdot C)$ for the attention portion, plus $C \times d$ per linear layer.
+
+**Why chunking avoids long prefill blocking decode.** The core problem is that a single 8K-token prefill takes ~600 ms of compute on a 70B model. Any decode sequences sharing that step are stalled for 600 ms -- a TPOT catastrophe. By splitting into chunks of 512 tokens, each chunk takes ~40 ms, comparable to a decode step. Decodes in the same step wait at most 40 ms extra, well within most TPOT SLO budgets.
+
+**Partial KV cache storage between chunks.** After chunk $i$ completes:
+
+1. The $K$ and $V$ vectors for tokens $[(i-1)C + 1, iC]$ are written into the KV cache at their respective positions via the slot mapping.
+2. The sequence's block table now covers logical positions $[0, iC]$, with physical blocks allocated for all filled positions.
+3. The sequence's `num_computed_tokens` counter is updated to $iC$.
+4. The sequence remains in the **running** set but is marked as `PREFILL_PARTIAL`. On the next step, the scheduler knows to continue the prefill from position $iC + 1$.
+
+Between chunks, the partial KV cache is a valid prefix: it contains complete $K$ and $V$ entries for positions 0 through $iC$. No special handling is needed -- the cache is always in a consistent state because each chunk writes complete rows.
+
+**Attention across chunk boundaries.** Chunk $i$ processes tokens at positions $[(i-1)C + 1, iC]$ as the query, but must attend over the full range $[0, iC]$. The attention kernel receives:
+
+- `query_tokens`: positions $[(i-1)C + 1, iC]$ (the new chunk).
+- `kv_cache_range`: positions $[0, (i-1)C]$ (accumulated from previous chunks, stored in the block table) plus the new chunk's own KV being computed.
+
+The attention kernel handles this by first computing $Q$, $K$, $V$ for the new chunk, writing $K$, $V$ to the cache, and then computing attention of $Q$ against the full cached range $[0, iC]$. This is identical to how prefill handles any multi-token input -- the KV cache grows monotonically, and each attention layer sees the entire prefix. There is no "boundary" in the attention computation; the chunk structure is purely a scheduling artifact that is invisible to the attention kernel.
+
+The PagedAttention kernel naturally handles this because the block table already contains entries for all previously computed positions. The kernel iterates over all blocks in the block table (including those from prior chunks) and the new block from the current chunk.
 
 ### 5.2 Total FLOPs are unchanged
 
@@ -383,27 +478,40 @@ Production systems typically combine: priority tiers for multi-tenancy, EDF with
 
 ### 8.1 When to accept new requests
 
-Admission control decides whether a waiting request should enter the active set. A request is **admissible** when:
+Admission control decides whether a waiting request should enter the active set. A request is **admissible** when **all** of the following conditions are met:
 
 1. **KV budget available.** The request's prompt length $S_{\text{prompt}}$ plus expected output length (up to `max_tokens`) must fit within the remaining KV pool:
 
 $$S_{\text{prompt}} + \text{max\_tokens}_i \le M_{\text{KV}} - \sum_{j \in \text{active}} S_j$$
 
-2. **Token budget allows.** Even one prefill chunk consumes $C$ tokens from the step budget. If the step is already full of decodes, prefill is deferred to the next step.
+   The prefix cache hit reduces $S_{\text{prompt}}$ to only the non-cached suffix. With a 2048-token system prompt fully cached, a request with 512-token user message needs KV blocks for only $512 + \text{max\_tokens}$ positions.
 
-3. **SLO is achievable.** The request's TTFT deadline must be reachable given the current queue depth and step timing:
+2. **Token budget allows.** Even one prefill chunk consumes $C$ tokens from the step budget. If the step is already full of decodes, prefill is deferred to the next step. The check:
+
+$$C \le B_{\text{tok}} - \sum_{\text{decodes}} 1 - \sum_{\text{prefill\_continuations}} C_j$$
+
+3. **Sequence budget allows.** The number of running sequences must be below $B_{\text{seq}}$.
+
+4. **SLO is achievable.** The request's TTFT deadline must be reachable given the current queue depth and step timing:
 
 $$t_{\text{now}} + (\text{queue\_position}) \times T_{\text{step}} + T_{\text{prefill}} \le \text{TTFT\_deadline}_i$$
+
+   The $T_{\text{prefill}}$ estimate accounts for chunking: $T_{\text{prefill}} = \lceil S_{\text{suffix}} / C \rceil \times T_{\text{step}}$.
+
+5. **Free-block watermark respected.** A safety margin of 5--10% of total blocks is reserved. Admission is paused when free blocks drop below this watermark, even if the request would technically fit. The watermark absorbs burst arrivals and prevents immediate preemption after admission.
 
 ### 8.2 Rejection strategies
 
 When a request is not admissible:
 
-| Strategy | Behavior |
-|---|---|
-| **Reject (HTTP 429)** | Return immediately. Client retries after `Retry-After` header. Simplest, most common. |
-| **Queue with backpressure** | Hold in waiting queue. No response until admitted. Risks timeout at the client. |
-| **Accept-and-degrade** | Admit but cap `max_tokens`, reduce context window, or force shorter output. Transparent to user but changes behavior. |
+| Strategy | Behavior | When to use |
+|---|---|---|
+| **Reject (HTTP 429)** | Return immediately with `Retry-After` header. Client retries. | Default for overloaded systems. Simplest, most common. |
+| **Queue with backpressure** | Hold in waiting queue. No response until admitted. Risks timeout at the client. | When clients have long timeouts and the overload is transient. |
+| **Accept-and-degrade** | Admit but cap `max_tokens`, reduce context window, or force shorter output. Transparent to user but changes behavior. | When serving quality can be traded for availability. |
+| **Redirect** | Return HTTP 302 or custom header pointing to another replica with available capacity. Requires load balancer coordination. | Multi-replica deployments with a shared routing layer. |
+
+Production systems typically combine: attempt redirect first (if other replicas exist), then queue with a short timeout (e.g., 5 seconds), then reject (429) if the timeout expires.
 
 ### 8.3 Admission control window
 
@@ -413,13 +521,29 @@ $$\text{free\_at}(t) = \sum_{i \in \text{active}} \mathbf{1}[\text{expected\_fin
 
 This allows the system to accept a request with a delayed admission time rather than rejecting outright: "you will start processing in ~3 seconds." This is critical for maintaining high utilization under bursty load.
 
+### 8.4 Admission control under memory pressure
+
+When the KV pool is near capacity (free blocks < watermark), the admission controller switches to a conservative mode:
+
+1. **Estimate worst-case KV requirement**: assume the new request will generate `max_tokens` output tokens (pessimistic). If even the pessimistic estimate fits, admit. If not, proceed to step 2.
+2. **Predict near-term frees**: look at the running set's expected completion times. If a sequence is likely to finish within the next 2--3 steps (it has generated close to `max_tokens` tokens), count its blocks as "soon-to-be-free."
+3. **Conditional admission**: admit the request if `needed_blocks <= free_blocks + soon_to_be_free_blocks`. The new request's prefill is deferred until the blocks actually free (the scheduler re-checks each step).
+4. **Priority override**: if the request is higher priority than any running sequence, the admission controller can force-admit and trigger preemption of a lower-priority sequence.
+
 ---
 
 ## 9. Preemption
 
 ### 9.1 When and why
 
-When the KV pool is exhausted and a higher-priority request arrives (or an SLO is about to be violated), the scheduler must **preempt** an active sequence: evict its KV blocks from HBM to free space.
+When the KV pool is exhausted and a higher-priority request arrives (or an SLO is about to be violated), the scheduler must **preempt** an active sequence: evict its KV blocks from HBM to free space. Preemption is the memory-pressure safety valve -- it is never desired but is necessary to maintain SLO compliance and system stability.
+
+**Trigger conditions:**
+
+1. **Block pool exhaustion**: free block count reaches zero and a new request must be admitted.
+2. **Watermark breach**: free block count drops below the safety watermark (5--10% of pool) even without new admissions. This triggers proactive preemption to rebuild the safety margin.
+3. **Priority enforcement**: a higher-priority request cannot be admitted because a lower-priority sequence occupies too many blocks.
+4. **SLO rescue**: a sequence is about to miss its deadline and needs immediate scheduling, but the current batch is at capacity.
 
 ### 9.2 Preemption mechanisms
 
@@ -443,24 +567,48 @@ Recompute vs swap tradeoff:
 
 | | Recompute | Swap |
 |---|---|---|
-| Memory cost | Zero | Host RAM proportional to swapped sequences |
-| Bandwidth cost | GPU compute + HBM BW | PCIe BW (out and in) |
+| Memory cost | Zero (blocks freed immediately) | Host RAM proportional to swapped sequences |
+| Bandwidth cost | GPU compute + HBM BW (during re-prefill) | PCIe BW (out and in, separate from HBM) |
 | Latency on resume | Full prefill of $S_{\text{saved}}$ tokens | PCIe transfer time |
 | Best for | Short sequences, high prefix cache hit | Long sequences with valuable KV |
+| CPU RAM impact | None | Requires pinned CPU memory reservation |
 
-vLLM's default: recompute for newly admitted requests that haven't started decoding, swap for in-flight decode sequences.
+**Crossover point.** Swap is preferred when $t_{\text{swap}} < t_{\text{recompute}}$:
+
+$$\frac{2 \cdot S \cdot b_{kv}}{\beta_{\text{PCIe}}} < \frac{2 \cdot N \cdot S_{\text{saved}}}{\pi \cdot \eta}$$
+
+For the 70B model at 50% utilization on H100 ($\eta = 0.5$, $\pi = 990$ TFLOPS):
+
+$$S_{\text{saved}} > \frac{2 \cdot S \cdot b_{kv} \cdot \pi \cdot \eta}{2 \cdot N \cdot \beta_{\text{PCIe}}} = \frac{2 \cdot S \cdot 320\text{KB} \cdot 495 \times 10^{12}}{2 \cdot 70 \times 10^9 \cdot 64 \times 10^9}$$
+
+For $S = 4096$ with no prefix cache hits ($S_{\text{saved}} = 4096$): recompute takes $2 \times 70 \times 10^9 \times 4096 / (495 \times 10^{12}) \approx 1158$ ms. Swap takes 39 ms. Swap wins by $30\times$.
+
+With 90% prefix cache hits ($S_{\text{saved}} = 410$): recompute takes $\approx 116$ ms. Swap takes 39 ms. Still swap, but the gap narrows. At 95%+ prefix hit rates, recompute becomes competitive.
+
+vLLM's default heuristic: recompute for newly admitted requests that haven't started decoding (no investment lost), swap for in-flight decode sequences (preserves KV compute).
 
 ### 9.3 Victim selection
 
-| Policy | Rationale |
-|---|---|
-| Lowest priority | Enforce tier guarantees |
-| Largest KV footprint | Maximize freed memory per eviction |
-| Longest remaining time | Evict requests that won't finish soon anyway |
-| LRU (least recently active) | Evict sequences whose last step was longest ago |
-| Highest slack | Evict the request furthest from its SLO deadline |
+Choosing which request to preempt is a multi-criteria decision:
 
-In practice: priority first, then largest KV among equal-priority candidates. This maximizes the probability that the higher-priority request can be admitted.
+| Policy | Rationale | When preferred |
+|---|---|---|
+| Lowest priority | Enforce tier guarantees | Multi-tenant with priority tiers |
+| Largest KV footprint | Maximize freed memory per eviction | When many blocks needed urgently |
+| Longest remaining time | Evict requests that won't finish soon anyway | When minimizing wasted compute |
+| LRU (least recently active) | Evict sequences whose last step was longest ago | General-purpose, simple |
+| Highest slack | Evict the request furthest from its SLO deadline | SLO-aware scheduling |
+| Newest arrival | The request with the least KV investment | When preemption is frequent |
+
+**Production default**: priority first, then largest KV among equal-priority candidates. This maximizes the probability that the higher-priority request can be admitted with a single eviction. If the largest-KV candidate does not free enough blocks, multiple victims are selected in order.
+
+**What happens to the preempted sequence:**
+
+1. The sequence's block table is walked. Each block's reference count is decremented.
+2. If using **recompute**: blocks with refcount reaching 0 are freed to the pool. Prefix-cached blocks (with hash entries) are retained.
+3. If using **swap**: blocks are DMA'd to the pre-allocated CPU swap buffer. The swap buffer is typically 4--16 GB of pinned host memory.
+4. The sequence is moved to the **swap pool** (or recompute waiting list).
+5. On re-admission: the scheduler allocates fresh blocks and either swaps in or recomputes. The sequence resumes from where it was preempted -- no tokens are lost, only time.
 
 ---
 

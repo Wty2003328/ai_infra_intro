@@ -145,6 +145,40 @@ flowchart TD
 
 The same silicon area runs at 1× FP16 OR 2× FP8 OR 4× FP4 throughput depending on the format. The MX shared exponent is decoded once per 32-element block, applied to all elements in the block — covered fully in [L2 FP_Unit_Design §6](../L2_Digital_Design_for_AI/FP_Unit_Design.md).
 
+### 3.3 FP4 Tensor Core Instruction Detail
+
+**How the FP4 tensor core instruction works:**
+
+The Blackwell FP4 tensor core operates on NVFP4 format: each element is a 4-bit value (1 sign bit, 2 mantissa bits, 1 implicit exponent bit), with a shared FP8 scale factor per block of 16 elements. The MMA operation proceeds as:
+
+1. **Block-scale decode:** Each 16-element block has an associated FP8 E4M3 scale. The hardware decodes this once per block and broadcasts it across the 16 elements, converting each 4-bit value into a full-width significand for the multiplier array.
+
+2. **MMA shapes supported (FP4):**
+
+| Instruction | M × N × K (elements) | FLOPs per instruction | Accumulator dtype |
+|---|---|---|---|
+| `wgmma.mma_async.m64n256k64` | 64 × 256 × 64 | $2 \times 64 \times 256 \times 64 = 2{,}097{,}152$ | FP32 |
+| `wgmma.mma_async.m64n128k64` | 64 × 128 × 64 | 1,048,576 | FP32 |
+| `wgmma.mma_async.m32n256k64` | 32 × 256 × 64 | 1,048,576 | FP32 |
+
+The K dimension is 64 (vs 32 for FP8, 16 for FP16) because each 32-bit word holds 8 FP4 elements. The outer-product engine processes K=64 elements in the same number of pipeline cycles as K=16 for FP16 — this is how the 4× throughput is achieved.
+
+3. **How 2× FP8 throughput is achieved:** FP8 uses K=32 per wgmma instruction (2 elements per byte × 16 bytes/word = 32). FP4 uses K=64 (4 elements per byte × 16 bytes/word = 64). The outer product engine performs 64 micro-accumulations in the same pipeline depth as 32, because the multiplier array is 4× sub-arrayed for FP4 — 4 parallel 4-bit multipliers per FP16 multiplier slot. The result: exactly 2× the FLOPs of FP8 per instruction.
+
+4. **Accuracy implications and calibration requirements:**
+
+FP4 has only 2 mantissa bits, giving ~0.25 relative precision per element. Without calibration, FP4 training diverges. The calibration pipeline (Transformer Engine v2):
+
+- **Dynamic range tracking:** TE maintains per-tensor running statistics of activation/gradient magnitudes during training.
+- **Block-scale optimization:** The FP8 shared scale for each 16-element block is chosen to minimize quantization error given the tracked distribution.
+- **Mixed-precision fallback:** TE automatically selects FP8 or FP16 for layers where FP4 causes >1% accuracy degradation (typically embedding layers, layer norms, and the final output projection).
+- **Loss scaling:** For FP4 backward, TE applies dynamic loss scaling to prevent gradient underflow in the narrow FP4 range.
+
+**Practical accuracy numbers (from NVIDIA benchmarks):**
+- Dense LLM training (7B–70B): FP4 achieves within 0.5% perplexity of BF16 baseline with TE calibration.
+- MoE training: FP4 for expert FFN layers, FP8 for shared layers — within 1% of BF16.
+- Without TE: FP4 diverges within 100–500 steps on most architectures.
+
 ### 3.3 Throughput numbers
 
 | Format | B200 dense (per package, dual-die) | B300 dense |
@@ -159,7 +193,7 @@ These are *spec sheet dense* numbers. Real-world utilization at FP4 caps around 
 
 ---
 
-## 4. TMEM — operand-fetch bifurcation
+## 4. TMEM — Tightly-coupled Memory for Tensor Cores
 
 ### 4.1 Why TMEM exists
 
@@ -170,7 +204,33 @@ Covered in detail at [L2 On_Chip_Memory_Hardware §5](../L2_Digital_Design_for_A
 - Doubling SMEM doubles capacity, not port count → doesn't help.
 - TMEM = 256 KB/SM with wide read ports (1 024 b each) geometrically matched to wgmma tile rows, accessible *only* by tensor cores.
 
-### 4.2 Programming model
+### 4.2 TMEM Architecture Detail
+
+TMEM is a dedicated SRAM structure per SM, physically separate from SMEM, designed exclusively as a staging buffer for tensor core operands. It is not a cache — there is no tag array, no eviction, no replacement policy. It is a software-managed scratchpad with a hardware interface optimized for wgmma tile shapes.
+
+**Capacity and organization:**
+- 256 KB per SM (73.7 MB total across 288 logical SMs on B200 — significant silicon area).
+- Organized as 64 rows × 4 KB/row, where each row maps to one tile row in the wgmma inner dimension.
+- Read port width: 1,024 bits per cycle — wide enough to feed an entire wgmma K-dimension strip in one cycle.
+- Write port: filled exclusively by the TMA engine (async DMA from HBM/L2).
+- Latency: 2–4 cycles from wgmma issue to operand availability (vs 8–20 for SMEM).
+
+**How TMEM is accessed:**
+- TMA `cp.async.bulk.tensor` instructions specify a TMEM destination via the tensor map descriptor. The TMA engine handles address generation, bounds checking, and swizzling.
+- `wgmma` instructions reference a TMEM-based descriptor (not register-based fragments). The tensor core reads operands directly from TMEM without going through the register file or SMEM.
+- CUDA threads cannot read or write TMEM directly. This eliminates contention: no thread can evict or corrupt a tensor tile mid-computation.
+- Synchronization uses the same `mbarrier` mechanism as SMEM: `cp.async.bulk` signals the barrier when the TMEM fill completes; `wgmma.wait_group` blocks until the tensor core has consumed the operands.
+
+**Use cases for AI kernels:**
+
+| Kernel | TMEM role | Benefit |
+|---|---|---|
+| Dense GEMM (FP4) | A and B tiles staged in TMEM; accumulator in registers | Eliminates SMEM bank conflicts; doubles effective operand bandwidth |
+| FlashAttention-3 | Q tile in TMEM; K, V streamed through SMEM | Q is reused across all K blocks — TMEM gives 2× bandwidth for the hot operand |
+| MoE expert FFN | Expert weights prefetched into TMEM | Expert switching is a TMEM descriptor swap, not a cache flush |
+| Convolution (im2col) | Input tile in TMEM, weight in SMEM | Avoids redundant SMEM reads for sliding-window access patterns |
+
+### 4.3 Programming model
 
 - TMA copies tiles HBM → TMEM via async DMA (with mbarrier signal).
 - wgmma reads operands directly from TMEM (no SMEM round-trip).
@@ -180,7 +240,7 @@ Covered in detail at [L2 On_Chip_Memory_Hardware §5](../L2_Digital_Design_for_A
 flowchart TB
     HBM[HBM3e]:::off
     TMA[TMA engine<br/>cp.async.bulk.tensor]:::tma
-    TMEM[TMEM 256 KB<br/>wide tensor-tile ports]:::tmem
+    TMEM["TMEM 256 KB<br/>64 rows × 4 KB<br/>1,024-bit read ports<br/>tensor-core-only access"]:::tmem
     SMEM[SMEM 256 KB<br/>32 banks, general access]:::smem
     WGMMA[wgmma tensor cores]:::tc
     THR[CUDA threads]:::thr
@@ -221,46 +281,88 @@ Without TE, FP4 training is ~95% likely to diverge. With TE, it converges within
 
 ## 6. NVLink-5 and the NVL72 fabric
 
-### 6.1 NVLink-5 signaling
+### 6.1 NVLink-5 signaling and lane architecture
 
-- 224 Gbps PAM4 SerDes, single-ended-equivalent differential pair.
-- 100 GB/s unidirectional per lane.
-- 18 lanes per B200 → 1.8 TB/s unidirectional / 3.6 TB/s bidirectional per GPU.
-- ~5 W per port for the PHY (significant share of TDP).
+NVLink-5 doubles the per-GPU bandwidth of NVLink-4 (900 GB/s on H100) to 1.8 TB/s unidirectional (3.6 TB/s bidirectional) through a combination of more lanes and faster signaling:
 
-### 6.2 NVL72 topology
+| Parameter | NVLink-4 (H100) | NVLink-5 (B200) | Delta |
+|---|---|---|---|
+| Signaling rate | 100 Gbps/lane (PAM4) | 200 Gbps/lane (PAM4) | 2× per lane |
+| Lanes per GPU | 18 | 18 | Same |
+| Unidirectional BW per lane | 50 GB/s | 100 GB/s | 2× |
+| Total unidirectional BW | 900 GB/s | 1.8 TB/s | 2× |
+| Total bidirectional BW | 1.8 TB/s | 3.6 TB/s | 2× |
+| PHY power per port | ~3 W | ~5 W | Higher due to faster SerDes |
 
-72 GPUs in one rack form a single 72-GPU NVLink domain via 9 NVSwitch trays (2 ASICs per tray).
+The 200 Gbps/lane PAM4 SerDes uses a 56 GHz Nyquist frequency with advanced DSP equalization (DFE + FFE) at both TX and RX. Each lane is a differential pair over copper cables or PCB traces within the rack. The 18 lanes connect to 9 NVSwitch ASICs (2 lanes per switch port).
+
+**NVLink-C2C vs NVLink:** These are distinct physical layers for distinct purposes:
+
+| | NVLink-5 | NVLink-C2C |
+|---|---|---|
+| **Purpose** | GPU-to-GPU communication within rack | GPU-to-CPU (Grace) or GPU-to-GPU chiplet bridging |
+| **Bandwidth** | 1.8 TB/s unidirectional (B200) | 900 GB/s bidirectional (GB200) |
+| **Topology** | Through NVSwitch fabric | Direct die-to-die via advanced packaging (CoWoS) |
+| **Latency** | ~1–5 μs (through NVSwitch) | ~100–200 ns (on-package) |
+| **Coherence** | GPUDirect, atomics | Full cache coherence (CPU ↔ GPU) |
+| **Cable/medium** | Copper cable cartridge or PCB trace | Silicon bridge (NV-HBI) on CoWoS substrate |
+
+### 6.2 NVL72 topology: why 72 GPUs?
+
+The NVL72 rack contains exactly 72 B200 GPUs because of the arithmetic of NVSwitch radix and lane count:
+
+- Each B200 has 18 NVLink-5 lanes.
+- Each NVSwitch-4 ASIC has 144 ports at 100 GB/s = 14.4 TB/s switching capacity.
+- A single NVSwitch ASIC can connect to 144 / 2 = 72 GPUs (2 lanes per GPU).
+- With 2 NVSwitch ASICs per tray and 9 trays, the total switching capacity is 18 × 14.4 = 259 TB/s.
+- Each GPU connects to all 18 NVSwitch ASICs (1 lane per ASIC), providing 18 × 100 GB/s = 1.8 TB/s injection bandwidth.
+
+**The topology is a single-tier fat tree (non-blocking):** Every pair of GPUs has a guaranteed 1.8 TB/s path through exactly one NVSwitch hop. No oversubscription. The 72-GPU count is the maximum radix achievable with 18 lanes per GPU and the NVSwitch-4 port count.
 
 ```mermaid
 flowchart TB
     subgraph RACK["NVL72 rack — single 72-GPU coherent NVLink domain"]
         direction TB
-        subgraph NS[9 NVSwitch trays · 18 ASICs total]
+        subgraph NS["9 NVSwitch trays · 18 ASICs total"]
             direction LR
-            S0[NVSwitch 0]:::sw
+            S0["NVSwitch-4 ASIC<br/>144 ports × 100 GB/s<br/>14.4 TB/s capacity"]:::sw
             S1[NVSwitch 1]:::sw
             SD[…]:::sw
             S17[NVSwitch 17]:::sw
         end
-        subgraph GPUS[72 × B200]
+        subgraph GPUS["72 × B200 (18 Compute trays × 4 GPUs)"]
             direction LR
-            G0[B200-0]:::g
+            G0["B200-0<br/>18 lanes out"]:::g
             G1[B200-1]:::g
             GD[…]:::g
             G71[B200-71]:::g
         end
-        GPUS <--> NS
+        GPUS <-->|"Each GPU: 1 lane per switch<br/>18 switches × 100 GB/s = 1.8 TB/s"| NS
     end
     classDef sw fill:#bae6fd,stroke:#0369a1,color:#000
     classDef g fill:#fde68a,stroke:#b45309,color:#000
 ```
 
-- **NVSwitch ASIC radix:** 144 ports × 50 GB/s = 7.2 TB/s switching capacity.
-- **Total switch capacity:** 18 × 7.2 = 130 TB/s — matches GPU aggregate (72 × 1.8 = 130 TB/s).
-- **Topology:** non-blocking 1-tier; every pair of GPUs has guaranteed 1.8 TB/s injection bandwidth.
+- **NVSwitch ASIC radix:** 144 ports × 100 GB/s = 14.4 TB/s switching capacity per ASIC.
+- **Total switch capacity:** 18 × 14.4 = 259 TB/s — well above GPU aggregate (72 × 1.8 = 129.6 TB/s), providing headroom for all-to-all patterns.
+- **Cable/cartridge system:** GPUs connect to NVSwitch trays via high-density copper cable cartridges (NVIDIA "OSFP" cage). Each cartridge bundles multiple differential pairs. The cable length within the rack is ~0.5–1 m, with signal integrity maintained by the DSP equalization in the SerDes. Cable failures are the most common hardware fault in NVL72 deployments.
 
-This is **the** fabric for tensor-parallel MoE: the all-to-all of expert routing requires every-pair bandwidth at the rack scale.
+**Why NVL72 is the sweet spot for FP8 training of large models:**
+
+A 400B MoE model (DeepSeek-V3 class) with 256 experts, EP=64, requires two all-to-all operations per MoE layer. Each all-to-all transfers ~500 MB. At 1.8 TB/s injection bandwidth per GPU, the all-to-all across 64 GPUs takes:
+
+$$T_{\text{all-to-all}} \approx \frac{N \times M}{B_{\text{injection}}} = \frac{64 \times 0.5 \;\text{GB}}{1{,}800 \;\text{GB/s}} \approx 18 \;\text{ms per layer}$$
+
+With 58 MoE layers: ~1 second of all-to-all per step. If this crossed the rack boundary onto InfiniBand (50 GB/s per link), it would take ~30 seconds — the training would be communication-bound. NVL72 keeps the entire EP domain within a single rack with full injection bandwidth.
+
+### 6.3 NVSwitch generation detail
+
+The NVSwitch-4 ASIC (Blackwell generation) features:
+- 144 NVLink ports at 100 GB/s each = 14.4 TB/s bisection bandwidth
+- Hardware multicast support (reduces AllReduce latency by eliminating store-and-forward)
+- SHARP-like in-switch reduction for NVLink traffic (reduces AllReduce volume within the rack)
+- ~300 W TDP per ASIC, liquid-cooled
+- 9 trays × 2 ASICs × 300 W = 5.4 kW just for NVSwitch — significant fraction of rack power
 
 ### 6.3 NVL576 (announced for Rubin)
 

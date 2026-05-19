@@ -1,6 +1,6 @@
 # System Design Interview
 
-How to approach AI-infra system design questions. Covers the framework you should run for any prompt, six fully worked example designs (LLM serving, training cluster, RAG, agent orchestrator, multi-modal pipeline, eval harness), the numbers you must memorize, and the failure modes that kill candidates.
+How to approach AI-infra system design questions. Covers the framework you should run for any prompt, seven fully worked example designs (LLM serving, training cluster, RAG, agent orchestrator, multi-modal pipeline, eval harness, RLHF/GRPO training), the numbers you must memorize, and the failure modes that kill candidates.
 
 **Prerequisites**: All preceding pages, especially [Production_Architecture](../L8_Inference_and_Serving/Production_Architecture.md), [Inference_Frameworks](../L8_Inference_and_Serving/Inference_Frameworks.md), [Distributed_Training](../L7_Training_Stack/Distributed_Training.md).
 
@@ -51,6 +51,27 @@ For full derivations see [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture
 ---
 
 ## 3. Worked Design 1: "Design an LLM API Service"
+
+```mermaid
+flowchart LR
+    classDef edge fill:#f9f,stroke:#333,stroke-width:1px
+    classDef router fill:#bbf,stroke:#333,stroke-width:1px
+    classDef engine fill:#bfb,stroke:#333,stroke-width:1px
+    classDef storage fill:#fbb,stroke:#333,stroke-width:1px
+
+    Client((Client)):::edge --> LB[Load Balancer / TLS]:::edge
+    LB --> Router[Frontend Router\nprefix-cache lookup\ntokenize]:::router
+    Router --> PP[Prefill Pool\nvLLM / TRT-LLM]:::engine
+    Router --> DP[Decode Pool\ncontinuous batching]:::engine
+    PP -->|KV transfer| DP
+    DP -->|SSE stream| Client
+    Router --> ModelReg[Model Registry\n+ LoRA Store]:::storage
+    PP --> KVStore[KV Cache\nRadixAttention]:::engine
+    DP --> KVStore
+    Obs[Prometheus + DCGM\n+ OTel]:::storage -.-> Router
+    Obs -.-> PP
+    Obs -.-> DP
+```
 
 ### Clarify
 
@@ -103,6 +124,34 @@ User → TLS → auth → rate limit → router (prefix-cache lookup, choose rep
 
 ## 4. Worked Design 2: "Train a 70B Model on 1024 GPUs"
 
+```mermaid
+flowchart TB
+    classDef compute fill:#bfb,stroke:#333,stroke-width:1px
+    classDef network fill:#bbf,stroke:#333,stroke-width:1px
+    classDef storage fill:#fbb,stroke:#333,stroke-width:1px
+
+    subgraph Cluster["1024 H100 Cluster (128 nodes)"]
+        direction TB
+        subgraph Node["8-GPU Node (TP=8, NVLink)"]
+            G0[GPU 0]:::compute
+            G1[GPU 1]:::compute
+            G2[GPU 2]:::compute
+            G7[GPU 7]:::compute
+        end
+        IB[NDR InfiniBand\n400 Gb/s]:::network
+        Node --- IB
+    end
+
+    DP[Data Parallel\nFSDP / ZeRO-3\nDP=128]:::compute
+    IB --- DP
+
+    Lustre[Lustre / WekaFS\n30 TB dataset\n200 TB checkpoints]:::storage
+    DP ---|stream shards| Lustre
+
+    DCP[Async Checkpoint\nto S3 / GCS]:::storage
+    Lustre --> DCP
+```
+
 ### Clarify
 
 - Goal: pretrain or fine-tune?
@@ -154,6 +203,23 @@ User → TLS → auth → rate limit → router (prefix-cache lookup, choose rep
 
 ## 5. Worked Design 3: "Build a RAG System"
 
+```mermaid
+flowchart LR
+    classDef user fill:#f9f,stroke:#333,stroke-width:1px
+    classDef embed fill:#bbf,stroke:#333,stroke-width:1px
+    classDef search fill:#bfb,stroke:#333,stroke-width:1px
+    classDef llm fill:#fbb,stroke:#333,stroke-width:1px
+
+    Q((User Query)):::user --> Emb[Embedding Model\nBGE / E5\n~1ms]:::embed
+    Emb --> VDB[Vector DB\nHNSW / FAISS\n~10ms]:::search
+    VDB --> RR[Reranker\nCross-Encoder\n~20ms]:::search
+    DocStore[Doc Chunk Store\n100M docs]:::search --> VDB
+    RR --> Prompt[Prompt Template\n+ retrieved chunks]:::llm
+    Q --> Prompt
+    Prompt --> LLM[vLLM / TRT-LLM\nTTFT ~500ms]:::llm
+    LLM -->|stream| A((Answer)):::user
+```
+
 ### Clarify
 
 - Corpus size: 100M docs.
@@ -202,6 +268,28 @@ query → embed (1ms) → vector search (10ms) → rerank (20ms) →
 
 ## 6. Worked Design 4: "Agent Orchestration Platform"
 
+```mermaid
+flowchart TB
+    classDef llm fill:#bbf,stroke:#333,stroke-width:1px
+    classDef tool fill:#bfb,stroke:#333,stroke-width:1px
+    classDef state fill:#fbb,stroke:#333,stroke-width:1px
+
+    Orch[Orchestrator\nstate machine per run]:::state
+    LLM[LLM Tier\nvLLM / TRT-LLM]:::llm
+    State[(Redis / Postgres\nagent state)]:::state
+    Sandbox[Tool Sandbox\nFirecracker / Docker]:::tool
+    Registry[Tool Registry\nJSON schema]:::tool
+
+    Orch -->|decide| LLM
+    LLM -->|tool call JSON| Orch
+    Orch -->|validate + dispatch| Registry
+    Registry --> Sandbox
+    Sandbox -->|result| Orch
+    Orch -->|observe| LLM
+    Orch --- State
+    Store[Object Store\ntranscripts]:::state --- State
+```
+
 ### Clarify
 
 - Agents: tool-calling LLM loops? Multi-agent communication?
@@ -249,6 +337,24 @@ query → embed (1ms) → vector search (10ms) → rerank (20ms) →
 
 ## 7. Worked Design 5: "Multi-Modal Inference Pipeline"
 
+```mermaid
+flowchart LR
+    classDef vision fill:#bbf,stroke:#333,stroke-width:1px
+    classDef llm fill:#bfb,stroke:#333,stroke-width:1px
+    classDef cache fill:#fbb,stroke:#333,stroke-width:1px
+
+    Img[Image Input]:::vision --> ViT[ViT Encoder\n~50 GFLOPs/image\n576 tokens × 24 layers]:::vision
+    ViT --> Proj[Linear Projection\n→ LLM token space]:::vision
+    Txt[Text Input]:::llm --> Tok[Tokenizer]:::llm
+    Proj --> Ctx[LLM Context\nimage + text tokens]:::llm
+    Tok --> Ctx
+    Ctx --> Dec[LLM Decoder\nvLLM / TRT-LLM]:::llm
+    Dec --> Out((Text Output)):::llm
+
+    ImgCache[(Image Token Cache\nhash → encoded tokens)]:::cache -.-> Proj
+    KVCache[(KV Prefix Cache\nimage-prefix)]:::cache -.-> Dec
+```
+
 ### Clarify
 
 - Input modalities: image, audio, video?
@@ -268,14 +374,21 @@ For VLM (Llava-style): vision encoder runs on the image, projects into LLM token
 
 ### Capacity
 
-- Image encode: ViT-Large ≈ 30 GFLOPs/image. Cheap on a small GPU.
-- LLM: same as before, but context is longer (image tokens).
-- KV cache larger because of image tokens.
+- **Image encoding FLOPs**: ViT-L processes 576 patches (224×224 image, 16×16 patch) through 24 transformer layers. Per-layer cost: 2 × 1024² × 576 ≈ 1.2 GFLOPs → 24 layers ≈ 29 GFLOPs. With projection head and MLP overhead: ~50 GFLOPs/image. On a single L4 (60 TFLOPS FP16): ~1ms/image — negligible.
+- **Text-image fusion attention**: LLM cross-attention over image tokens is dense. For 576 image tokens in a 70B model: attention cost = 2 × d × L × 576 per layer. At 80 layers: ~10× more expensive than 576 text tokens due to larger hidden dim. Budget ~20-30% extra context FLOPs vs text-only.
+- **LLM**: same as before, but context is longer (image tokens inflate prompt by 576-2048 tokens per image).
+- **KV cache**: larger because of image tokens. 70B model: 320 KB/token × 576 image tokens = 184 MB per image in KV. With 100 concurrent image requests: 18.4 GB just for image prefixes — plan GPU memory accordingly.
+
+### GPU Allocation
+
+- Single-node split: on 8×H100, dedicate 1 GPU to ViT encoder (FP16, low utilization, handles many concurrent encodes), 7 GPUs to LLM decoder with TP=7 (or TP=8 with encoder time-sliced). Alternative: separate encoder pool on cheaper GPUs (L4/A10) and forward image tokens over NVLink/IB.
+- Latency budget: image encode 1ms + prefill 100ms + decode as usual. Image encoding never the bottleneck.
 
 ### Caching
 
-- Cache encoded images (image hash → image tokens) — frequent re-uploads of same images cheap.
-- Prefix cache the image-prefix in KV.
+- **Image token cache**: hash image bytes → encoded token tensor. For user-generated content: ~5-10% hit rate (re-uploads, thumbnails). For product/stock images: 40-60% hit rate. Saves the 50 GFLOPs encode cost on hits.
+- **KV prefix cache**: cache the image-prefix KV entries. Same image + same system prompt = shared prefix across requests. RadixAttention handles this automatically. Expected savings: 30-50% of prefill compute for cached image+system prefixes.
+- **Multi-modal KV sizing**: with 576 image tokens per request and 320 KB/token: 184 MB prefix per unique image. A 10K-entry image prefix cache needs ~1.8 TB — distributed across the decode pool's GPU HBM, or offloaded to CPU RAM with tiered caching.
 
 ### Streaming
 
@@ -284,6 +397,22 @@ For VLM (Llava-style): vision encoder runs on the image, projects into LLM token
 ---
 
 ## 8. Worked Design 6: "Eval Harness for LLM Quality"
+
+```mermaid
+flowchart TB
+    classDef runner fill:#bbf,stroke:#333,stroke-width:1px
+    classDef data fill:#bfb,stroke:#333,stroke-width:1px
+    classDef score fill:#fbb,stroke:#333,stroke-width:1px
+
+    Scheduler[Eval Scheduler\ncommit-triggered / periodic]:::runner
+    Scheduler --> MU[Model Under Test\nvLLM / TRT-LLM]:::runner
+    Scheduler --> DL[Dataset Loader\nMMLU / GSM8K / custom]:::data
+    DL -->|stream prompts| MU
+    MU -->|completions| Judge[Scoring Engine\nexact-match / LLM-as-judge]:::score
+    Judge --> Agg[Metric Aggregator\nper-bench scores]:::score
+    Agg --> Dash[Dashboard / Regression Alert]:::score
+    Cache[(Result Cache\nprompt-hash → completion)]:::data -.-> DL
+```
 
 ### Clarify
 
@@ -306,8 +435,15 @@ Eval runner →
 
 ### Capacity
 
-- 1M eval prompts × 200 token output × 50ms TPOT = 10K hours of decode = 1.4M GPU-hours? No — parallelize across replicas.
-- 64 replicas × 1500 tok/s = 96K tok/s; 1M·200 tokens / 96K ≈ 35 min. Feasible.
+- **MMLU walkthrough**: 14K questions × 4 choices × ~100 output tokens = 5.6M tokens to generate. On 8×H100 at 1500 tok/s per GPU: ~47 minutes wall time. With 2 nodes (16 GPUs): ~23 minutes. This is the "fast CI gate" scenario.
+- **1M prompts**: × 200 output tokens × 50ms TPOT = 10K hours serial = 1.4M GPU-hours? No — parallelize across replicas. 64 replicas × 1500 tok/s = 96K tok/s; 1M·200 / 96K ≈ 35 min. Feasible.
+- **Parallel run budget**: On a dedicated 4-node (32 H100) eval cluster, you can run ~4 eval jobs in parallel (8 GPUs each for a 70B model). MMLU + GSM8K + HumanEval + MT-Bench run in ~1 hour total. Budget this into CI: block merge on regression, allow ~2 hour eval window.
+
+### Tradeoffs
+
+- **Batch size vs latency vs throughput for eval workloads**: eval is offline — maximize throughput with large batch sizes (256+). TPOT is irrelevant; only total wall time matters. But: very large batches spike GPU memory (KV cache). For a 70B model on 8 H100: batch 256 uses ~256 × 200 tokens × 320 KB/token = 16.4 GB KV — fits easily. Batch 1024: 65.6 GB — tight. Sweet spot: 512 with chunked prefill.
+- **Greedy (temp=0) vs sample-N**: greedy is deterministic and 1× cost. Sample-N (N=5-10) catches stochastic failures but multiplies cost N×. Pragmatic: greedy for CI, sample-N for nightly full regression.
+- **Judge model size**: LLM-as-judge with 70B is reliable but expensive (eval-on-eval). Use 8B judge for CI, 70B judge for release gates. Human spot-check 1-2% of borderline cases.
 
 ### Determinism
 
@@ -320,12 +456,6 @@ Eval runner →
 - For open-ended outputs: LLM-as-judge with another model. Risks (judge bias) → use multiple judges, human spot-check.
 - For closed-ended: exact match, F1, BLEU, pass@k.
 
-### Tradeoffs
-
-- Greedy vs sample-N: sample-N catches stochastic failures but expensive.
-- Judge model size: smaller judge cheaper but less reliable.
-- Online (continuous) vs offline (commit-triggered): online catches regressions sooner.
-
 ### Failures
 
 - Eval engine OOM on long prompts → cap input length.
@@ -334,7 +464,78 @@ Eval runner →
 
 ---
 
-## 9. Common Tradeoff Axes
+## 9. Worked Design 7: "RLHF/GRPO Training Infrastructure"
+
+```mermaid
+flowchart TB
+    classDef policy fill:#bbf,stroke:#333,stroke-width:1px
+    classDef reward fill:#bfb,stroke:#333,stroke-width:1px
+    classDef train fill:#fbb,stroke:#333,stroke-width:1px
+
+    subgraph GenCluster["Generation Cluster (FP16/BF16)"]
+        PM[Policy Model\n70B, vLLM engine]:::policy
+        PM -->|K=16 responses\nper prompt| Responses[Response Batch\n16 × 4096 tokens]:::policy
+    end
+
+    subgraph RewardCluster["Reward + Training Cluster (FP8)"]
+        RM[Reward Model\n8-70B]:::reward
+        RM -->|per-response score| Adv[Advantage Computation\nGRPO group stats]:::reward
+        Adv --> PG[Policy Gradient Update\nPPO / GRPO loss]:::train
+        Ref[Reference Model\nfrozen]:::policy
+        Ref -->|KL penalty| PG
+    end
+
+    Prompt[Prompt Batch\n1024 prompts]:::train --> PM
+    Responses --> RM
+    PG -->|weight sync| PM
+
+    WS[Fast Weight Sync\nNVLink / IB\n~seconds]:::train -.->|updated weights| PM
+```
+
+### Clarify
+
+- Algorithm: GRPO (Group Relative Policy Optimization) — no separate critic model. PPO variant with group-based advantage estimation.
+- Policy model size: 70B. Reward model: 8B or same-size.
+- Generation parameters: K=16 responses per prompt, max output 4096 tokens.
+- Training hardware: 16×H100 nodes or more. Time budget: continuous training for days/weeks.
+
+### The Inference-Inside-Training Problem
+
+GRPO's generation step is the dominant cost. Each training step requires a full inference pass (KV cache, continuous batching, sampling) to produce K completions per prompt. This is not standard training — it needs an inference engine (vLLM, TensorRT-LLM) embedded inside the training loop.
+
+**Why it matters**: The generation step produces orders of magnitude more tokens than the training step consumes. A single GRPO step with batch 1024 and K=16 produces 16 × 4096 × 1024 = 67M tokens. On 16×H100 at 1500 tok/s each: 67M / 24K = ~46 minutes of generation per training step. The actual gradient computation is ~2 minutes. Generation is 95%+ of step time.
+
+### Capacity Math
+
+- **Tokens per step**: batch_size × K × max_output = 1024 × 16 × 4096 = 67.1M tokens.
+- **Generation throughput**: 16×H100 at 1500 tok/s = 24K tok/s aggregate. Wall time: 67.1M / 24K ≈ 46 min/step.
+- **Training throughput**: 70B model, 6 × 70e9 = 420 GFLOPs/token. With 16×H100 FP8 at 50% MFU: 16 × 1979 × 0.5 = 15.8 PFLOPS. Per-step FLOPs: 1024 × 16 × 4096 × 420e9 ≈ 2.8e19. Time: 2.8e19 / 15.8e15 ≈ 30 min.
+- **Total step time**: ~46 min generation + ~30 min training + ~2 min overhead ≈ 78 min/step. At 500 steps to convergence: ~27 days.
+- **Scaling**: doubling GPUs halves both phases. 32×H100 → ~14 days. 64×H100 → ~7 days.
+
+### Infrastructure Design
+
+- **Generation cluster**: runs vLLM in BF16/FP16 for generation quality (FP8 quantization can degrade sample diversity). Continuous batching, prefix caching for shared prompts. This cluster is sized for token throughput.
+- **Training cluster**: runs FP8 for throughput via Transformer Engine. FSDP/ZeRO-3 sharding across nodes. This cluster is sized for FLOPs.
+- **Weight sync**: after each gradient update, updated policy weights must be transferred to the generation cluster. 70B BF16 = 140 GB. Over NVLink (900 GB/s intra-node): ~160ms. Over IB (50 GB/s inter-node): ~3s. Tolerable once per step.
+- **vLLM-inside-training pattern**: frameworks like OpenRLHF and TRL wrap vLLM as the generation backend. The training framework (PyTorch FSDP) owns the weight update loop; vLLM serves as a black-box token generator, receiving weight updates via shared memory or parameter broadcast.
+
+### Tradeoffs
+
+- **GRPO vs PPO**: GRPO eliminates the critic model (saves 50% of training compute) but needs K responses per prompt (higher generation cost). Net: GRPO wins at K=8-16 for most workloads.
+- **Shared vs separate generation/training cluster**: shared (same GPUs do both) maximizes utilization but requires mode-switching (inference engine teardown → training setup). Separate clusters are simpler to operate but leave generation GPUs idle during training phase. At scale (>64 GPUs), separate is standard.
+- **Online vs offline generation**: online (generate fresh each step) is standard for RLHF. Offline (pre-generate, reuse) saves compute but stale data hurts policy quality.
+
+### Failures
+
+- **Generation OOM**: large K × batch × max_output inflates KV cache. Mitigation: chunk generation into micro-batches, cap max_output per response.
+- **Weight sync stalls**: network hiccup delays update propagation → stale policy generates lower-quality samples. Timeout + skip generation with stale weights + alert.
+- **Reward model collapse**: if reward model is trained alongside policy, it can overfit to current policy behavior. Mitigation: freeze reward model checkpoints, periodic human evaluation.
+- **NaN loss from advantage explosion**: group advantage computation can spike. Gradient clip (max_norm=1.0) + advantage normalization per group.
+
+---
+
+## 10. Common Tradeoff Axes
 
 These appear in every design.
 
@@ -350,7 +551,7 @@ These appear in every design.
 
 ---
 
-## 10. Failure Modes That Kill Candidates
+## 11. Failure Modes That Kill Candidates
 
 - **Jumping to the architecture** without clarifying scale, SLO, multi-tenancy.
 - **Vague capacity numbers** ("a lot of GPUs") instead of math.
@@ -363,7 +564,7 @@ These appear in every design.
 
 ---
 
-## 11. Strong Closing Habits
+## 12. Strong Closing Habits
 
 - Restate the SLOs you're hitting.
 - Sketch the next 3–6 month roadmap (autoscaling improvements, FP4 rollout, regional expansion).
@@ -372,7 +573,7 @@ These appear in every design.
 
 ---
 
-## 12. Practice Prompts
+## 13. Practice Prompts
 
 Try these in 45 minutes each:
 
@@ -389,7 +590,7 @@ For each: run the 7-step framework, write down the numbers, draw the boxes, talk
 
 ---
 
-## 13. Common Interview Questions
+## 14. Common Interview Questions
 
 **Q: An interviewer asks "how would you design ChatGPT-style serving?" — what do you do first?**
 A: Clarify scope: what scale? Single model or family? SLO targets? Multi-tenant? Then estimate load (RPS, tokens/sec). Only then start drawing components.
@@ -429,7 +630,7 @@ A: Batch: maximize throughput, longer chunks, no SLO, reuse GPU 100%. Online: re
 
 ---
 
-## 14. Further Reading
+## 15. Further Reading
 
 - "Designing Data-Intensive Applications" (Kleppmann) — system thinking applies broadly.
 - Production Engineering blogs from Meta, OpenAI, Anthropic, Anyscale, Mosaic.

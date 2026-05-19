@@ -379,53 +379,197 @@ LMDeploy (Shanghai AI Lab) serves Chinese open-source models (InternLM, Qwen, Yi
 
 | Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
 |---------|------|--------|---------|--------|-------|-----|----------|
-| Continuous batching | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
+| Continuous batching | Yes | Yes | Yes (inflight batching) | Via backend | Via vLLM | Yes | Yes |
 | Paged KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Prefix caching | Hash-based | Radix tree | Hash-based | Via backend | Hash-based | Hash-based | Hash-based |
 | Chunked prefill | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Disaggregated PD | Yes (V1) | Yes | Via Dynamo | Native | Native | No | No |
+| Disaggregated prefill | Yes (V1, KV transfer API) | Yes (built-in) | Via Dynamo | Native (NIXL transport) | Native (cluster-scale) | No | No |
+| Prefix caching | Hash-based (block-aligned) | Radix tree (token-granular) | Hash-based | Via backend | Hash-based | Hash-based | Hash-based |
+| Speculative decoding | Draft model, Medusa, EAGLE, MTP | Draft model, EAGLE | Draft model, Medusa | Via backend | Via vLLM | Draft model | Partial |
+| Custom kernels | CUDA/Triton (open) + FlashAttention | FlashInfer + CUDA (open) | TensorRT closed-source fused kernels | N/A (orchestration) | Via vLLM | Custom CUDA | TurboMind C++ |
 | Streaming output | SSE | SSE | Via Triton | SSE | SSE | SSE | SSE |
 
-### 11.2 Optimization and Quantization
+### 11.2 Quantization and KV Cache
 
 | Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
 |---------|------|--------|---------|--------|-------|-----|----------|
-| FlashAttention v2/v3 | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| FP8 weights | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
+| FP8 weights | Yes (PT, Hopper) | Yes | Yes (PT, calibration) | Via backend | Via vLLM | Yes | Yes |
 | FP8 KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Partial | Partial |
-| INT8 (AWQ/GPTQ) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| INT4 quantization | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Speculative decoding | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
+| INT8 weights (AWQ/GPTQ/SmoothQuant) | Yes | Yes | Yes (best coverage) | Via backend | Via vLLM | Yes | Yes |
+| INT4 quantization (AWQ/GPTQ) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes (strong) |
+| KV cache quantization granularity | Per-tensor or per-head | Per-head | Per-tensor or per-channel | Via backend | Via vLLM | Per-tensor | Per-tensor |
 
-### 11.3 Model and Architecture Support
-
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| MoE models | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
-| Multimodal (VLM) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
-| Multi-LoRA | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
-| Structured output | Outlines, xgrammar | xgrammar | xgrammar | Via backend | Via vLLM | Outlines | Partial |
-| HuggingFace models | Broadest | Broad | Limited | Via backend | Broad | Broadest | Focused |
-
-### 11.4 Parallelism and Deployment
+### 11.3 Parallelism and Distributed Serving
 
 | Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
 |---------|------|--------|---------|--------|-------|-----|----------|
-| Tensor parallelism | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Pipeline parallelism | Yes | Yes | Yes | Via backend | Via vLLM | No | Partial |
-| Expert parallelism | Yes | Yes | Yes | Via backend | Via vLLM | Partial | No |
+| Tensor parallelism (TP) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
+| Pipeline parallelism (PP) | Yes | Yes | Yes | Via backend | Via vLLM | No | Partial |
+| Expert parallelism (EP) | Yes | Yes | Yes (optimized all-to-all) | Via backend | Via vLLM | Partial | No |
 | Multi-node | Yes | Yes | Yes | Native | Native | Partial | No |
+| Disaggregated PD | KV transfer API (V1) | Built-in v0.4+ | Via Dynamo orchestration | Native (NIXL) | Native (global KV pool) | No | No |
+
+### 11.4 Model and Architecture Support
+
+| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
+|---------|------|--------|---------|--------|-------|-----|----------|
+| MoE models | Yes | Yes | Yes (optimized EP) | Via backend | Via vLLM | Yes | Partial |
+| Multimodal (VLM) | Yes (broadest) | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
+| Multi-LoRA | Yes (Punica/S-LoRA) | Yes | Yes (UniServe) | Via backend | Via vLLM | Yes | Partial |
+| Structured output | Outlines, xgrammar | xgrammar (GPU-accelerated) | xgrammar | Via backend | Via vLLM | Outlines | Partial |
+| HuggingFace models | Broadest (any HF model) | Broad | Limited (per-model plugin) | Via backend | Broad | Broadest | Focused (Qwen/InternLM) |
+
+### 11.5 Production Readiness
+
+| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
+|---------|------|--------|---------|--------|-------|-----|----------|
 | OpenAI-compatible API | Yes | Yes | Via Triton | Yes | Yes | Yes | Yes |
-| NVIDIA GPUs | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| AMD GPUs | Yes | Partial | No | No | Yes | Partial | No |
+| Kubernetes integration | Community Helm charts | Community | NVIDIA NIM operator | Native CRDs + HPA | Native CRDs | HF Inference Endpoints | Community |
+| Observability | Prometheus metrics, OpenTelemetry traces | Prometheus metrics | Triton metrics, DCGM | Cluster-level metrics | Cluster-level metrics | Prometheus metrics | Limited |
+| NVIDIA GPUs | Yes | Yes | Yes (NVIDIA-only) | Yes (NVIDIA-only) | Yes | Yes | Yes |
+| AMD GPUs | Yes (ROCm) | Partial (ROCm) | No | No | Yes (ROCm) | Partial (ROCm) | No |
 | CPU-only | Partial | No | No | No | No | Partial | No |
-| Open source | Yes | Yes | Weights only | Yes | Yes | Yes | Yes |
+| Open source | Yes (Apache 2.0) | Yes (Apache 2.0) | Weights only (NVIDIA license) | Yes | Yes (MIT) | Yes (Apache 2.0) | Yes (Apache 2.0) |
 
 ---
 
-## 12. Performance Comparison
+## 12. Deep Dive: SGLang vs vLLM Architecture Comparison
 
-### 12.1 Latency and Throughput
+The two most popular open-source engines share the same logical architecture (scheduler, block manager, model runner) but differ in three critical design choices: KV cache indexing, scheduler implementation language, and attention kernel library.
+
+### 12.1 RadixAttention vs PagedAttention prefix caching
+
+| Dimension | vLLM (hash-chain APC) | SGLang (RadixAttention) |
+|-----------|------------------------|-------------------------|
+| Indexing structure | Flat hash table: `Dict[block_hash, block_id]` | Radix tree (compact trie) over token sequences |
+| Matching granularity | Block-aligned ($B_s = 16$ tokens) | Token-granular (any prefix length) |
+| Matching algorithm | Sequential hash probing from block 0; first miss terminates | Tree traversal from root; partial node match triggers node split |
+| Sub-block sharing | Not possible: tokens 0--95 match but token 96 differs = miss at block 6 | Possible: tree splits the node at the divergence point, sharing tokens 0--95 |
+| Multi-branch support | No: each hash key maps to exactly one block | Yes: tree branches naturally model divergent suffixes from shared prefixes |
+| Insertion cost | Hash computation + table probe per block: $O(S/B_s)$ | Tree traversal + optional node split: $O(S)$ worst case, $O(S/B_s)$ amortized |
+| Eviction | LRU on unreferenced hash entries, $O(1)$ via linked list | LRU on tree leaf nodes + tree compaction (merge single-child chains) |
+
+**Concrete example.** Three requests share a 100-token system prompt, then diverge:
+
+- Request A: 100 shared + 50 unique = 150 tokens
+- Request B: 100 shared + 80 unique = 180 tokens
+- Request C: 100 shared + 30 unique = 180 tokens (different suffix from B)
+
+vLLM hash-chain: blocks 0--5 (tokens 0--95) match. Block 6 (tokens 96--111) differs between A, B, and C because the unique suffix starts at token 100. Cache hit = 96/150 = 64% for A.
+
+SGLang radix tree: tree has a node for tokens 0--99 (the shared prefix). Three child branches for the three suffixes. Cache hit = 100/150 = 67% for A. The 4-token improvement (100 vs 96) comes from sub-block matching.
+
+The difference grows with shorter shared prefixes and longer block sizes. With $B_s = 16$ and a 17-token shared prefix, hash-chain matches 0 tokens (the entire block differs) while the radix tree matches all 17.
+
+### 12.2 Scheduler implementation
+
+| Dimension | vLLM V1 | SGLang |
+|-----------|---------|--------|
+| Language | C++ core with Python wrapper | Rust |
+| Scheduling overhead per step | ~50 $\mu$s | ~10--30 $\mu$s |
+| GIL involvement | None on hot path (separate process) | None (Rust has no GIL) |
+| Communication | Shared-memory queues (zmq) | Shared-memory channels |
+| Policy | FCFS with priority tiers | FCFS with prefix-locality awareness |
+
+Both eliminate Python from the scheduling critical path. SGLang's Rust scheduler has slightly lower overhead at very high request rates (>500 concurrent sequences), but the difference is small enough (tens of microseconds) to be negligible compared to GPU step times (20--80 ms).
+
+### 12.3 Attention kernel choice
+
+| Kernel | vLLM | SGLang |
+|--------|------|--------|
+| Decode | Custom PagedAttention v1/v2 (CUDA) or FlashAttention v3 (Hopper) | FlashInfer (variable-length packed attention) |
+| Prefill | FlashAttention v2/v3 with block-table indirection | FlashInfer |
+| Tree attention (spec decode) | Custom tree-masked FlashAttention | FlashInfer tree attention variant |
+
+FlashInfer provides better performance on heterogeneous batch shapes (mixed prefill + decode with varying sequence lengths) because it compiles attention kernels JIT for the specific batch shape. vLLM's custom kernels are more portable across GPU architectures but may have higher launch overhead for ragged batches.
+
+### 12.4 Benchmark comparison
+
+Approximate performance on H100 8-GPU node, Llama-3-70B FP8:
+
+| Workload | vLLM V1 TTFT p50 | vLLM V1 TPOT p50 | SGLang TTFT p50 | SGLang TPOT p50 | Notes |
+|----------|-------------------|-------------------|------------------|------------------|-------|
+| Synthetic, no prefix reuse | 50--100 ms | 15--25 ms | 55--110 ms | 15--25 ms | Roughly tied |
+| Chat with system prompt (2K shared) | 50--100 ms | 15--25 ms | 30--60 ms | 15--25 ms | SGLang faster TTFT (higher prefix hit) |
+| Multi-turn chat (5 turns) | 40--80 ms | 15--25 ms | 25--50 ms | 15--25 ms | SGLang advantage grows with turns |
+| Agentic (branching tool calls) | 50--100 ms | 15--25 ms | 35--65 ms | 15--25 ms | Radix tree captures branch structure |
+| Pure throughput (offline) | ~4500 tok/s | -- | ~4500 tok/s | -- | Tied when prefix reuse is absent |
+
+The SGLang advantage concentrates in workloads with complex prefix reuse patterns. On workloads with no reuse, the frameworks are within measurement noise.
+
+---
+
+## 13. Deep Dive: TensorRT-LLM Internals
+
+### 13.1 The compilation pipeline
+
+TRT-LLM does not interpret a model at runtime. It compiles the full inference graph into an optimized binary engine before deployment. The pipeline:
+
+```mermaid
+flowchart LR
+    A["HuggingFace<br/>safetensors"] --> B["Weight<br/>quantization"]
+    B --> C["ONNX export<br/>(per-layer graph)"]
+    C --> D["TensorRT graph<br/>optimization"]
+    D --> E["Kernel auto-tuning<br/>(GEMM shapes)"]
+    E --> F["Memory planning<br/>(activations, KV)"]
+    F --> G["Engine<br/>serialization"]
+```
+
+**Step 1: Weight quantization.** Weights are quantized offline (FP8, INT8 SmoothQuant, INT4 AWQ/GPTQ). Quantization happens before graph optimization so that the compiler can fuse quantize-dequantize (QDQ) nodes with adjacent operations, eliminating unnecessary casts.
+
+**Step 2: ONNX export.** Each transformer layer is exported to an ONNX subgraph. TRT-LLM's model definitions (`models/` directory) contain both a PyTorch reference implementation and an ONNX export path. Not all HuggingFace models are supported -- only those with explicit TRT-LLM model definitions.
+
+**Step 3: Graph optimization.** TensorRT applies compiler passes:
+- **Operator fusion**: combine QKV projection + bias + activation into a single GEMM. Fuse layer normalization with the subsequent linear projection. Fuse MLP gate + up projections with SwiGLU activation.
+- **Kernel selection**: for each fused subgraph, select the best kernel from TRT's kernel library (hundreds of pre-tuned CUDA kernels for different GEMM shapes, attention implementations, and precisions).
+- **Precision casting**: insert FP8/INT8 casts at layer boundaries, keeping intermediate computations in the highest precision that fits the kernel's requirements.
+- **Memory planning**: pre-compute the exact activation tensor sizes and lifetimes. Allocate a single contiguous buffer reused across layers (activation memory pool), eliminating dynamic allocation at runtime.
+
+**Step 4: Kernel auto-tuning.** For each GEMM in the graph, TRT benchmarks multiple kernel implementations (cuBLAS, cuDNN, custom TRT kernels) across a range of batch sizes and sequence lengths. The fastest kernel for the target GPU is selected. This step takes minutes to hours and is the main reason engine builds are slow. The auto-tuning results are specific to the GPU architecture -- an engine built for H100 will not run optimally on A100.
+
+**Step 5: Engine serialization.** The optimized graph, selected kernels, quantized weights, and memory plan are serialized into a single binary file (the "engine"). This file is typically several GB and is loaded at deployment time with zero additional compilation.
+
+### 13.2 Kernel fusion
+
+TRT-LLM achieves its performance advantage primarily through aggressive kernel fusion that Python-based frameworks cannot replicate:
+
+| Fused operation | Separate kernels (vLLM/SGLang) | Fused kernel (TRT-LLM) | Savings |
+|-----------------|-------------------------------|------------------------|---------|
+| QKV projection + bias + RoPE | 3 GEMM + bias add + RoPE kernel | Single fused kernel | 4 kernel launches + 3 global memory round-trips |
+| LayerNorm + linear projection | 2 kernels | 1 fused kernel (norm output fed directly to GEMM input) | 1 kernel launch + 1 global memory read/write |
+| MLP gate + up + SwiGLU + down | 4 kernels | 2 fused kernels (gate+up fused, activation+down fused) | 2 kernel launches + 2 global memory round-trips |
+| Attention (QKV + softmax + V) | 1 kernel (FlashAttention) | 1 kernel (custom fused paged attention) | Similar; TRT advantage is in surrounding ops |
+| Sampling (top-k + top-p + multinomial) | 3--4 kernels | 1 fused sampling kernel | 2--3 kernel launches |
+
+Each eliminated kernel launch saves 5--20 $\mu$s of overhead. Each eliminated global memory round-trip saves a read and write of the activation tensor ($B \times d$ elements). Across 80 layers, these savings compound to 10--30% lower latency.
+
+### 13.3 Plugin architecture
+
+Not all operations can be expressed as standard TensorRT layers. TRT-LLM uses a **plugin** system for custom operations:
+
+- **CustomGemmPlugin**: dispatches to architecture-specific GEMM kernels (FP8 tensor-core GEMM on Hopper, INT8 HMMA on Ampere).
+- **LlamaAttentionPlugin**: implements paged attention with block-table indirection, integrating FlashAttention-style tiling with TRT's memory planning.
+- **QuantizePlugin / DequantizePlugin**: handle weight and activation quantization with hardware-native instructions.
+- **RmsNormPlugin**: fused RMS normalization kernel.
+- **NCCL plugins**: optimized all-reduce and all-to-all for TP and EP.
+
+Plugins are compiled CUDA code loaded at engine build time. They are not open source -- they ship as precompiled `.so` files in the TRT-LLM package. This is the primary source of vendor lock-in: the best kernels are NVIDIA-proprietary and cannot be inspected, modified, or ported to other hardware.
+
+**Adding a new model** requires: (1) writing a model definition in TRT-LLM's Python API that constructs the ONNX-compatible graph, (2) ensuring all operations have either a TRT native implementation or a plugin, (3) running the build pipeline for each target configuration. This typically takes days to weeks per model, compared to hours for vLLM (which just needs a PyTorch model definition).
+
+### 13.4 Batched inference handling
+
+TRT-LLM handles batching differently from vLLM/SGLang:
+
+- **Inflight batching** (TRT-LLM's term for continuous batching) is implemented in C++ with zero Python on the critical path.
+- The scheduler maintains the same three-queue structure (waiting, running, swap) but operates on fixed-shape tensor slots. TRT-LLM pre-allocates tensor buffers for the maximum batch size and max sequence length at engine build time.
+- **Padded sequences**: unlike vLLM's fully paged approach, TRT-LLM historically used padded sequences within the batch, with custom kernels that skip padding tokens. Newer versions support paged KV cache, but the scheduler still works with slot-based allocation rather than fully dynamic block allocation.
+- The advantage of slot-based allocation: kernel launch overhead is lower because tensor shapes are known at engine build time. The disadvantage: less flexible memory utilization, especially at highly variable sequence lengths.
+
+---
+
+## 14. Performance Comparison
+
+### 14.1 Latency and Throughput
 
 Approximate performance on H100 8-GPU node, Llama-3-70B FP8, 8K context, production chat workload. These numbers shift with releases — always benchmark on your workload.
 
@@ -437,7 +581,7 @@ Approximate performance on H100 8-GPU node, Llama-3-70B FP8, 8K context, product
 | TGI | 70–140 ms | 20–35 ms | Medium | Moderate |
 | LMDeploy | 50–90 ms | 15–25 ms | High (on supported models) | Moderate |
 
-### 12.2 Where Performance Differences Come From
+### 14.2 Where Performance Differences Come From
 
 The same model on the same hardware produces different throughput across frameworks. The sources of the gap:
 
@@ -449,7 +593,7 @@ $$\text{Throughput} = \frac{\text{Effective tokens per step}}{\text{Step latency
 4. **Memory efficiency** — framework overhead (Python runtime, temporary buffers, framework-managed tensors) reduces the KV cache budget. TRT-LLM's compiled runtime has the smallest overhead.
 5. **Sampling path** — structured-output grammar masking adds per-step cost. Implementations vary in how much they GPU-accelerate the constraint application.
 
-### 12.3 Benchmarking Methodology
+### 14.3 Benchmarking Methodology
 
 When comparing frameworks, control for:
 
@@ -461,9 +605,9 @@ When comparing frameworks, control for:
 
 ---
 
-## 13. Choosing a Framework: Decision Framework
+## 15. Choosing a Framework: Decision Framework
 
-### 13.1 Production GPU Fleet, OpenAI-Style API
+### 15.1 Production GPU Fleet, OpenAI-Style API
 
 | Priority | Recommended | Rationale |
 |----------|-------------|-----------|
@@ -472,7 +616,7 @@ When comparing frameworks, control for:
 | Chat/agentic with prompt reuse | SGLang | RadixAttention, best prefix-cache hit rates |
 | Quickest time-to-production | TGI | One-command HF Hub deployment |
 
-### 13.2 Multi-Node Disaggregated Serving
+### 15.2 Multi-Node Disaggregated Serving
 
 | Stack | When |
 |-------|------|
@@ -480,7 +624,7 @@ When comparing frameworks, control for:
 | llm-d | Heterogeneous fleet, open-source preference, vLLM-based |
 | SGLang disaggregated mode | Chat/agentic workloads with heavy prefix sharing at cluster scale |
 
-### 13.3 Edge and Heterogeneous
+### 15.3 Edge and Heterogeneous
 
 | Framework | When |
 |-----------|------|
@@ -488,7 +632,7 @@ When comparing frameworks, control for:
 | llama.cpp | CPU-only, Apple Silicon, local development, GGUF quantized models |
 | vLLM (CPU mode) | CPU inference with PyTorch-based flexibility |
 
-### 13.4 Research and Quick Iteration
+### 15.4 Research and Quick Iteration
 
 | Framework | When |
 |-----------|------|
@@ -498,9 +642,9 @@ When comparing frameworks, control for:
 
 ---
 
-## 14. Common Architectural Patterns
+## 16. Common Architectural Patterns
 
-### 14.1 Engine Process Model
+### 16.1 Engine Process Model
 
 Most engines run as a single process per inference replica with a worker per GPU shard:
 
@@ -519,21 +663,21 @@ flowchart TB
 
 Workers communicate via NCCL collectives (all-reduce for TP, point-to-point for PP). The scheduler dispatches step inputs to all workers; they execute in lockstep.
 
-### 14.2 KV Cache Manager
+### 16.2 KV Cache Manager
 
 Pages = fixed-size blocks of $B$ tokens (typically $B = 16$). Per-sequence block table. Allocation: pop from free list. Sharing: refcount increment on prefix match. Eviction: LRU on cached prefixes; recompute or swap on preemption.
 
 $$\text{Num blocks} = \frac{\text{HBM allocated to KV}}{2 \cdot L \cdot H_{kv} \cdot d \cdot b \cdot B}$$
 
-### 14.3 Sampling
+### 16.3 Sampling
 
 Per-sequence parameters: temperature, top-$k$, top-$p$, repetition penalty, frequency/presence penalty, logit bias, grammar mask. Implementation: GPU kernels (Triton or CUDA) with per-row parameter arrays. Output: token IDs plus optional logprobs and top-logprobs.
 
-### 14.4 Streaming
+### 16.4 Streaming
 
 Each token emitted by the sampler goes through a response queue to the client via Server-Sent Events (SSE) or chunked HTTP streaming. The tokenizer detokenizes on-the-fly with byte-pair fallback for incomplete UTF-8 sequences at chunk boundaries.
 
-### 14.5 Multi-LoRA Serving
+### 16.5 Multi-LoRA Serving
 
 Each request specifies a LoRA adapter ID. The engine:
 1. Groups requests by adapter, or
@@ -543,7 +687,7 @@ Adapter weights are small ($< 1$ GB typically), so they can be cached in GPU mem
 
 ---
 
-## 15. The Build vs. Interpret Tradeoff
+## 17. The Build vs. Interpret Tradeoff
 
 TRT-LLM's compiled approach and vLLM/SGLang's interpreted approach represent a fundamental design axis.
 
@@ -560,7 +704,7 @@ Most production deployments land on a hybrid: TRT-LLM for the latency-critical f
 
 ---
 
-## 16. Multimodal Inference
+## 18. Multimodal Inference
 
 Vision, audio, and image-generation extensions follow the same framework pattern but add complexity:
 
@@ -573,7 +717,7 @@ vLLM, SGLang, and TRT-LLM all support major VLMs. The encoder forward pass is ty
 
 ---
 
-## 17. Common Pitfalls
+## 19. Common Pitfalls
 
 1. **Picking TRT-LLM without a build pipeline.** Each model + TP + precision + max_seq_len combination is its own compiled engine. Without automated build and validation CI, deployment becomes manual and error-prone.
 
@@ -591,7 +735,7 @@ vLLM, SGLang, and TRT-LLM all support major VLMs. The encoder forward pass is ty
 
 ---
 
-## 18. Common Interview Questions
+## 20. Common Interview Questions
 
 **Q: Compare vLLM and TensorRT-LLM. When would you pick each?**
 
@@ -635,7 +779,7 @@ A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM c
 
 ---
 
-## 19. Further Reading
+## 21. Further Reading
 
 - Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) — the vLLM paper.
 - Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) — RadixAttention and the SGLang engine.

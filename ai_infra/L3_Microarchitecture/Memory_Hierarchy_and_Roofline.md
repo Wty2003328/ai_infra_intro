@@ -86,6 +86,70 @@ Cerebras inverts the roofline: with on-die SRAM at 21 PB/s instead of HBM at TB/
 
 ## 3. Worked AI workload analyses
 
+### 3.0 Complete worked example: Roofline on H100
+
+This section walks through a full roofline analysis on the H100 SXM5 to establish the methodology before examining each workload individually.
+
+**H100 SXM5 specifications:**
+- $\pi_{\text{FP16}} = 990$ TFLOPS (dense, no sparsity)
+- $\pi_{\text{FP8}} = 1{,}980$ TFLOPS
+- $\beta_{\text{HBM}} = 3.35$ TB/s
+
+**Ridge point:**
+
+$$I_{\text{ridge}} = \frac{\pi}{\beta} = \frac{990 \times 10^{12}}{3.35 \times 10^{12}} = 295.5 \;\text{FLOP/B (FP16)}$$
+
+$$I_{\text{ridge, FP8}} = \frac{1{,}980}{3.35} = 591 \;\text{FLOP/B}$$
+
+Any kernel with arithmetic intensity above 295 (FP16) or 591 (FP8) is compute-bound on this chip.
+
+---
+
+**Example A: Dense Matmul $M=N=K=4096$, FP16**
+
+$$W = 2MNK = 2 \times 4096 \times 4096 \times 4096 = 137{,}438{,}953{,}472 \;\text{FLOPs} \approx 137.4 \;\text{GFLOPs}$$
+
+Bytes moved (loading A, B; storing C):
+
+$$Q = (MN + NK + MK) \times 2\text{B} = 3 \times 4096 \times 4096 \times 2 = 100{,}663{,}296 \;\text{B} \approx 96 \;\text{MB}$$
+
+$$I = \frac{W}{Q} = \frac{137.4 \times 10^9}{100.7 \times 10^6} = 1{,}365 \;\text{FLOP/B}$$
+
+Compare to ridge: $1{,}365 \gg 295$ → **firmly compute-bound**.
+
+$$P_{\text{achievable}} = \min(\pi, I \cdot \beta) = \min(990, 1{,}365 \times 3.35) = \min(990, 4{,}573) = 990 \;\text{TFLOPS}$$
+
+At 70% practical utilization: $P_{\text{actual}} \approx 693$ TFLOPS.
+
+$$T_{\text{kernel}} = \frac{137.4 \times 10^9}{693 \times 10^{12}} = 0.198 \;\text{ms}$$
+
+**Example B: Attention Decode (batch=64, heads=32, dim=128, seq=2048, FP16)**
+
+Decode computes $Q \times K^T$ for one new token against the full KV cache, then applies softmax and multiplies by V.
+
+Per-layer FLOPs for attention:
+- $QK^T$: batch × heads × dim × seq = $64 \times 32 \times 128 \times 2048 \times 2 = 1{,}073{,}741{,}824$ FLOPs
+- $Attn \times V$: same magnitude: $64 \times 32 \times 2048 \times 128 \times 2 = 1{,}073{,}741{,}824$ FLOPs
+- Total attention FLOPs per layer: $W_{\text{attn}} \approx 2.15$ GFLOPs
+
+Bytes for Q/K/V reads (each element is 2 bytes):
+- Q read: $64 \times 32 \times 128 \times 2 = 524{,}288$ B (tiny — one token per batch element)
+- K read: $64 \times 32 \times 2048 \times 128 \times 2 = 1{,}073{,}741{,}824$ B ≈ 1 GB
+- V read: same as K ≈ 1 GB
+- O write: $64 \times 32 \times 128 \times 2 = 524{,}288$ B (tiny)
+
+$$Q_{\text{attn}} \approx 2 \times 10^9 \;\text{B} = 2 \;\text{GB}$$
+
+$$I_{\text{decode-attn}} = \frac{2.15 \times 10^9}{2 \times 10^9} = 1.075 \;\text{FLOP/B}$$
+
+$I = 1.075 \ll 295$ → **catastrophically memory-bound**.
+
+$$P_{\text{achievable}} = I \cdot \beta = 1.075 \times 3.35 = 3.6 \;\text{TFLOPS}$$
+
+That is **0.36% of peak**. Even with FP8, $I$ only reaches 2.15 and achievable is 7.2 TFLOPS (0.36% of FP8 peak). This single calculation explains why decode is the hardest problem in AI systems — the arithmetic intensity is irreducibly low for single-token generation.
+
+---
+
 ### 3.1 Dense GEMM (compute-bound regime)
 
 GEMM $C = A B$ with $A \in \mathbb{R}^{M\times K}$, $B \in \mathbb{R}^{K\times N}$:
@@ -241,7 +305,38 @@ flowchart TD
 
 ## 6. Memory tiers re-examined
 
-### 6.1 Bandwidth ratios
+### 6.1 Complete latency/throughput hierarchy (H100 SXM5 numbers)
+
+| Tier | Latency (cycles) | Latency (ns @ 1.83 GHz) | Bandwidth (per SM) | Bandwidth (aggregate) | Capacity | Access method |
+|---|---|---|---|---|---|---|
+| **Register File** | 1 | 0.55 | ~100 TB/s | ~14.4 PB/s (144 SMs) | 256 KB total (64 KB per PB) | Direct register read; bank-conflict penalty |
+| **TMEM (Blackwell+)** | 2–4 | 1.1–2.2 | ~50 TB/s | ~7.2 PB/s (144 SMs) | 256 KB/SM | Tensor-core-only via wgmma descriptor |
+| **SMEM / L1** | 8–20 | 4.4–11 | ~30 TB/s | ~4.3 PB/s (144 SMs) | 256 KB/SM (configurable) | 32 banks, 4B interleaved; bank conflict serializes |
+| **L2 Cache** | 30–80 | 16–44 | N/A | ~10 TB/s | ~50 MB chip-wide | Hardware-managed; sliced across memory controllers |
+| **HBM3** | 300–500 | 164–273 | N/A | 3.35 TB/s | 80 GB | Via L2 miss → memory controller → DRAM channel |
+
+**Bandwidth ratio derivation:**
+
+$$\frac{\beta_{\text{RF}}}{\beta_{\text{SMEM}}} = \frac{100}{30} \approx 3.3\times$$
+
+$$\frac{\beta_{\text{SMEM}}}{\beta_{\text{L2}}} = \frac{30{,}000}{10{,}000} \approx 3\times \;\text{(per SM, but L2 is shared across all SMs)}$$
+
+$$\frac{\beta_{\text{L2}}}{\beta_{\text{HBM}}} = \frac{10{,}000}{3{,}350} \approx 3\times$$
+
+The "~3–10× per tier" rule holds across the stack. Each tier is roughly one order of magnitude slower but one order of magnitude larger.
+
+**Per-tier roofline ridge points (H100 FP16, $\pi = 990$ TFLOPS):**
+
+| Memory tier | $\beta$ | $I_{\text{ridge}} = \pi / \beta$ | Implication |
+|---|---|---|---|
+| RF (per SM) | ~100 TB/s/SM | ~7 FLOP/B | Any compute-resident kernel is compute-bound |
+| SMEM (per SM) | ~30 TB/s/SM | ~22 FLOP/B | Tiled GEMM inner loop is compute-bound |
+| L2 (aggregate) | ~10 TB/s | ~99 FLOP/B | Medium-size attention tiles can be compute-bound |
+| HBM (aggregate) | 3.35 TB/s | 295 FLOP/B | Most LLM ops are memory-bound at this tier |
+
+A kernel that fits its working set in SMEM sees an effective ridge of 22 FLOP/B — meaning even a modest algorithm with $I > 22$ is compute-bound. This is the fundamental reason tiling works: it shifts the bottleneck from the HBM roofline to the SMEM roofline.
+
+### 6.2 Bandwidth ratios
 
 ```mermaid
 flowchart TD
@@ -265,6 +360,43 @@ The 10× per-tier rule. Each tier-shift is a step-function in throughput. Kernel
 For SMEM-resident operands, $\beta_{\text{SMEM}} = 30$ TB/s/SM, $\pi_{\text{SM}} = 100$ TFLOPS at FP16 → $I_{\text{ridge,SMEM}} \approx 3$ FLOP/B. Trivially compute-bound. So once you're tile-resident in SMEM, throughput is bounded by tensor-core arithmetic, not memory.
 
 This is *why* tiling works.
+
+---
+
+## 6.5 How to read an Nsight Compute roofline plot
+
+NVIDIA Nsight Compute (`ncu`) generates roofline plots that show exactly where each kernel sits relative to the hardware ceilings. Here is how to read them:
+
+**Axes and lines:**
+
+| Element | Meaning | How to read |
+|---|---|---|
+| **X-axis** (log scale) | Arithmetic intensity $I = W/Q$ in FLOP/B | Left = memory-bound; right = compute-bound |
+| **Y-axis** (log scale) | Achievable performance in FLOP/s | Higher is better; ceiling is peak hardware throughput |
+| **Slanted line** (left) | $P = I \cdot \beta_{\text{HBM}}$ — memory-bound ceiling | Kernel dots below this line are not hitting HBM bandwidth limit (other bottleneck) |
+| **Horizontal line** (right) | $P = \pi$ — compute-bound ceiling | Kernel dots below this are not hitting compute limit |
+| **Ridge point** (intersection) | $I_{\text{ridge}} = \pi / \beta$ | The critical X-value dividing memory-bound from compute-bound |
+| **Dots** (one per kernel) | Achieved $(I, P)$ for each profiled kernel | Position relative to the roofline reveals the bottleneck |
+
+**Reading a dot:**
+1. A dot **on the slanted line** (left of ridge): the kernel is HBM-bandwidth-bound and is achieving the maximum possible throughput given its arithmetic intensity. To go faster, increase $I$ (fusion, quantization, batching) or buy faster HBM.
+2. A dot **on the horizontal line** (right of ridge): the kernel is compute-bound and is achieving near-peak FLOPS. To go faster, lower precision (FP8/FP4) or buy more tensor cores.
+3. A dot **below both lines**: the kernel has an **unexploited bottleneck** — typically instruction issue limits, low occupancy, register bank conflicts, or poor memory coalescing. The gap between the dot and the nearest ceiling line quantifies the headroom available.
+4. A dot **at $I \approx 1$** (far left): decode-class kernel. Achievable throughput is $\sim \beta$ FLOPS. The dot will be near $P = 3.35$ TFLOPS on H100 for FP16 ($I = 1$, $P = 1 \times 3.35$).
+
+**Multiple rooflines in one plot:** Nsight Compute can overlay rooflines for different memory tiers (HBM, L2, L1/SMEM). Each tier has its own slanted line with a different slope ($\beta$). A kernel may be HBM-bound but L2-compute-bound — meaning the inner loop fits in L2 and hits the compute ceiling there, while the outer loop streams from HBM and is bandwidth-bound.
+
+**Generating the plot:**
+
+```bash
+# Profile a kernel
+ncu --set roofline --launch-skip 5 --launch-count 1 -o profile.ncu-rep ./my_kernel
+
+# Generate the roofline plot (requires NVIDIA Nsight Compute 2023+)
+ncu-ui profile.ncu-rep   # Opens GUI with roofline view
+```
+
+The `--set roofline` flag collects the FLOP counters and byte counters needed for the roofline. The resulting plot will show exactly which kernels are memory-bound vs. compute-bound and by how much.
 
 ---
 

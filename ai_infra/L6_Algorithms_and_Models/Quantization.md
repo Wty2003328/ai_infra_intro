@@ -135,6 +135,23 @@ At $b = 4$, the symmetric range is $[-8, 7]$ with step size $s = 2\alpha / 15 \a
 
 The storage advantage is decisive: a 70 B parameter model occupies 35 GB in FP16, 17.5 GB in INT8, and **8.75 GB in INT4** (plus ~0.5 GB in scale metadata). This is the difference between "requires 2×H100" and "fits on a single GPU."
 
+### 3.3 FP8 Formats: E4M3 and E5M2
+
+FP8 replaces the integer grid with a **floating-point** grid at 8 bits, retaining a (sign, exponent, mantissa) encoding. Two encodings are standardized by the OCP (Open Compute Project):
+
+| Format | Sign | Exponent | Mantissa | Representable range | inf/NaN |
+|---|---|---|---|---|---|
+| **E4M3** | 1 | 4 | 3 | $\pm 448$ | No (reserved for $-s \cdot 2^e$ encoding) |
+| **E5M2** | 1 | 5 | 2 | $\pm 57{,}344$ | Yes (standard IEEE-like encoding) |
+
+**E4M3** trades dynamic range for precision: 3 mantissa bits yield $2^3 = 8$ significand levels (vs. 4 for E5M2), giving finer spacing between adjacent representable values. The maximum representable value is $\pm (1 + 7/8) \times 2^{7} = \pm 448$. This is sufficient for forward-pass tensors because weights and activations are typically well-normalized after LayerNorm / RMSNorm, with dynamic range far below $448$.
+
+**E5M2** adds one exponent bit to reach a range of $\pm 57{,}344$, at the cost of halving the significand precision. Backward-pass gradients have much wider dynamic range (spanning multiple orders of magnitude), so the extra exponent bit prevents overflow. The standard inf/NaN encoding is preserved for gradient aggregation.
+
+**Why the split works.** Forward tensors have small, predictable dynamic range $\Rightarrow$ E4M3 maximizes per-value precision. Gradients exhibit heavy tails and occasional large spikes $\Rightarrow$ E5M2 avoids catastrophic overflow. This asymmetric assignment recovers most of BF16 quality with half the bandwidth and twice the FLOPS.
+
+**FP8 in production.** NVIDIA's Transformer Engine automatically selects E4M3 for weights and activations, and E5M2 for gradients during training. For inference-only workloads, E4M3 is used everywhere — there are no gradients to worry about. The H100's native FP8 tensor cores deliver 1 979 TFLOPS (dense) at FP8, exactly $2\times$ the BF16 throughput of 989 TFLOPS. Blackwell (B200) doubles this again to ~4 500 TFLOPS FP8. Quality impact: with proper per-tensor calibration, FP8 E4M3 inference shows $< 0.1\%$ perplexity regression on 70 B-class models compared to BF16.
+
 ---
 
 ## 4. Post-training quantization (PTQ)
@@ -183,6 +200,22 @@ $$
 $$
 
 Solved by grid search or gradient descent over $\alpha$. Typically yields $\alpha^*$ at the 99.5%–99.99% percentile, automatically pruning outliers. This is the default in TorchQuant, AutoRound, and most modern PTQ pipelines.
+
+### 4.3 Quantization-Aware Training (QAT) vs Post-Training Quantization (PTQ)
+
+All methods above are PTQ: the model is quantized *after* training completes, without modifying its weights. QAT takes a different approach — it inserts **fake-quantization nodes** into the computation graph during training or fine-tuning, so the model learns weights that are inherently robust to quantization error.
+
+**PTQ** is fast (hours on a single GPU for calibration), requires only a small calibration set ($128$–$512$ samples), and adds no training cost. Quality is nearly lossless at 8-bit for both integer (INT8) and floating-point (FP8 E4M3) formats. Below 8-bit, PTQ quality degrades: dense models show measurable regression at INT4, and sub-4-bit quantization requires specialized methods (GPTQ, AWQ, AQLM) to stay within acceptable perplexity bounds.
+
+**QAT** is slower (days of fine-tuning at full batch throughput), but the model explicitly minimizes the gap between quantized and full-precision outputs during training. Fake-quant nodes simulate the quantize-then-dequantize path: $\hat{w} = s \cdot \mathrm{clamp}(\lfloor w/s \rceil + z,\; 0,\; 2^b - 1) - z$. Gradients flow through the straight-through estimator (STE) — the identity function at the rounding step, since $\lfloor \cdot \rceil$ has zero gradient almost everywhere. The result: weights settle into regions of the parameter space where quantization noise is benign, enabling quality at 4-bit and even 2-bit that PTQ cannot match.
+
+**When QAT is worth the cost:**
+
+1. **Aggressive bit-width targets (INT4 / FP4)** where PTQ leaves $> 0.5$ perplexity points on the table.
+2. **Models with sensitive layers** — first/last layers, embedding tables, and attention projection layers often require mixed-precision treatment that QAT can learn automatically.
+3. **Deployment economics** — when the model will serve billions of tokens, the hardware cost savings from lower precision ($4\times$ memory reduction, $2\times$ throughput) justify the one-time training investment.
+
+**Production trend (2025–2026).** Most LLM deployments use PTQ (GPTQ/AWQ/SmoothQuant) at 8-bit for latency-critical serving, and QAT only for aggressive 4-bit targets where PTQ quality is insufficient. Llama-3 ships both FP16 and pre-quantized INT4/AWQ checkpoints optimized via PTQ, reflecting the industry default. The line between PTQ and QAT is blurring: methods like **SpinQuant** (learned rotation matrices applied before quantization) and **Quantization-Aware Fine-Tuning (QAFT)** add a brief fine-tuning phase after PTQ — typically 1–2 epochs on a small dataset — recovering most of the QAT quality benefit at roughly $1/10$th the training cost. These hybrid approaches are becoming the pragmatic choice for 4-bit deployment of frontier-scale models.
 
 ---
 
@@ -293,21 +326,92 @@ $$
 
 This is the Optimal Brain Surgeon update. Per-step cost: $O(d^2)$ for the row of $H^{-1}$.
 
-### 6.3 GPTQ's $O(d)$-per-column trick
+### 6.3 GPTQ Worked Example — 4x4 Matrix Quantized Column-by-Column
 
-OBQ is $O(d^3)$ total (quantize $d$ columns, each costs $O(d^2)$). GPTQ observes that:
+Consider quantizing a $4 \times 4$ weight matrix $W$ (symmetric INT4, range $[-8, 7]$) with a non-trivial Hessian. Let:
 
-1. Processing columns in **arbitrary order** (e.g., row 0, row 1, ...) rather than greedily, loses negligible quality.
-2. Processing a batch of $B = 128$ columns simultaneously allows a single Cholesky decomposition of $H^{-1}$.
+$$
+W = \begin{pmatrix} 0.8 & 0.2 & -0.5 & 0.3 \\ 0.1 & 0.6 & 0.4 & -0.2 \\ -0.3 & 0.7 & 0.1 & 0.5 \\ 0.4 & -0.1 & 0.6 & 0.2 \end{pmatrix}
+$$
 
-Algorithm (simplified):
+And suppose the inverse Hessian (from calibration activations $X$ via $H^{-1} = (2XX^T)^{-1}$) is:
+
+$$
+H^{-1} = \begin{pmatrix} 2.0 & 0.5 & 0.3 & 0.1 \\ 0.5 & 1.5 & 0.2 & 0.4 \\ 0.3 & 0.2 & 1.0 & 0.3 \\ 0.1 & 0.4 & 0.3 & 1.8 \end{pmatrix}
+$$
+
+The Cholesky factor $L$ of $H^{-1}$ (where $H^{-1} = LL^T$) is precomputed:
+
+$$
+L = \begin{pmatrix} 1.414 & 0 & 0 & 0 \\ 0.354 & 1.177 & 0 & 0 \\ 0.212 & 0.108 & 0.970 & 0 \\ 0.071 & 0.326 & 0.274 & 1.282 \end{pmatrix}
+$$
+
+Step size $s$ for symmetric INT4 with $\alpha = 1$: $s = 2/15 \approx 0.133$.
+
+**Step 1: Quantize column 0.** Values: $W_{:,0} = [0.8, 0.1, -0.3, 0.4]$.
+
+Quantize: $[0.8/s, 0.1/s, -0.3/s, 0.4/s] = [6.0, 0.75, -2.25, 3.0]$, rounded: $[6, 1, -2, 3]$. Dequantized: $\hat{W}_{:,0} = [0.8, 0.133, -0.267, 0.4]$.
+
+**Error from column 0:** $\delta_0 = W_{:,0} - \hat{W}_{:,0} = [0, -0.033, -0.033, 0]$.
+
+**Step 2: Distribute error to remaining columns using the Hessian.** The GPTQ update for column $q = 0$ adjusts all columns $j > 0$:
+
+$$
+W_{:,j} \;\leftarrow\; W_{:,j} - \frac{\delta_0}{[H^{-1}]_{00}} \cdot [H^{-1}]_{0j}
+$$
+
+The coefficient is $\delta_0 / [H^{-1}]_{00} = [0, -0.033, -0.033, 0] / 2.0 = [0, -0.0167, -0.0167, 0]$.
+
+For column 1 ($j = 1$): $[H^{-1}]_{01} = 0.5$. Correction: $[0, -0.0167, -0.0167, 0] \times 0.5 = [0, -0.0083, -0.0083, 0]$.
+
+$$
+W_{:,1} \leftarrow [0.2, 0.6, 0.7, -0.1] - [0, -0.0083, -0.0083, 0] = [0.2, 0.608, 0.708, -0.1]
+$$
+
+For column 2 ($j = 2$): $[H^{-1}]_{02} = 0.3$. Correction: $[0, -0.0167, -0.0167, 0] \times 0.3 = [0, -0.005, -0.005, 0]$.
+
+$$
+W_{:,2} \leftarrow [-0.5, 0.4, 0.1, 0.6] - [0, -0.005, -0.005, 0] = [-0.5, 0.405, 0.105, 0.6]
+$$
+
+For column 3 ($j = 3$): $[H^{-1}]_{03} = 0.1$. Correction: $[0, -0.0167, -0.0167, 0] \times 0.1 = [0, -0.0017, -0.0017, 0]$.
+
+$$
+W_{:,3} \leftarrow [0.3, -0.2, 0.5, 0.2] - [0, -0.0017, -0.0017, 0] = [0.3, -0.198, 0.502, 0.2]
+$$
+
+**Interpretation:** Column 0's quantization error was $[0, -0.033, -0.033, 0]$ — rows 1 and 2 were rounded down. The Hessian correction adjusts the *remaining* columns to compensate: rows 1 and 2 of columns 1, 2, 3 are slightly increased, so that when multiplied by the calibration activations, the total output $WX$ is as close as possible to the original. The amount of correction per column is proportional to $[H^{-1}]_{0j}$ — columns that are more correlated with column 0 (in the activation distribution) receive more correction.
+
+**Step 3: Quantize column 1 (with corrections applied).** Values: $W_{:,1} = [0.2, 0.608, 0.708, -0.1]$.
+
+Quantize: $[0.2/s, 0.608/s, 0.708/s, -0.1/s] = [1.5, 4.57, 5.32, -0.75]$, rounded: $[2, 5, 5, -1]$. Dequantized: $[0.267, 0.667, 0.667, -0.133]$.
+
+Error: $\delta_1 = [-0.067, -0.059, 0.041, 0.033]$.
+
+Correct remaining columns 2, 3 using $[H^{-1}]_{1j} / [H^{-1}]_{11}$:
+
+$$
+W_{:,j} \leftarrow W_{:,j} - \frac{\delta_1}{1.5} \cdot [H^{-1}]_{1j}
+$$
+
+**Steps 4-5:** Repeat for columns 2, 3. Each step quantizes the current column and redistributes its error to all subsequent columns using the Hessian structure.
+
+**Result:** The final quantized matrix minimizes $\|WX - \hat{W}X\|_F^2$ because each column's error was compensated by adjusting subsequent columns in proportion to their activation-space correlation.
+
+**The Cholesky decomposition for efficiency.** GPTQ precomputes the Cholesky factor $L$ of $H^{-1}$. The column-by-column updates become:
+
+$$
+W_{:,j} \leftarrow W_{:,j} - \frac{\delta_q}{L_{qq}} \cdot L_{qj}
+$$
+
+where $L_{qq}$ is the diagonal of the lower-triangular Cholesky factor. This is a forward-substitution — $O(j)$ per update instead of $O(j^2)$ for explicit $H^{-1}$ indexing. The total algorithm:
 
 ```
-Input: W (n × d), H_inv = Cholesky(2 * X * X^T)^(-1), group_size G
-For each block of G columns:
-    Quantize the block: w_q = quantize(W[:, block])
-    Compute error: δ = (W[:, block] - w_q) / diag(H_inv)[block]
-    Update remaining columns: W[:, remaining] -= δ @ H_inv[block, remaining]^T
+Input: W (n x d), L = Cholesky(H_inv), group_size G
+For each block of G columns (q = 0, 1, ...):
+    Quantize: w_q = quantize(W[:, q])
+    Error: delta = (W[:, q] - w_q) / L[q,q]
+    Update: W[:, q+1:] -= outer(delta, L[q, q+1:])
 ```
 
 Complexity: $O(d^2 \cdot n / G)$ — linear in $d$ per column, with the Cholesky as a one-time $O(d^3)$ cost amortized over all rows $n$.
@@ -341,7 +445,7 @@ $$
 
 where $X_j$ is the $j$-th row of the calibration activation matrix (i.e., the activations that multiply weight column $j$). Channels with large activations are "sensitive" — quantization error in those weights is amplified by the large activation magnitude.
 
-### 7.2 Per-channel scaling
+### 7.2 Per-channel scaling — Detailed Derivation
 
 AWQ applies a per-channel scaling factor $\alpha_j$ to weight column $j$ *before* quantization, then divides the scale into the activation:
 
@@ -356,6 +460,30 @@ $$
 $$
 
 For uniform quantization, $\|\delta(\alpha_j W_{:j})\| \approx \alpha_j \|\delta W_{:j}\|$ when the scale factor aligns with the quantization grid. But for channels where $|W_{:j}|$ is small (outlier-weight channels), scaling $\alpha_j > 1$ *enlarges* the values into a regime where the quantization step size $s$ is relatively finer.
+
+**Why weights co-located with large activations matter more.** The output error for a linear layer $Y = XW$ when $W$ is perturbed by $\delta W$ is:
+
+$$
+\|\delta Y\|_F^2 = \|(X)(\delta W)\|_F^2 = \mathrm{tr}(\delta W^T X^T X \delta W)
+$$
+
+For a single column $j$ of $\delta W$, the contribution is:
+
+$$
+\|\delta Y_j\|_F^2 = \|X_j\|^2 \cdot \|\delta W_{:j}\|^2
+$$
+
+where $X_j$ is the $j$-th column of $X$ (the activations for feature $j$). This shows that the output error is *multiplicatively* amplified by $\|X_j\|$ — the activation magnitude. A weight quantization error of $\epsilon$ in a channel where $\|X_j\| = 100$ causes $100\times$ more output distortion than the same $\epsilon$ in a channel where $\|X_j\| = 1$.
+
+This is why AWQ identifies "salient" channels as those with large $\|X_j\|$ and protects them with per-channel scaling $\alpha_j > 1$ before quantization, which increases the effective precision for those weight channels at the cost of slightly decreased precision for the (already less important) non-salient channels.
+
+**The per-channel scaling search.** For each channel $j$, AWQ searches over $\alpha_j \in \{2^0, 2^1, \ldots, 2^6\}$ to find:
+
+$$
+\alpha_j^* = \arg\min_{\alpha} \left\|(WX)_{:j} - \mathrm{quant}(\alpha \cdot W_{:j}) \cdot (X_j / \alpha)\right\|^2
+$$
+
+This evaluates the *output* error (not the weight error) for each candidate $\alpha$. Only $0.1\%$--$1\%$ of channels need $\alpha_j \neq 1$, because most channels have balanced activation magnitudes. The few outlier channels — where $\|X_j\|$ is much larger than the median — are the ones that benefit from scaling.
 
 ### 7.3 Efficient search
 
@@ -381,6 +509,35 @@ The grid has only $k \approx 5$ to $7$ points; the search cost is negligible. In
 
 Both methods produce nearly equivalent perplexity. AWQ is preferred when calibration speed or memory is constrained; GPTQ when maximum quality per bit is needed.
 
+### 7.5 AWQ Worked Numerical Example
+
+Consider a simplified layer with 4 input channels and 3 output channels. The weight matrix $W$ and a calibration activation vector $\mathbf{x}$ are:
+
+$$
+W = \begin{pmatrix} 0.1 & 0.2 & 0.05 & 0.8 \\ -0.3 & 0.1 & 0.4 & -0.1 \\ 0.2 & -0.1 & 0.3 & 0.6 \end{pmatrix}, \quad \mathbf{x} = \begin{pmatrix} 1.0 \\ 0.5 \\ 100.0 \\ 2.0 \end{pmatrix}
+$$
+
+**Step 1: Identify salient channels.** Channel 3 has $\|X_3\| = 100$, while other channels have magnitudes $1.0, 0.5, 2.0$. Channel 3 is the outlier — any quantization error in column 3 of $W$ will be amplified $100\times$ in the output.
+
+**Step 2: Naive INT4 quantization (no scaling).** Symmetric INT4 with $\alpha = 0.8$, $s = 2 \times 0.8 / 15 = 0.107$. Channel 3 column: $W_{:,3} = [0.8, -0.1, 0.6]$. Quantized: $[7, -1, 6]$, dequantized: $[0.8, -0.107, 0.64]$. Error: $\delta_3 = [0, 0.007, -0.04]$. Output error from channel 3: $|\delta_3| \times 100 = [0, 0.7, 4.0]$.
+
+**Step 3: Apply AWQ scaling to channel 3.** Try $\alpha_3 = 2$ (scale up the weight column, scale down the activation):
+
+$$
+\tilde{W}_{:,3} = 2 \times [0.8, -0.1, 0.6] = [1.6, -0.2, 1.2]
+$$
+
+Now the quantization range changes. With per-group scaling, column 3's range is $[-0.2, 1.6]$, so $\alpha = 1.6$, $s = 3.2/15 = 0.213$. Quantized: $[7, -1, 6]$, dequantized: $[1.6, -0.213, 1.28]$. Error: $[0, -0.013, 0.08]$. But $\tilde{X}_3 = 100/2 = 50$. Output error: $[0, -0.013, 0.08] \times 50 = [0, -0.65, 4.0]$.
+
+Hmm — the total error barely changed because we scaled both sides. The key insight: AWQ's grid search evaluates the **actual output error** $\|W\mathbf{x} - \hat{W}\mathbf{x}\|$ for each candidate $\alpha$. The optimal $\alpha$ is the one that minimizes this output error, which depends on the joint distribution of $W$ and $X$ — not just the weight magnitudes.
+
+**Step 4: Optimal scaling search.** Evaluate output error for $\alpha_3 \in \{1, 2, 4\}$:
+
+- $\alpha_3 = 1$: No change. FP16 output: $W\mathbf{x} = [0.1 + 0.1 + 5.0 + 1.6, \ldots] = [6.8, \ldots]$ (exact). Quantized output error from channel 3 contribution: $[0, 0.7, 4.0]$ as above. Total channel-3 output error $= \sqrt{0 + 0.49 + 16} = 4.03$.
+- $\alpha_3 = 4$: $\tilde{W}_{:,3} = [3.2, -0.4, 2.4]$. With INT4 range $[-8, 7]$: quantized $[7, -4, 7]$, dequantized $[3.2, -0.4, 2.4]$ (no rounding error — the values land on the grid!). $\tilde{X}_3 = 25$. Error: $0$. **This is the optimal choice** — scaling the outlier weight column so its values land on quantization grid points eliminates error entirely.
+
+AWQ's search finds $\alpha_3 = 4$ because it evaluates output error, not weight error. The scaling works because INT4's step size $s$ is fixed by the range — by expanding $W_{:,3}$ to fill more of the representable range, the quantization noise becomes a smaller fraction of the values.
+
 ---
 
 ## 8. SmoothQuant — migrating quantization difficulty
@@ -395,7 +552,7 @@ Weight quantization is relatively easy (weights are static, known at calibration
 
 SmoothQuant (Xiao et al., 2023) addresses this by **redistributing quantization difficulty from activations to weights**.
 
-### 8.2 The math: per-channel smoothing
+### 8.2 The math: per-channel smoothing — Detailed Derivation
 
 For a linear layer $Y = XW$ where $X$ has outlier channels, define a per-channel smoothing factor:
 
@@ -413,6 +570,21 @@ $$
 - $\tilde{W}$ has slightly increased magnitudes in the corresponding rows.
 
 Since weight quantization is robust (per-channel scales), the slight increase in $|\tilde{W}|$ is easily absorbed. The dramatic decrease in $|\tilde{X}|$ outlier magnitude makes activation quantization tractable at INT8.
+
+**Why this makes INT8 activation quantization feasible.** The core problem with activation quantization in LLMs is the presence of *persistent outlier channels*: a small number of channels (typically 0.1%--1% of $D$) that consistently have magnitudes $10$--$100\times$ larger than the median. These outliers occur in specific channels across all tokens and all layers (identified by Xiao et al., 2023). With INT8 symmetric quantization, the scale $s = \max(|X|) / 127$ is set by the outlier. All non-outlier channels are then quantized with a step size that is $10$--$100\times$ too large, destroying their information.
+
+SmoothQuant migrates the quantization difficulty from activations to weights. The transformation $\tilde{X} = X \cdot \mathrm{diag}(s)^{-1}$, $\tilde{W} = \mathrm{diag}(s) \cdot W$ is mathematically an identity — $\tilde{X}\tilde{W} = X \cdot \mathrm{diag}(s)^{-1} \cdot \mathrm{diag}(s) \cdot W = XW$. But:
+
+- **For activations:** $\tilde{X}_{:j} = X_{:j} / s_j$. For outlier channels where $\max(|X_{:j}|) = 100$ and $\max(|W_{j:}|) = 0.5$: $s_j = (100)^{0.5} / (0.5)^{0.5} = 10 / 0.707 = 14.1$. So $\max(|\tilde{X}_{:j}|) = 100 / 14.1 = 7.1$ — a $14\times$ reduction in outlier magnitude.
+- **For weights:** $\tilde{W}_{j:} = s_j \cdot W_{j:}$. $\max(|\tilde{W}_{j:}|) = 14.1 \times 0.5 = 7.1$. Per-channel weight quantization handles this easily — the channel's scale simply increases proportionally, and INT8's 127 levels cover $[-7.1, 7.1]$ with step $0.056$ — plenty of precision.
+
+**Per-channel smoothing factor selection.** The formula $s_j = \max(|X_{:j}|)^\beta / \max(|W_{j:}|)^{1-\beta}$ is designed to balance the dynamic range of $\tilde{X}_{:j}$ and $\tilde{W}_{j:}$:
+
+- At $\beta = 0$: $s_j = 1 / \max(|W_{j:}|)$. Weights are fully smoothed to unit range; activations are unchanged. This is pure weight-side migration.
+- At $\beta = 1$: $s_j = \max(|X_{:j}|)$. Activations are fully smoothed to unit range; weights are unchanged. This is pure activation-side migration.
+- At $\beta = 0.5$ (default): $s_j = \sqrt{\max(|X_{:j}|) / \max(|W_{j:}|)}$. Equal migration: $\max(|\tilde{X}_{:j}|) = \max(|\tilde{W}_{j:}|) = \sqrt{\max(|X_{:j}|) \cdot \max(|W_{j:}|)}$. Both sides end up with the same maximum magnitude — the geometric mean of the original maxima.
+
+The $\beta$ parameter is swept over $[0.3, 0.5, 0.7, 0.85]$ on a calibration set; the optimal value is almost always $\beta = 0.5$ for well-trained models. Models with extreme outliers (e.g., OPT-175B) benefit from $\beta = 0.85$ to push more of the difficulty to the weight side.
 
 ### 8.3 Choosing $\beta$
 
@@ -434,9 +606,121 @@ Without SmoothQuant, INT8 activation quantization on models like OPT-175B degrad
 
 SmoothQuant makes W8A8 (weight INT8, activation INT8) practical for large models, enabling full-INT8 inference with integer-only tensor-core utilization.
 
+### 8.5 SmoothQuant Worked Numerical Example
+
+Consider a layer $Y = XW$ with 4 input channels. Calibration reveals:
+
+$$
+X = \begin{pmatrix} 1.0 & 0.5 & 50.0 & 2.0 \\ 0.8 & 0.3 & 40.0 & 1.5 \\ 1.2 & 0.6 & 60.0 & 2.5 \end{pmatrix}, \quad W = \begin{pmatrix} 0.1 & 0.3 \\ 0.2 & -0.1 \\ 0.01 & 0.02 \\ 0.4 & 0.1 \end{pmatrix}
+$$
+
+Channel 2 has activation magnitude $\max(|X_{:,2}|) = 60$ — an outlier $30$--$100\times$ larger than other channels.
+
+**Step 1: Compute per-channel smoothing factors ($\beta = 0.5$).**
+
+For each channel $j$: $s_j = \sqrt{\max(|X_{:,j}|) / \max(|W_{j:}|)}$.
+
+| Channel $j$ | $\max(|X_{:,j}|)$ | $\max(|W_{j:}|)$ | $s_j = \sqrt{\max(|X|)/\max(|W|)}$ |
+|---|---|---|---|
+| 0 | 1.2 | 0.3 | $\sqrt{1.2/0.3} = 2.0$ |
+| 1 | 0.6 | 0.2 | $\sqrt{0.6/0.2} = 1.73$ |
+| 2 | 60.0 | 0.02 | $\sqrt{60.0/0.02} = 54.8$ |
+| 3 | 2.5 | 0.4 | $\sqrt{2.5/0.4} = 2.5$ |
+
+**Step 2: Apply smoothing.**
+
+$$
+\tilde{X}_{:,j} = X_{:,j} / s_j, \quad \tilde{W}_{j:} = s_j \cdot W_{j:}
+$$
+
+After smoothing, the maximum magnitudes:
+
+| Channel | $\max(|\tilde{X}_{:,j}|)$ | $\max(|\tilde{W}_{j:}|)$ |
+|---|---|---|
+| 0 | $1.2 / 2.0 = 0.6$ | $2.0 \times 0.3 = 0.6$ |
+| 1 | $0.6 / 1.73 = 0.35$ | $1.73 \times 0.2 = 0.35$ |
+| 2 | $60.0 / 54.8 = 1.09$ | $54.8 \times 0.02 = 1.10$ |
+| 3 | $2.5 / 2.5 = 1.0$ | $2.5 \times 0.4 = 1.0$ |
+
+**Step 3: Quantize $\tilde{X}$ and $\tilde{W}$ to INT8.** The maximum magnitude across all activation channels is now $\max(|\tilde{X}|) \approx 1.09$ instead of $60$. INT8 scale: $s = 1.09 / 127 = 0.0086$. Step size is uniform across all channels — no channel wastes quantization levels.
+
+Without SmoothQuant: INT8 scale would be $s = 60/127 = 0.472$. Channel 0 (magnitude 1.2) would be represented as $\lfloor 1.2/0.472 \rceil = 3$, losing almost all information (only 3 levels used out of 127).
+
+With SmoothQuant: channel 0 is now magnitude $0.6$. Represented as $\lfloor 0.6/0.0086 \rceil = 70$ — using 70 of 127 levels, excellent fidelity.
+
+**Verify mathematical equivalence.** $\tilde{X}\tilde{W} = X \cdot \mathrm{diag}(s)^{-1} \cdot \mathrm{diag}(s) \cdot W = XW$. The smoothing is a pure reparameterization — it does not change the output. It only changes where the quantization difficulty falls.
+
 ---
 
-## 9. Comparison of quantization methods
+## 9. KV Cache Quantization
+
+### 9.1 Why KV cache quantization matters
+
+During autoregressive decode, the KV cache grows by $2 \cdot n_{\text{kv\_heads}} \cdot d_h$ elements per token per layer. For Llama-3-70B at $S = 128\text{K}$ context (FP16): $\approx 40$ GB of KV cache per request. Quantizing the KV cache from FP16 to INT8 halves this to 20 GB; to INT4 quarters it to 10 GB. This directly translates to more concurrent requests per GPU.
+
+### 9.2 Granularity options
+
+KV cache quantization can be applied at different granularities, each with different quality-compression tradeoffs:
+
+| Granularity | Scale parameters per layer | Overhead | Quality impact |
+|---|---|---|---|
+| Per-head | $2 \cdot n_{\text{kv}}$ | Negligible | Poor — one scale per head ignores per-position variation |
+| Per-token | $2 \cdot n_{\text{kv}} \cdot S$ | $O(S)$ metadata | Good — each token position gets its own scale |
+| Per-group ($G=64$) | $2 \cdot n_{\text{kv}} \cdot d_h \cdot S / G$ | Moderate | Best — fine-grained within each token's KV vector |
+| Per-channel | $2 \cdot n_{\text{kv}} \cdot d_h$ | Small | Good for weights; less ideal for KV |
+
+**Per-token** is the most common choice for INT8 KV cache. Each token's K and V vectors get independent scale factors, computed as $s = \max(|K_t|) / 127$ (for INT8 symmetric). This handles the fact that token representations vary dramatically in magnitude across positions — early tokens in a sequence often have different activation statistics than later ones.
+
+**Per-group** ($G = 64$ or $G = 128$) is used for INT4 KV cache, where the coarser quantization requires finer-grained scale factors to maintain quality.
+
+### 9.3 FP8 E4M3 vs INT8 vs INT4 for KV
+
+| Format | Bits/element | Dynamic range | Precision | KV cache at 128K (Llama-3-70B) |
+|---|---|---|---|---|
+| FP16 (baseline) | 16 | $\pm 65{,}504$ | 0.1% | 40 GB |
+| BF16 | 16 | $\pm 3.4 \times 10^{38}$ | 0.8% | 40 GB |
+| FP8 E4M3 | 8 | $\pm 448$ | 12.5% | 20 GB |
+| INT8 (per-token) | 8 | Depends on scale | $1/127$ of range | 20 GB |
+| INT4 (per-group) | 4 | Depends on scale | $1/7$ of range | 10 GB |
+
+**FP8 E4M3** is the preferred format for KV cache on Hopper/Blackwell GPUs because:
+1. The tensor cores natively support FP8 inputs to the attention GEMM ($QK^T$ and $PV$).
+2. No separate dequantization step is needed — the FP8 K and V can be used directly in the attention computation.
+3. The dynamic range of E4M3 ($\pm 448$) is sufficient for KV entries because they are post-normalization (RMSNorm) projections, which produce bounded outputs.
+
+**INT8** requires dequantization before the attention GEMM (tensor cores do not support INT8 attention). This adds a dequant kernel that converts INT8 K/V to FP16/BF16 before computing $QK^T$ and $PV$.
+
+**INT4** requires even more careful handling. KVCache INT4 is an active research area (KVQuant, KIVI, 2024). The key challenge: the attention score $q_i^\top k_j$ is a dot product of a high-precision query with a low-precision key. Quantization noise in $k_j$ propagates directly into the attention weights $\alpha_{ij}$, which affects *every* output token. This is unlike weight quantization, where the error is per-element.
+
+### 9.4 Impact on attention quality
+
+The quantized attention score is:
+
+$$
+\hat{s}_{ij} = \frac{q_i^\top \hat{k}_j}{\sqrt{d_h}} = \frac{q_i^\top (k_j + \delta k_j)}{\sqrt{d_h}} = s_{ij} + \frac{q_i^\top \delta k_j}{\sqrt{d_h}}
+$$
+
+The perturbation to the attention score is $q_i^\top \delta k_j / \sqrt{d_h}$. For INT8 quantization with per-token scale: $\|\delta k_j\| \approx \|k_j\| \cdot (s/2) / \|k_j\| \approx s/2$, where $s$ is the step size. The score perturbation is bounded by $\|q_i\| \cdot \|\delta k_j\| / \sqrt{d_h}$. Since $\|q_i\| \approx \sqrt{d_h}$ (post-normalization) and $\|\delta k_j\| \approx s/2$: the perturbation is $O(1)$ — comparable to the attention score itself.
+
+This is why KV cache quantization is harder than weight quantization: the quantization noise is amplified by the query magnitude. Per-token (or per-group) scaling is essential because it keeps $s$ small relative to each token's $k_j$, minimizing $\|\delta k_j\|$.
+
+### 9.5 Calibration data requirements
+
+KV cache quantization requires calibration data to determine the per-token or per-group scales. The procedure:
+
+1. **Collect:** Run $N_{\text{calib}} = 128$--$512$ sequences through the model in FP16.
+2. **Record:** For each layer, collect the K and V tensors for every token position. Track $\max(|K_t|)$ and $\max(|V_t|)$ per token (for per-token scaling) or per group (for per-group scaling).
+3. **Compute scales:** For INT8 symmetric: $s_t = \max(|K_t|) / 127$. For FP8 E4M3: $s_t = \max(|K_t|) / 448$.
+4. **Validate:** Run the eval suite with quantized KV cache. Typical perplexity impact:
+   - FP8 E4M3: $< 0.1$ perplexity point regression on 70B models.
+   - INT8 per-token: $< 0.15$ perplexity point regression.
+   - INT4 per-group ($G=64$): $0.3$--$0.8$ perplexity point regression — requires careful tuning and possibly mixed precision (FP8 for early layers, INT4 for later layers).
+
+For production deployment, **FP8 KV cache** is the default on H100/B200: 2x KV cache compression with negligible quality loss and native hardware support. INT4 KV cache is used only when KV cache is the dominant memory bottleneck (e.g., serving 100K+ context on a single GPU).
+
+---
+
+## 10. Comparison of quantization methods
 
 | Method | Year | Bits | Granularity | Calibration | Key idea | Best for |
 |---|---|---|---|---|---|---|
@@ -453,7 +737,7 @@ The practical deployment stack in 2026: **SmoothQuant for W8A8** (when hardware 
 
 ---
 
-## 10. End-to-end cause and effect
+## 11. End-to-end cause and effect
 
 ```mermaid
 flowchart TD
@@ -484,7 +768,7 @@ flowchart TD
 
 ---
 
-## 11. Numbers to memorize
+## 12. Numbers to memorize
 
 | # | Quantity | Value | Context |
 |---|---|---|---|
@@ -513,7 +797,7 @@ flowchart TD
 
 ---
 
-## 12. Worked problems
+## 13. Worked problems
 
 **Q1.** *Compute the SQNR for symmetric INT8 quantization of a weight tensor drawn from $\mathcal{N}(0, 1)$. Use the optimal clipping threshold.*
 
@@ -601,7 +885,7 @@ This is precisely the motivation for SmoothQuant: instead of choosing between ba
 
 ---
 
-## 13. References
+## 14. References
 
 - Frantar, Ashkboos, et al., *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers*, ICLR 2023.
 - Lin, Ji, et al., *AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration*, MLSys 2024.

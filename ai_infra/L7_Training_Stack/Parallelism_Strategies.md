@@ -168,6 +168,24 @@ $$V_{\text{one}} = 2 \times 64 \times 4096 \times 8192 \times 2 = 8.59 \;\text{G
 
 At NVLink bandwidth of 900 GB/s (bidirectional ring): $\approx 9.5$ ms per all-reduce. With 4 all-reduces per layer and 80 layers: $4 \times 80 \times 9.5 \;\text{ms} \approx 3.0$ seconds total TP communication per step. This is why TP must use NVLink — the same communication over 400 Gb/s InfiniBand ($\approx 50$ GB/s) would take $\sim 54$ seconds.
 
+**TP communication volume — first-principles derivation:**
+
+For a single transformer layer with TP degree $T$, the all-reduce at the output of the attention and FFN sub-layers aggregates partial results from all $T$ ranks. Each all-reduce communicates a tensor of shape $[B, S, d]$. Using the ring all-reduce formula, the volume per all-reduce per rank is:
+
+$$V_{\text{TP, per-AR, per-rank}} = 2 \times \frac{T-1}{T} \times B \times S \times d \times b$$
+
+With 4 all-reduces per layer and $L$ layers:
+
+$$V_{\text{TP, total, per-rank}} = 4L \times 2 \times \frac{T-1}{T} \times B \times S \times d \times b = \frac{8L(T-1) \cdot B \cdot S \cdot d \cdot b}{T}$$
+
+For TP=8 with $B=4$, $S=4096$, $d=8192$, $L=80$, BF16 ($b=2$):
+
+$$V_{\text{TP, total}} = \frac{8 \times 80 \times 7 \times 4 \times 4096 \times 8192 \times 2}{8} = \frac{8 \times 80 \times 7 \times 4 \times 4096 \times 8192 \times 2}{8}$$
+
+$$= 8 \times 80 \times 7 \times 4 \times 4096 \times 16384 = 236.2 \;\text{GB per rank per step}$$
+
+At 900 GB/s NVLink: $236.2 / 900 = 0.263$ seconds. This is overlappable with compute — the total compute time for one training step (forward + backward) is ~2 seconds on 8 H100s, so TP communication at ~13% of step time is manageable.
+
 ### 2.5 Memory savings
 
 With TP degree $T$, each rank holds $1/T$ of every weight matrix:
@@ -217,6 +235,20 @@ $$\underbrace{F_1, F_2, \ldots, F_M}_{\text{forward passes}} \;\rightarrow\; \un
 
 The pipeline has a **warmup phase** (stages are gradually filled) and a **cooldown phase** (stages gradually drain). During warmup and cooldown, some stages are idle — this idle time is the **bubble**.
 
+**GPipe timing diagram ($P=4$ stages, $M=4$ microbatches):**
+
+```
+Time →   t0    t1    t2    t3    t4    t5    t6    t7    t8    t9    t10   t11   t12   t13
+Stage 0: [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
+Stage 1:       [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
+Stage 2:             [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
+Stage 3:                   [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
+
+         |<--- forward (4 slots) --->|<--- bubble (3 slots) --->|<--- backward (4 slots) --->|
+```
+
+Each `[Fn]` or `[Bn]` slot represents one microbatch forward or backward pass on one stage. Total time: $(2M + P - 1)$ slots = $(8 + 3) = 11$ slots. Useful work: $2M = 8$ slots per stage. Bubble: $P - 1 = 3$ slots.
+
 **Bubble fraction for GPipe:**
 
 $$f_{\text{bubble}}^{\text{GPipe}} = \frac{P - 1}{M + P - 1}$$
@@ -231,21 +263,63 @@ where $P$ is the number of pipeline stages and $M$ is the number of microbatches
 | 8 | 128 | 7/135 = 5.2% | 94.8% |
 | 16 | 256 | 15/271 = 5.5% | 94.5% |
 
+**Bubble overhead calculation — concrete example:** For PP=8 with $M=32$ microbatches, per-stage compute time $t_{\text{stage}} = 200$ ms:
+
+- Ideal time (no bubble): $2M \times t_{\text{stage}} = 64 \times 200 = 12{,}800$ ms.
+- Bubble time: $(P-1) \times t_{\text{stage}} = 7 \times 200 = 1{,}400$ ms.
+- Actual time: $12{,}800 + 1{,}400 = 14{,}200$ ms.
+- Wasted GPU-hours per step (8 GPUs): $8 \times 1{,}400 / 3600 = 3.1$ GPU-seconds per step. At 10,000 steps/day: 8.6 GPU-hours/day wasted on bubbles alone.
+
 ### 3.3 1F1B scheduling
 
 The one-forward-one-backward (1F1B) schedule interleaves forward and backward passes to reduce peak activation memory. After the warmup phase, each rank alternates between one forward microbatch and one backward microbatch:
 
 $$\underbrace{F_1, F_2, \ldots, F_P}_{\text{warmup}} \;\rightarrow\; \underbrace{(B_1, F_{P+1}), (B_2, F_{P+2}), \ldots}_{\text{steady state}} \;\rightarrow\; \underbrace{B_{M-P+1}, \ldots, B_M}_{\text{cooldown}}$$
 
-The bubble fraction is identical to GPipe: $(P-1)/(M+P-1)$. The advantage of 1F1B is **memory**: it holds at most $P$ in-flight microbatches worth of activations, whereas GPipe holds $M$.
+**1F1B timing diagram ($P=4$ stages, $M=8$ microbatches):**
+
+```
+Time →   t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15  t16  t17
+Stage 0: [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
+Stage 1:      [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
+Stage 2:           [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
+Stage 3:                [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
+
+         |<- warmup ->|<------------- steady state (1F1B) ------------->|<-- cooldown ->|
+```
+
+The bubble fraction is identical to GPipe: $(P-1)/(M+P-1)$. The advantage of 1F1B is **memory**: it holds at most $P$ in-flight microbatches worth of activations, whereas GPipe holds $M$. For $M=32$, $P=8$:
+- GPipe activation memory per stage: $32 \times B_{\text{micro}} \times S \times d \times b$
+- 1F1B activation memory per stage: $8 \times B_{\text{micro}} \times S \times d \times b$ (4× reduction)
 
 ### 3.4 Interleaved 1F1B (virtual stages)
 
 Megatron-LM's interleaved schedule assigns each physical stage multiple non-contiguous "virtual stages." For example, with $P=4$ physical stages and $V=2$ virtual stages per physical stage, stage 0 owns layers $\{0, 4\}$, stage 1 owns $\{1, 5\}$, and so on. Microbatches cycle through stages $V$ times, reducing the per-chunk compute time by $V$ and thus the bubble time by $V$:
 
+**Interleaved timing diagram ($P=4$ stages, $V=2$ virtual stages, $M=4$ microbatches):**
+
+```
+Time →   t0    t1    t2    t3    t4    t5    t6    t7    t8    t9    t10   t11
+Stage 0: [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
+Stage 1:       [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
+Stage 2:             [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
+Stage 3:                   [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
+
+Where a/b denote the two virtual stage chunks per microbatch.
+Per-chunk time = t_stage / V = half the non-interleaved time.
+Bubble = (P-1)/V chunks = 3/2 = 1.5 slots instead of 3.
+```
+
 $$f_{\text{bubble}}^{\text{interleaved}} = \frac{P - 1}{V \cdot M + P - 1}$$
 
-The cost is $V$ times more point-to-point communications.
+| Schedule | Bubble (P=8, M=32) | P2P messages |
+|---|---|---|
+| GPipe | 7/39 = 17.9% | $(P-1) \times M = 224$ |
+| 1F1B | 7/39 = 17.9% | 224 |
+| Interleaved 1F1B ($V=2$) | 7/71 = 9.9% | $224 \times 2 = 448$ |
+| Interleaved 1F1B ($V=4$) | 7/135 = 5.2% | $224 \times 4 = 896$ |
+
+The cost is $V$ times more point-to-point communications. Each P2P message is $V$ times smaller (per-virtual-stage chunk instead of per-full-stage), so the total P2P volume is unchanged, but the **latency** of $V$ times more messages can be a concern on high-latency interconnects.
 
 ### 3.5 Communication volume
 
@@ -292,6 +366,16 @@ The factor $k/P_{\text{EP}}$ arises because each token activates $k$ of $P_{\tex
 
 $$\boxed{V_{\text{EP/layer}} = \frac{2 \cdot B \cdot S \cdot d \cdot b \cdot k}{P_{\text{EP}}}}$$
 
+**EP communication volume — first-principles derivation:**
+
+The dispatch all-to-all sends each token's hidden state to the expert's host rank. Each rank originally holds $B \cdot S$ tokens, and each token is routed to $k$ experts. With $P_{\text{EP}}$ expert-parallel ranks, each rank sends to and receives from all other ranks. The per-rank send volume per all-to-all:
+
+$$V_{\text{dispatch, per-rank}} = B \cdot S \cdot d \cdot b \cdot \frac{k}{P_{\text{EP}}}$$
+
+The all-to-all has the property that total bytes sent equals total bytes received. The combine all-to-all has the same volume (expert outputs return to origin). Total per MoE layer:
+
+$$V_{\text{EP/layer}} = 2 \cdot B \cdot S \cdot d \cdot b \cdot \frac{k}{P_{\text{EP}}}$$
+
 **Worked example — DeepSeek-V3, 256 experts, top-2, EP=64, $B=64$, $S=4096$, $d=7168$, BF16:**
 
 $$V_{\text{EP/layer}} = \frac{2 \times 64 \times 4096 \times 7168 \times 2 \times 2}{64} = \frac{2 \times 64 \times 4096 \times 7168 \times 4}{64}$$
@@ -299,6 +383,28 @@ $$V_{\text{EP/layer}} = \frac{2 \times 64 \times 4096 \times 7168 \times 2 \time
 $$= 2 \times 4096 \times 7168 \times 4 = 235 \;\text{MB per MoE layer per all-to-all}$$
 
 With 58 MoE layers (DeepSeek-V3 has MoE at layers 4, 8, ..., 60): $58 \times 2 \times 235 \;\text{MB} \approx 27.3$ GB total EP communication per step. On an NVLink domain this is manageable; across InfiniBand it would be $\sim 0.55$ seconds — significant.
+
+**3D parallelism total communication — worked example:** Llama-3-70B, TP=8, PP=4, DP=4 (ZeRO-3), $B=64$, $S=4096$, $d=8192$, $L=80$, BF16.
+
+- **TP (per rank):** 4 all-reduces/layer × 80 layers × $\frac{2 \times (T-1)}{T} \times B \times S \times d \times b$ per all-reduce. But with TP=8, each rank only processes $B \times S$ tokens with $d/T$ columns, and the all-reduce aggregates the $d$-dimensional output. Volume per rank:
+
+$$V_{\text{TP}} = 4 \times 80 \times 2 \times \frac{7}{8} \times 64 \times 4096 \times 8192 \times 2 = 236.2 \;\text{GB}$$
+
+At NVLink 900 GB/s: ~263 ms. Overlappable with compute.
+
+- **PP (per rank):** $2(P-1)$ point-to-point transfers per microbatch × $M$ microbatches. With PP=4, $M=64/4=16$ microbatches (DP splits the global batch):
+
+$$V_{\text{PP}} = 2 \times 3 \times 16 \times B_{\text{micro}} \times S \times d \times b = 6 \times 16 \times 4 \times 4096 \times 8192 \times 2 = 24.2 \;\text{GB}$$
+
+At InfiniBand 50 GB/s: ~484 ms. Can be overlapped with compute via pipelining.
+
+- **DP ZeRO-3 (per rank):** $3Pb / N_{\text{DP}}$ total, spread across layers:
+
+$$V_{\text{DP}} = \frac{3 \times 70 \times 10^9 \times 2}{4} = 105 \;\text{GB}$$
+
+At InfiniBand 50 GB/s: ~2.1 seconds. This is the bottleneck — overlapped across layers via FSDP prefetch, the effective blocking time is much lower (each layer's all-gather is ~1.3 GB, taking ~26 ms).
+
+- **Total:** $236.2 + 24.2 + 105 = 365.4$ GB per rank per step. TP dominates in volume but runs on fast NVLink. DP is the highest-cost axis on the slow network.
 
 ### 4.3 Load imbalance
 
@@ -338,9 +444,79 @@ $$\text{Attn}(Q_i, K_j, V_j) = \text{softmax}\!\left(\frac{Q_i K_j^T}{\sqrt{d}}\
 
 Online softmax accumulation (as in FlashAttention) merges partial statistics across rounds. After $C - 1$ rounds, each rank holds the complete attention output for its Q chunk.
 
-### 5.3 Communication volume
+#### 5.2.1 Ring attention algorithm in detail
 
-Each round transmits K and V chunks of shape $[B, S/C, d]$:
+Ring attention partitions the sequence dimension $S$ across $P_{\text{CP}}$ GPUs, so each rank holds $S / P_{\text{CP}}$ tokens. QKV projections are computed locally — no communication is needed for the linear algebra. The attention scores, however, require communication: each rank needs access to all K,V blocks but processes only its local Q.
+
+The algorithm proceeds in $P_{\text{CP}}$ steps. At each step $t$, every rank simultaneously:
+
+1. **Computes** partial attention for its local Q against the currently held K,V block, producing a local attention output $O_{\text{local}}^{(t)}$ along with running statistics $m_{\text{local}}^{(t)}$ (row-wise max of scores) and $\ell_{\text{local}}^{(t)}$ (row-wise sum of exponentiated scores).
+2. **Rotates** its K,V block to the next rank via an asynchronous send/recv (point-to-point in a ring topology).
+3. **Accumulates** the partial result into its running output using the online softmax correction derived below.
+
+After $P_{\text{CP}}$ steps, each rank has seen every K,V block and holds the numerically exact attention output for its Q partition.
+
+#### 5.2.2 Online softmax accumulation across the ring
+
+The key challenge is merging partial softmax results from different K,V blocks. The FlashAttention online softmax trick maintains a running maximum $m$ and sum $\ell$ that are updated incrementally. For the ring, we extend this across communication steps.
+
+Let $m^{(t)}$ be the running row-wise maximum after processing $t$ K,V blocks, $\ell^{(t)}$ the running sum of exponentiated scores, and $O^{(t)}$ the running weighted sum. At step $t$, the rank computes local statistics $m_{\text{local}}^{(t)}$ and $\ell_{\text{local}}^{(t)}$ for its local Q against K,V block $t$. The update rules are:
+
+$$m^{(t)} = \max\!\left(m^{(t-1)},\; m_{\text{local}}^{(t)}\right)$$
+
+$$\ell^{(t)} = e^{m^{(t-1)} - m^{(t)}} \cdot \ell^{(t-1)} + \ell_{\text{local}}^{(t)}$$
+
+$$O^{(t)} = e^{m^{(t-1)} - m^{(t)}} \cdot O^{(t-1)} + P_{\text{local}}^{(t)} \cdot V_{\text{local}}^{(t)}$$
+
+where $P_{\text{local}}^{(t)} = \text{softmax}_{\text{local}}(Q \cdot K_t^T / \sqrt{d_h})$ is the partial attention probability matrix for step $t$. The correction factor $e^{m^{(t-1)} - m^{(t)}}$ rescales the previously accumulated output to account for the updated maximum — this is numerically stable because the exponent is always non-positive. After all $P_{\text{CP}}$ steps, the final output is $O^{(P_{\text{CP}})} / \ell^{(P_{\text{CP}})}$, which is identical to computing the full softmax attention in one pass.
+
+#### 5.2.3 Communication volume and independence from $P_{\text{CP}}$
+
+Each rank sends/receives K,V blocks of size $2 \times B \times H \times (S / P_{\text{CP}}) \times d_h$ per step (factor of 2 for K and V), for $P_{\text{CP}}$ steps. The total communication volume per rank is:
+
+$$V_{\text{CP/rank}} = P_{\text{CP}} \times \frac{2BSHd_h}{P_{\text{CP}}} = 2BSHd_h$$
+
+The $P_{\text{CP}}$ cancels — **the total communication volume is independent of the CP degree.** This is a remarkable property: whether you use 2 GPUs or 64 GPUs for context parallelism, the aggregate data each rank transmits is the same. The benefit of more GPUs is reduced per-rank memory and a shorter sequence per rank, not less communication.
+
+#### 5.2.4 Compute-communication overlap
+
+Overlap is natural in ring attention. During step $t$, a rank simultaneously:
+
+- Computes attention for its local Q against the current K,V block (step $t$ compute).
+- Transmits the next K,V block to its neighbor and receives a new one (step $t+1$ communication).
+
+This double-buffering hides nearly all communication latency as long as the attention computation for one K,V block takes longer than the transmission of one K,V block. At NVLink bandwidth ($\geq 300$ GB/s bidirectional), a K,V block of size $2 \times B \times (S / P_{\text{CP}}) \times d \times 2$ bytes transmits in $\sim 2BSd/(300 \times 10^9 \times P_{\text{CP}})$ seconds. For $B=2$, $S/P_{\text{CP}}=16\text{K}$, $d=8192$: $2 \times 2 \times 16384 \times 8192 \times 2 / (300 \times 10^9) \approx 3.6$ ms. The attention computation on the same block takes $\sim 2B(S/P_{\text{CP}})^2 d / (\text{FLOP/s})$, which at $\sim 500$ TFLOP/s (H100 BF16) is $\sim 17$ ms. Compute dominates by $\sim 5\times$, so overlap is effective.
+
+### 5.3 SP-Ulysses: head-parallel sequence parallelism
+
+An alternative to ring attention partitions the **attention heads** (not the sequence) across GPUs. SP-Ulysses assigns each of $P_U$ GPUs a subset of $H / P_U$ attention heads. Each GPU computes full-sequence attention for its assigned heads. The communication pattern is a single all-gather of Q,K,V (to give every GPU the full sequence for its heads) rather than a sequential ring:
+
+$$V_{\text{Ulysses/layer}} = 3 \times B \times S \times d \times b \quad \text{(all-gather Q, K, V)}$$
+
+This is larger per-step than ring attention but completes in one collective rather than $P_{\text{CP}}$ sequential steps, yielding lower latency. Ulysses is preferred for **short sequences** (where communication dominates over compute) and when head count is large (e.g., $H=128$ for Grouped Query Attention with many KV heads).
+
+### 5.4 Hybrid SP: Ulysses $\times$ Ring
+
+For very large clusters, combine Ulysses (head partition) with ring attention (sequence partition) across $P = P_U \times P_R$ GPUs:
+
+- $P_U$ GPUs split the heads (Ulysses dimension, all-gather communication).
+- $P_R$ GPUs split the sequence per head group (ring dimension, ring communication).
+
+Total communication volume per layer per rank:
+
+$$V_{\text{Hybrid/layer}} = \underbrace{3BSdb / P_U}_{\text{Ulysses all-gather}} + \underbrace{2BSdb}_{\text{ring (CP-independent)}}$$
+
+**When to use which:**
+
+| Strategy | Best for | Communication pattern | Latency |
+|---|---|---|---|
+| Ring attention (CP) | Long sequences ($S > 32\text{K}$), compute-dominated | $P_{\text{CP}}$ sequential P2P steps | Higher latency, higher throughput |
+| SP-Ulysses | Short sequences ($S < 8\text{K}$), communication-dominated | Single all-gather | Lower latency |
+| Hybrid | Very large clusters ($P > 8$ for SP) where neither alone provides enough parallelism | All-gather + ring | Balanced |
+
+### 5.5 Communication volume summary
+
+Each ring round transmits K and V chunks of shape $[B, S/C, d]$:
 
 $$V_{\text{CP/round}} = 2 \times B \times \frac{S}{C} \times d \times b$$
 
@@ -378,9 +554,30 @@ The total communication volume is unchanged — each reduce-scatter + all-gather
 
 ---
 
-## 7. 3D Parallelism: TP x PP x DP
+## 7. Compute-Communication Overlap
 
-### 7.1 The cube
+Every parallelism strategy introduces communication that, if executed naively (blocking), wastes GPU time. The key insight: **any parallelism strategy that doesn't explicitly overlap communication is leaving 10-40% of potential throughput on the table.** The overlap techniques are specific to each parallelism axis:
+
+**ZeRO-3 overlap.** ZeRO-3 all-gathers parameters layer by layer. The overlap strategy prefetches parameters for layer $i+1$ while computing layer $i$. The all-gather of layer $i+1$'s weights (size $\approx 2L_{\text{params}} \cdot b / D$ per rank) is issued as an asynchronous collective that runs on the NVLink/IB hardware while the GPU SMs execute the current layer's forward pass. Effective overlap requires that the all-gather completes within the compute time of one layer — typically $\sim 2B(S/P_{\text{CP}})d \cdot d_{\text{ff}} / \text{FLOP/s}$. For large batch sizes this holds comfortably; for small batches the all-gather may stall, degrading throughput by 15-30%.
+
+**Pipeline overlap (interleaved 1F1B).** The pipeline bubble is $(P-1)/(VM+P-1)$ of total time. Interleaved scheduling with virtual stages ($V>1$) reduces the bubble by shrinking per-chunk compute time, but increases point-to-point communication frequency by $V\times$. The overlap is implicit: while stage $p$ computes microbatch $m$ forward, stage $p-1$ simultaneously transmits microbatch $m+1$'s activations. The point-to-point sends are small ($B_{\text{micro}} S d b$) and typically complete well within the compute window.
+
+**TP overlap (delayed AllReduce).** Within a transformer layer, the AllReduce for the attention output can be delayed: issue the AllReduce asynchronously and immediately begin computing the FFN's column-parallel projections (which only need the local activation, not the AllReduced result). By the time the FFN needs the AllReduced attention output (at the row-parallel output), the collective has completed. This hides $\sim 50\%$ of TP communication behind useful compute. The same trick applies in reverse for the backward pass.
+
+**Overlap summary:**
+
+| Strategy | What is overlapped | Overlap mechanism | Typical throughput gain |
+|---|---|---|---|
+| ZeRO-3 | Parameter all-gather with forward compute | Prefetch layer $i+1$ during compute of layer $i$ | 15-30% |
+| Interleaved PP | Pipeline bubble with other micro-batches | Virtual stages + pipelined P2P | 5-15% (bubble reduction) |
+| TP delayed AllReduce | Attention AllReduce with FFN compute | Async AllReduce + immediate FFN start | 10-20% |
+| Ring attention CP | K,V ring rotation with attention compute | Double-buffered send/recv + compute | 20-40% |
+
+---
+
+## 8. 3D Parallelism: TP x PP x DP
+
+### 8.1 The cube
 
 Every frontier training run composes at least three axes. Each GPU is identified by a tuple $(d, t, p)$ where $d \in [0, D-1]$ is the data-parallel rank, $t \in [0, T-1]$ is the tensor-parallel rank, and $p \in [0, P-1]$ is the pipeline-parallel rank. The total number of GPUs is $N = D \times T \times P$.
 
@@ -416,7 +613,7 @@ flowchart TD
     classDef pp fill:#fde68a,stroke:#b45309,color:#000
 ```
 
-### 7.2 Communication group topology
+### 8.2 Communication group topology
 
 | Axis | Communication pattern | Required bandwidth | Physical placement |
 |---|---|---|---|
@@ -426,7 +623,7 @@ flowchart TD
 
 The key constraint: **TP must fit within a single NVLink domain.** For H100, NVLink connects up to 8 GPUs (or 72 in NVL72). For B200, NVLink connects up to 72 GPUs in a rack. PP connects stages across nodes. DP connects replicas across the cluster.
 
-### 7.3 Communication volume in 3D
+### 8.3 Communication volume in 3D
 
 The total communication volume per step for a model with $L$ layers, $P_{\text{total}}$ parameters, batch $B$, sequence $S$, hidden $d$:
 
@@ -436,9 +633,9 @@ Each term is the volume per rank. The dominant term depends on the model size an
 
 ---
 
-## 8. Hybrid Strategies for Specific Model Sizes
+## 9. Hybrid Strategies for Specific Model Sizes
 
-### 8.1 70 B Dense (e.g., Llama-3-70B)
+### 9.1 70 B Dense (e.g., Llama-3-70B)
 
 **Model parameters:** 70.6 B, $L=80$, $d=8192$, $H=64$, $d_{\text{ff}}=28672$.
 
@@ -453,7 +650,7 @@ Each term is the volume per rank. The dominant term depends on the model size an
 
 **Recommended for 64 nodes (512 H100s):** TP=8 within each node, PP=8 across 8 node-groups (each stage has 10 layers), DP=8 across the remaining replicas. Microbatch count $M \geq 32$ for bubble $\leq 22\%$. With ZeRO-1 on the DP group, optimizer state is distributed across 8 replicas.
 
-### 8.2 400 B MoE (e.g., DeepSeek-V3 class, 671 B total / 37 B active)
+### 9.2 400 B MoE (e.g., DeepSeek-V3 class, 671 B total / 37 B active)
 
 **Model parameters:** 671 B total, 256 experts, top-2 routing, 37 B active per token, $L=61$, $d=7168$.
 
@@ -474,7 +671,7 @@ $$\text{TP} = 8 \times \text{EP} = 32 \times \text{DP} = 8$$
 
 DP=8 with ZeRO-1 distributes optimizer state. The EP all-to-all remains within an NVL72 domain, avoiding cross-rack all-to-all.
 
-### 8.3 1 T Dense
+### 9.3 1 T Dense
 
 **Model parameters:** $P \approx 10^{12}$, estimated $L=128$, $d=16384$, $d_{\text{ff}}=53248$.
 
@@ -491,7 +688,7 @@ $$\text{TP} = 8 \times \text{PP} = 16 \times \text{DP} = 16$$
 
 ---
 
-## 9. Comparison Table
+## 10. Comparison Table
 
 | Strategy | What is sharded | Comm per step (per rank) | Comm pattern | Latency sensitivity | Memory reduction | Interconnect requirement |
 |---|---|---|---|---|---|---|
@@ -507,7 +704,7 @@ $$\text{TP} = 8 \times \text{PP} = 16 \times \text{DP} = 16$$
 
 ---
 
-## 10. Numbers Table
+## 11. Numbers Table
 
 | Quantity | Symbol | Typical value | Unit | Notes |
 |---|---|---|---|---|
@@ -533,7 +730,7 @@ $$\text{TP} = 8 \times \text{PP} = 16 \times \text{DP} = 16$$
 
 ---
 
-## 11. Worked Problems
+## 12. Worked Problems
 
 ### Problem 1: Minimum parallelism for 70B on H100
 
@@ -623,7 +820,7 @@ Bubble with PP=8 and $M$ microbatches: $(8-1)/(M+7) < 0.10 \Rightarrow M > 63$. 
 
 ---
 
-## 12. Common Pitfalls
+## 13. Common Pitfalls
 
 1. **TP over slow interconnect:** TP all-reduces occur every layer with volumes proportional to $B \cdot S \cdot d$. Over InfiniBand, this dominates step time by 10-50x. TP must use NVLink.
 2. **Insufficient microbatches for PP:** With PP=16 and $M=16$, the bubble fraction is $15/31 = 48\%$. At minimum, $M \geq 4P$ for reasonable utilization ($< 25\%$ bubble).
@@ -634,7 +831,7 @@ Bubble with PP=8 and $M$ microbatches: $(8-1)/(M+7) < 0.10 \Rightarrow M > 63$. 
 
 ---
 
-## 13. References
+## 14. References
 
 1. Shoeybi, M. et al., "Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism," *arXiv:1909.08053*, 2019.
 2. Korthikanti, V. et al., "Reducing Activation Recomputation in Large Transformer Models," *arXiv:2205.05198*, 2022.
@@ -647,7 +844,7 @@ Bubble with PP=8 and $M$ microbatches: $(8-1)/(M+7) < 0.10 \Rightarrow M > 63$. 
 
 ---
 
-## 14. Navigation
+## 15. Navigation
 
 **Previous (in layer):** This is the first page in L7. Start here.
 **Next:** [Collectives_and_NCCL](Collectives_and_NCCL.md) — AllReduce algorithms, ring vs tree, bandwidth modeling, NCCL internals.

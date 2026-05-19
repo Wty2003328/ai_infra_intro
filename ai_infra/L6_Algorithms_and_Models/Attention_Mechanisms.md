@@ -209,6 +209,36 @@ Simple but wastes memory bandwidth copying $H/G$ times.
 
 **Gathered attention:** The kernel directly indexes into $G$ KV heads. More efficient; used in FlashAttention v2/v3 with `num_kv_heads` parameter.
 
+### 4.5 GQA Grouping — Worked Example
+
+Consider Llama-3-70B: $H = 64$ query heads, $G = 8$ KV heads (group ratio = $H/G = 8$), $d_h = 128$.
+
+**How queries map to KV groups.** Query heads are partitioned into $G = 8$ contiguous groups of size $H/G = 8$:
+
+| KV head $g$ | Query heads $h$ | $K_g, V_g$ shared by |
+|---|---|---|
+| 0 | $h = 0, 1, 2, 3, 4, 5, 6, 7$ | 8 query heads |
+| 1 | $h = 8, 9, 10, 11, 12, 13, 14, 15$ | 8 query heads |
+| 2 | $h = 16, 17, 18, 19, 20, 21, 22, 23$ | 8 query heads |
+| ... | ... | ... |
+| 7 | $h = 56, 57, 58, 59, 60, 61, 62, 63$ | 8 query heads |
+
+In code: group index for query head $h$ is $g = h \cdot G / H = h / 8$.
+
+**Attention computation with shared K/V.** For query head $h = 3$ (group $g = 0$):
+
+$$Q_3 = X W_3^Q \in \mathbb{R}^{S \times 128}$$
+
+$$K_0 = X W_0^K \in \mathbb{R}^{S \times 128}, \quad V_0 = X W_0^V \in \mathbb{R}^{S \times 128}$$
+
+$$\text{head}_3 = \text{softmax}\!\left(\frac{Q_3 K_0^T}{\sqrt{128}}\right) V_0$$
+
+All 8 query heads $h = 0, \ldots, 7$ compute attention against the same $K_0, V_0$ — but with different $Q_h$ and different projection matrices, so each head learns a different attention pattern over the same key-value space.
+
+**Memory savings calculation.** Without GQA (MHA), per-token KV cache per layer stores $2 \times 64 \times 128 = 16{,}384$ elements. With GQA ($G = 8$): $2 \times 8 \times 128 = 2{,}048$ elements. Savings: $16{,}384 / 2{,}048 = 8\times$.
+
+The $8\times$ savings comes directly from the group ratio. In general, GQA with $G$ KV heads reduces KV cache by $H/G \times$ compared to MHA, at the cost of $G$ independent key-value subspaces instead of $H$. Empirically, $G = H/8$ (ratio = 8) gives quality nearly indistinguishable from MHA across standard benchmarks.
+
 ---
 
 ## 5. Multi-Head Latent Attention (MLA) — DeepSeek-V2/V3
@@ -297,13 +327,105 @@ $$\text{FLOPs}_{\text{reconstruct}} = 2 \cdot H \cdot (r \cdot d_h + r \cdot d_h
 
 This is typically small compared to the attention FLOPs $4S^2 d_h H$ when $S$ is large, but becomes noticeable during decode ($S = 1$) where the reconstruction cost is comparable to the attention cost itself.
 
-### 5.6 RoPE Compatibility
+### 5.6 RoPE Compatibility — Detailed Derivation
 
-A subtle issue: Rotary Position Embeddings (RoPE) are applied to $Q$ and $K$ before attention. If RoPE is applied to the up-projected $K_h$, the composition $K_h = \mathbf{c}_{KV} W_{UK}^h$ means RoPE interacts with the latent space. DeepSeek-V2 solves this by absorbing RoPE into the query side or using a separate decoupled RoPE key. DeepSeek-V3 uses a decoupled rope key $k_h^{\text{rope}}$ added to the content key:
+A subtle issue: Rotary Position Embeddings (RoPE) are applied to $Q$ and $K$ before attention. If RoPE is applied to the up-projected $K_h$, the composition $K_h = \mathbf{c}_{KV} W_{UK}^h$ means RoPE interacts with the latent space. This is problematic because:
 
-$$k_h = \mathbf{c}_{KV} W_{UK}^h + \text{RoPE}(x^T W_h^{\text{rope}})$$
+1. RoPE is a position-dependent rotation: $K_h^{(\text{rope})} = R(m) \cdot K_h$. If $K_h = \mathbf{c}_{KV} W_{UK}^h$, then $K_h^{(\text{rope})} = R(m) \cdot \mathbf{c}_{KV} W_{UK}^h$.
+2. The latent $\mathbf{c}_{KV}$ is position-independent (it is a learned projection of the hidden state, without positional encoding). But $R(m) \cdot (\mathbf{c}_{KV} W_{UK}^h)$ cannot be precomputed — you need to know $m$ to apply the rotation, so the rotated key depends on the position at which the key is *used*, not just where it was *produced*.
+3. This means the latent $\mathbf{c}_{KV}$ stored in the KV cache would need to be projected and rotated *per query position*, defeating the purpose of the compressed cache.
 
-where $W_h^{\text{rope}} \in \mathbb{R}^{D \times d_h^{\text{rope}}}$ with $d_h^{\text{rope}} \ll d_h$. The rope portion adds a small amount to the KV cache ($d_h^{\text{rope}}$ dimensions per layer) but preserves positional encoding.
+**DeepSeek-V2 solution:** Absorb the position-independent part into a matrix product that can be reordered. Write the attention score for head $h$ at query position $m$ attending to key at position $n$:
+
+$$q_h^{(m)\top} \cdot k_h^{(n)} = q_h^{(m)\top} \cdot R(n) \cdot \mathbf{c}_{KV}^{(n)} \cdot W_{UK}^h$$
+
+Since $R(n)$ is a block-diagonal rotation, it cannot commute with $W_{UK}^h$ in general. DeepSeek-V2 instead absorbs $W_{UK}^h$ into the query side. Define $\hat{q}_h = q_h W_{UK}^{h\top}$, then:
+
+$$q_h^{(m)\top} R(m) \cdot R(n)^{-1} \cdot \mathbf{c}_{KV}^{(n)} W_{UK}^h \neq \hat{q}_h^{(m)\top} R(m-n) \cdot \mathbf{c}_{KV}^{(n)}$$
+
+This does not factor cleanly because $R(n) W_{UK}^h \neq W_{UK}^h R(n)$ — the rotation and the projection do not commute.
+
+**DeepSeek-V3 solution (decoupled RoPE):** Split the key into a position-independent content part and a position-dependent RoPE part:
+
+$$k_h = \underbrace{\mathbf{c}_{KV} W_{UK}^h}_{\text{content: position-independent}} + \underbrace{\text{RoPE}(x^T W_h^{\text{rope}})}_{\text{positional: position-dependent}}$$
+
+where $W_h^{\text{rope}} \in \mathbb{R}^{D \times d_h^{\text{rope}}}$ with $d_h^{\text{rope}} \ll d_h$ (typically $d_h^{\text{rope}} = d_h / 2 = 64$).
+
+The attention score becomes:
+
+$$q_h^{(m)\top} R(m) \cdot [R(n)^{-1} \mathbf{c}_{KV}^{(n)} W_{UK}^h + k_h^{\text{rope}(n)}]$$
+
+For the content part, the trick is: if we absorb $W_{UK}^h$ into the query (making $\hat{q}_h = q_h W_{UK}^{h\top}$), then the content contribution to the score is $\hat{q}_h^{(m)\top} \mathbf{c}_{KV}^{(n)}$, which is position-independent and can be computed from the latent directly.
+
+For the RoPE part, $k_h^{\text{rope}(n)}$ is small ($d_h^{\text{rope}}$ dimensions) and stored separately in the KV cache. The RoPE portion adds $d_h^{\text{rope}}$ floats per token per layer to the KV cache — a small overhead.
+
+**Total KV cache per token per layer:** $r + d_h^{\text{rope}}$ floats. For DeepSeek-V3: $512 + 64 = 576$ floats $= 1152$ bytes (FP16). Still a massive savings over MHA's $2 \times 128 \times 128 = 32768$ floats $= 65536$ bytes.
+
+**Concrete dimension walkthrough of decoupled RoPE.** For DeepSeek-V3 with $D = 7168$, $r = 512$, $d_h^{\text{rope}} = 64$, $H = 128$:
+
+For token at position $n$:
+
+1. **Content latent (position-independent, stored in KV cache):** $\mathbf{c}_{KV}^{(n)} = \mathbf{x}^T W_{DKV} \in \mathbb{R}^{512}$
+
+2. **RoPE key (position-dependent, stored separately in KV cache):** $\mathbf{k}^{\text{rope}(n)} = \text{RoPE}_n(\mathbf{x}^T W^{\text{rope}})$ where $W^{\text{rope}} \in \mathbb{R}^{7168 \times 64}$ and $\text{RoPE}_n$ applies the rotation at position $n$. Result: $\mathbf{k}^{\text{rope}(n)} \in \mathbb{R}^{64}$.
+
+3. **Query at position $m$ (computed fresh, not cached):**
+   - Content query: $\hat{q}_h^{(m)} = (\mathbf{x}^T W_h^Q) W_{UK}^{h T} \in \mathbb{R}^{d_h = 128}$ (query side absorbs the up-projection)
+   - RoPE query: $\mathbf{q}^{\text{rope}(m)} = \text{RoPE}_m(\mathbf{x}^T W^{\text{rope}}_Q) \in \mathbb{R}^{64}$
+
+4. **Attention score (decoupled sum):**
+$$\text{score}_h^{(m,n)} = \underbrace{\hat{q}_h^{(m)T} \cdot \mathbf{c}_{KV}^{(n)}}_{\text{content: no position}} + \underbrace{\mathbf{q}^{\text{rope}(m)T} \cdot \mathbf{k}^{\text{rope}(n)}}_{\text{RoPE: relative position } n-m}$$
+
+The content term has *no position dependence* — it is computed directly from the cached latent $\mathbf{c}_{KV}^{(n)}$ without needing to know $n$. The RoPE term encodes relative position but operates on a small $64$-dimensional space. The total per-token KV storage is $512 + 64 = 576$ floats.
+
+### 5.7 Worked MLA Derivation — Compression Ratio Calculation
+
+Consider DeepSeek-V3 dimensions: $D = 7168$, $H = 128$, $d_h = 128$, $r = 512$, $d_h^{\text{rope}} = 64$.
+
+**MHA baseline** (if DeepSeek-V3 used MHA): Per token per layer, K and V for each of $H = 128$ heads, each $d_h = 128$ dimensions. Total: $2 \times 128 \times 128 = 32{,}768$ elements $= 65{,}536$ bytes (FP16).
+
+**MLA:** Per token per layer, one latent $\mathbf{c}_{KV} \in \mathbb{R}^{512}$ plus RoPE key $\in \mathbb{R}^{64}$. Total: $512 + 64 = 576$ elements $= 1{,}152$ bytes (FP16).
+
+**Compression ratio:** $65{,}536 / 1{,}152 = 56.9\times$.
+
+The compression works because the up-projection matrices $W_{UK}^h, W_{UV}^h$ are shared across all tokens and stored as model weights (not in the KV cache). The KV cache only stores the bottleneck representation $\mathbf{c}_{KV}$, and the per-head K/V are reconstructed on-the-fly during attention. The extra FLOPs for reconstruction ($4Hrd_h = 4 \times 128 \times 512 \times 128 = 33.6$ MFLOPs per token) are negligible compared to the attention FLOPs during prefill ($4S^2 D$), and during decode ($4T d_h H$ for $QK^T + PV$) the reconstruction cost is $33.6$ MFLOPs versus $\approx 4 \times 128000 \times 128 \times 128 = 8.39$ GFLOPs for the attention — a $0.4\%$ overhead.
+
+### 5.8 MLA Worked Numerical Example — Compression and Reconstruction
+
+Consider a simplified MLA with $D = 4$, $H = 2$, $d_h = 2$, $r = 2$ (compression ratio from $2 \times 2 \times 2 = 8$ elements to $2$ elements = 4x).
+
+**Down-projection matrix:** $W_{DKV} \in \mathbb{R}^{4 \times 2}$. Let:
+
+$$W_{DKV} = \begin{pmatrix} 1.0 & 0.0 \\ 0.5 & 0.5 \\ 0.0 & 1.0 \\ -0.5 & 0.5 \end{pmatrix}$$
+
+**Up-projection matrices** (per head):
+$$W_{UK}^{(1)} = \begin{pmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \end{pmatrix}, \quad W_{UK}^{(2)} = \begin{pmatrix} 0.5 & 0.5 \\ -0.5 & 0.5 \end{pmatrix}$$
+
+$$W_{UV}^{(1)} = \begin{pmatrix} 1.0 & 0.5 \\ 0.0 & 0.5 \end{pmatrix}, \quad W_{UV}^{(2)} = \begin{pmatrix} 0.5 & 0.0 \\ 0.5 & 1.0 \end{pmatrix}$$
+
+**Token:** $\mathbf{x} = [2.0, 1.0, -1.0, 0.5]^T$.
+
+**Step 1: Compress (stored in KV cache).**
+
+$$\mathbf{c}_{KV} = W_{DKV}^T \mathbf{x} = \begin{pmatrix} 1.0 & 0.5 & 0.0 & -0.5 \\ 0.0 & 0.5 & 1.0 & 0.5 \end{pmatrix} \begin{pmatrix} 2.0 \\ 1.0 \\ -1.0 \\ 0.5 \end{pmatrix} = \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix}$$
+
+**KV cache stores only $\mathbf{c}_{KV} = [1.75, -0.25]$** — 2 elements instead of 8.
+
+**Step 2: Reconstruct K and V per head (at attention time).**
+
+Head 1:
+$$k_1 = W_{UK}^{(1)T} \mathbf{c}_{KV} = \begin{pmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \end{pmatrix} \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix} = \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix}$$
+
+$$v_1 = W_{UV}^{(1)T} \mathbf{c}_{KV} = \begin{pmatrix} 1.0 & 0.0 \\ 0.5 & 0.5 \end{pmatrix} \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix} = \begin{pmatrix} 1.75 \\ 0.75 \end{pmatrix}$$
+
+Head 2:
+$$k_2 = W_{UK}^{(2)T} \mathbf{c}_{KV} = \begin{pmatrix} 0.5 & -0.5 \\ 0.5 & 0.5 \end{pmatrix} \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix} = \begin{pmatrix} 1.0 \\ 0.75 \end{pmatrix}$$
+
+$$v_2 = W_{UV}^{(2)T} \mathbf{c}_{KV} = \begin{pmatrix} 0.5 & 0.5 \\ 0.0 & 1.0 \end{pmatrix} \begin{pmatrix} 1.75 \\ -0.25 \end{pmatrix} = \begin{pmatrix} 0.75 \\ -0.25 \end{pmatrix}$$
+
+**Step 3: Verify MHA-equivalent.** With MHA, the equivalent K projection would be $K_h = X W_h^K = X (W_{DKV} W_{UK}^h)$. For head 1: $W_1^K = W_{DKV} \cdot W_{UK}^{(1)} = \begin{pmatrix} 1 & 0 \\ 0.5 & 0.5 \\ 0 & 1 \\ -0.5 & 0.5 \end{pmatrix}$. Then $k_1 = W_1^{K T} \mathbf{x} = [1.75, -0.25]^T$ — identical to the MLA reconstruction. The low-rank factorization $W_h^K = W_{DKV} \cdot W_{UK}^h$ is exact; no information is lost as long as $r \geq d_h$.
+
+**Why MLA effectively reduces KV cache by the compression ratio.** In MHA, each head stores its own $k_h, v_h \in \mathbb{R}^{d_h}$, totaling $2 H d_h$ elements per token per layer. MLA stores one shared $\mathbf{c}_{KV} \in \mathbb{R}^r$, totaling $r$ elements. The ratio is $2Hd_h / r$. Since the reconstruction matrices $W_{UK}^h, W_{UV}^h$ are model parameters (not per-token), they cost zero KV cache memory. The trade is: KV cache memory drops by $2Hd_h/r$, but each attention step pays $2Hrd_h$ extra FLOPs for the up-projections — a memory-compute tradeoff that is overwhelmingly favorable during decode, where KV cache size is the bottleneck.
 
 ---
 
@@ -388,6 +510,31 @@ $$\mathbf{o}^{(t)} = e^{m^{(t-1)} - m^{(t)}} \cdot \mathbf{o}^{(t-1)} + \text{so
 $$\boxed{O = \frac{\mathbf{o}^{(T)}}{\ell^{(T)}}}$$
 
 This is the exact attention output, computed with only $O(d_h + 2)$ state per query row (the running accumulator $\mathbf{o}$, the running max $m$, and the running sum $\ell$). The proof of equivalence follows identically from the induction above.
+
+### 6.5 FlashAttention's Use of Online Softmax — Tile-by-Tile
+
+FlashAttention tiles the attention computation to keep working data in SRAM (shared memory / L1 cache on GPUs). For query block size $B_r$ and key/value block size $B_c$, the algorithm processes the attention matrix in tiles of size $B_r \times B_c$:
+
+**Why naive softmax fails for streaming (tiled) computation.** The standard two-pass softmax requires:
+1. **Pass 1:** Scan all $S$ key positions to find $m_i = \max_j s_{ij}$.
+2. **Pass 2:** Compute $e^{s_{ij} - m_i}$ and normalize by $\sum_j e^{s_{ij} - m_i}$.
+
+In a tiled setting, we process one $B_r \times B_c$ tile at a time. After processing tile 1, we have a *local* maximum for those $B_c$ keys. But we cannot normalize yet — the global maximum over all $S$ keys is unknown. If we computed softmax using only the local max, the result would be wrong (the probabilities would not sum to 1 over the full row). And we cannot wait until all tiles are processed to find the global max — that would require storing all $S^2$ scores in HBM, which is exactly what FlashAttention avoids.
+
+**The online softmax solution: track running max and running sum, rescale on the fly.** For each query row $i$, FlashAttention maintains state $(m_i, \ell_i, \mathbf{o}_i)$ where $\mathbf{o}_i \in \mathbb{R}^{d_h}$ is the unnormalized output accumulator. As each key-value tile is processed:
+
+1. **Compute local scores:** $S^{(t)} = Q^{(t)} K^{(t)\top} / \sqrt{d_h} \in \mathbb{R}^{B_r \times B_c}$ (in SRAM).
+2. **Local max:** $\hat{m}^{(t)} = \text{rowmax}(S^{(t)}) \in \mathbb{R}^{B_r}$.
+3. **Update running max:** $m^{(t)} = \max(m^{(t-1)}, \hat{m}^{(t)})$.
+4. **Rescale running sum and output:** The correction factor $e^{m^{(t-1)} - m^{(t)}} \leq 1$ is applied to $\ell^{(t-1)}$ and $\mathbf{o}^{(t-1)}$ to account for the new (larger) maximum.
+5. **Local softmax-weighted values:** $\mathbf{P}^{(t)} = \exp(S^{(t)} - m^{(t)}) \in \mathbb{R}^{B_r \times B_c}$.
+6. **Update accumulators:** $\ell^{(t)} = e^{m^{(t-1)} - m^{(t)}} \ell^{(t-1)} + \text{rowsum}(\mathbf{P}^{(t)})$ and $\mathbf{o}^{(t)} = e^{m^{(t-1)} - m^{(t)}} \mathbf{o}^{(t-1)} + \mathbf{P}^{(t)} V^{(t)}$.
+
+After all tiles: $O_i = \mathbf{o}_i^{(T)} / \ell_i^{(T)}$.
+
+**SRAM budget.** The state per query block is: $m \in \mathbb{R}^{B_r}$ ($B_r$ floats), $\ell \in \mathbb{R}^{B_r}$ ($B_r$ floats), $\mathbf{o} \in \mathbb{R}^{B_r \times d_h}$ ($B_r \cdot d_h$ floats), plus the current tile $S \in \mathbb{R}^{B_r \times B_c}$ ($B_r \cdot B_c$ floats). Total: $(B_r \cdot d_h + B_r \cdot B_c + 2 B_r)$ floats. For A100 (192 KB SRAM per SM, $d_h = 128$, FP32 accumulation): $B_r = 64$, $B_c = 64$ fits in $\approx 80$ KB. This is why FlashAttention's block sizes are small — they are determined by SRAM capacity, not by a software choice.
+
+**HBM reads/writes.** FlashAttention reads $Q$, $K$, $V$ once each from HBM and writes $O$ once — total $4 \cdot S \cdot D$ bytes per layer (for $B = 1$, MHA). The naive implementation materializes the $S \times S$ attention matrix, requiring $H \cdot S^2 \cdot 4$ bytes of HBM I/O. For $S = 4096$, $H = 32$: naive $\approx 2$ GB of HBM I/O vs FlashAttention's $\approx 2$ MB — a $1000\times$ reduction in HBM traffic.
 
 ---
 

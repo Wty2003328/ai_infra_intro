@@ -205,7 +205,55 @@ NVLink intra-node and NVL72 transfers are nearly free relative to TTFT. InfiniBa
 
 ## 4. KV transfer engineering
 
-### 4.1 NIXL (NVIDIA Inference Xfer Library)
+### 4.1 The transfer path: GPU to GPU
+
+The end-to-end KV transfer path traverses: **GPU $\to$ NIC $\to$ network $\to$ NIC $\to$ GPU**. Each segment has distinct bandwidth and latency characteristics:
+
+**Step-by-step data flow (RDMA path):**
+
+```
+Prefill GPU                    Network                     Decode GPU
+┌──────────┐                  ┌─────────┐                 ┌──────────┐
+│ KV tensor │──DMA──> NIC Tx  │  fabric  │  NIC Rx ──DMA─>│ KV tensor │
+│ (HBM)    │   ~3.3TB/s │    │ ~50-900 │    │ ~3.3TB/s │ (HBM)    │
+└──────────┘            ↓     │  GB/s   │    ↓          └──────────┘
+                    PCIe/NVLink          PCIe/NVLink
+                    ~64-900 GB/s         ~64-900 GB/s
+```
+
+1. **GPU HBM $\to$ NIC DMA**: the KV tensor data is read from GPU HBM via PCIe (64 GB/s) or NVLink (900 GB/s) to the NIC's transmit buffer. With GPUDirect RDMA, the NIC reads directly from GPU-registered memory -- no CPU involvement.
+2. **Fabric traversal**: the NIC transmits the data across InfiniBand or RoCE fabric. Bandwidth is determined by the link speed (50--400 GB/s per NIC port).
+3. **NIC $\to$ GPU HBM DMA**: the receiving NIC writes the data directly into the decode GPU's HBM via GPUDirect RDMA.
+
+**Without GPUDirect RDMA (fallback path):**
+```
+GPU_P --PCIe--> CPU_P --socket/network--> CPU_D --PCIe--> GPU_D
+```
+This adds two CPU memory copies and doubles the latency. Only used when GPUDirect is not available (older GPUs, misconfigured drivers).
+
+**Overlapping transfer with compute.** The key optimization is to pipeline KV transfer with prefill computation so the transfer is not on the critical path:
+
+- While the prefill GPU computes layer $l+1$, the NIC simultaneously transfers layer $l$'s KV.
+- The NIC transfer uses a separate DMA engine that does not consume GPU compute units.
+- On the decode side, the GPU begins processing layer $l$ as soon as its KV arrives, without waiting for later layers.
+- This creates a three-stage pipeline per layer: **compute prefill $l+1$** $\parallel$ **transfer KV $l$** $\parallel$ **decode layer $l-k$** (for some lag $k$).
+
+Effective transfer overhead is the **unhidden tail**: the last layer's KV cannot be overlapped with any subsequent prefill compute because prefill is done. This tail is $t_{\text{xfer, one layer}}$, which for 70B is $\sim 0.02$ ms on NVLink -- negligible.
+
+**Bandwidth calculation for real-time transfer.** For the transfer to not dominate TTFT, the transfer time must be a small fraction of the prefill time:
+
+$$\frac{\text{KV\_bytes}}{\beta_{\text{fabric}}} \le f \cdot t_{\text{prefill}}$$
+
+where $f$ is the acceptable fraction (typically 0.1--0.2). For 70B at $S = 4096$:
+
+| Fabric | $\beta$ | KV transfer time | Prefill time | Fraction | Feasible? |
+|--------|---------|------------------|--------------|----------|-----------|
+| NVLink P2P | 900 GB/s | 1.4 ms | 200 ms | 0.7% | Yes |
+| IB NDR (400G) | 50 GB/s | 25 ms | 200 ms | 12.5% | Yes (with pipelining, nearly zero) |
+| RoCE 200G | 25 GB/s | 50 ms | 200 ms | 25% | Marginal (pipelining helps) |
+| TCP 100G | 10 GB/s | 125 ms | 200 ms | 62.5% | No |
+
+### 4.2 NIXL (NVIDIA Inference Xfer Library)
 
 NIXL provides a unified API for GPU-to-GPU, GPU-to-CPU, and GPU-to-storage data movement. It selects the optimal transport at runtime (NVLink, GPUDirect RDMA, PCIe bounce-buffer) based on source/destination topology. Used by NVIDIA Dynamo and increasingly adopted by other frameworks. Key benefits:
 
@@ -213,7 +261,7 @@ NIXL provides a unified API for GPU-to-GPU, GPU-to-CPU, and GPU-to-storage data 
 - **Zero-copy path**: when GPUDirect RDMA is available, data stays in GPU memory end-to-end: $\text{GPU}_P \to \text{NIC}_P \to \text{fabric} \to \text{NIC}_D \to \text{GPU}_D$.
 - **Fallback path**: when GPUDirect is not configured, stages through pinned host memory with minimal copies.
 
-### 4.2 Layer-pipelined transfer
+### 4.3 Layer-pipelined transfer
 
 Naive transfer waits for all $L$ layers to complete prefill, then transfers the entire KV in one shot. Layer pipelining overlaps transfer with compute:
 
@@ -248,7 +296,15 @@ $$t_{\text{visible}} \approx \max(0,\; t_{\text{xfer, per layer}} - t_{\text{pre
 
 On NVLink where per-layer transfer ($\sim 0.5$ ms) is much faster than per-layer prefill ($\sim 5$ ms), visible latency is zero. On InfiniBand, some tail layers may not be fully hidden.
 
-### 4.3 Tensor-parallel layout translation
+**Memory management at the decode side.** When KV blocks arrive at the decode worker:
+
+1. The decode worker's block manager **pre-allocates** physical blocks from its local free list to match the incoming KV. The number of blocks needed is $\lceil S / B_s \rceil$, communicated via the transfer metadata.
+2. Incoming KV data is **DMA'd directly** into the pre-allocated physical block slots in the decode GPU's KV tensor. No intermediate buffering on the decode GPU.
+3. The decode worker builds a **local block table** mapping the sequence's logical blocks to its own physical block IDs. These IDs differ from the prefill worker's IDs because each worker has an independent block pool.
+4. Once all layers for a block are received, that block is marked as **valid** in the block table. The decode forward pass can begin using blocks as soon as all layers for that block are populated.
+5. If the decode worker's free list is exhausted, it signals backpressure to the router, which stops routing new requests to this worker until blocks free up.
+
+### 4.4 Tensor-parallel layout translation
 
 Prefill and decode pools may use different tensor-parallelism (TP) degrees. If $P$ uses $\text{TP}=4$ and $D$ uses $\text{TP}=2$, the KV is sharded differently:
 
@@ -262,7 +318,7 @@ The transfer must **reshape** the KV from the source TP layout to the destinatio
 
 Production systems (Dynamo, llm-d) use approach 2. The manifest is a small data structure (a few KB) exchanged out-of-band before the transfer begins.
 
-### 4.4 GPUDirect RDMA path
+### 4.5 GPUDirect RDMA path
 
 When the KV transfer crosses node boundaries, the ideal path avoids CPU involvement entirely:
 
@@ -483,6 +539,60 @@ The router tracks per-instance metrics:
 - **Decode instances**: active sequences, KV memory utilization, current TPOT.
 
 Routing policy: weighted least-loaded, where the weight combines queue depth with prefix-cache affinity. A request that hits a 3K-token prefix cache on instance $P_i$ is routed there even if $P_i$ has a slightly longer queue, because skipping 3K tokens of prefill saves more time than waiting in a shorter queue elsewhere.
+
+**How many prefill workers vs decode workers.** The ratio $N_p : N_d$ is determined by the workload's compute-to-bandwidth ratio:
+
+$$\frac{N_p}{N_d} = \frac{\lambda \cdot 2 N \cdot S_p / (\eta_p \cdot \pi)}{\lambda \cdot S_d \cdot \bar{Q}_d / (\eta_d \cdot \beta)} = \frac{2 N \cdot S_p \cdot \eta_d \cdot \beta}{S_d \cdot \bar{Q}_d \cdot \eta_p \cdot \pi}$$
+
+Worked for Llama-3-70B chat ($S_p=2000$, $S_d=300$) on H100: $N_p/N_d \approx 28/1$ (prefill-heavy). For reasoning ($S_p=500$, $S_d=8000$): $N_p/N_d \approx 1/3$ (decode-heavy). This ratio can shift by 80$\times$ between workloads, which is precisely why disaggregation helps -- a coupled system must provision for the max of both phases.
+
+**Independent scaling triggers.** Each pool scales based on its own SLO metric:
+
+| Pool | Scaling metric | Scale-up trigger | Scale-down trigger |
+|------|---------------|-----------------|-------------------|
+| Prefill | TTFT p99 | TTFT p99 > 80% of SLO for > 60s | TTFT p99 < 40% of SLO for > 5 min |
+| Decode | TPOT p99 + KV occupancy | TPOT p99 > 80% of SLO or KV occupancy > 90% | TPOT p99 < 40% of SLO and KV occupancy < 50% for > 5 min |
+
+The pools scale independently because their bottlenecks are independent. A burst of long prompts triggers prefill scale-up without affecting decode pool sizing. A burst of long outputs (reasoning chain-of-thought) triggers decode scale-up without affecting prefill.
+
+**Routing logic.** The router applies a two-stage decision:
+
+1. **Prefill routing**: compute prefix-cache affinity score for each prefill instance. Score = (cached\_tokens / prompt\_tokens) $\times$ weight\_affinity + (1 - queue\_depth / max\_queue) $\times$ weight\_load. Route to the highest-scoring instance. Typical weights: `weight_affinity = 0.7`, `weight_load = 0.3`. The high affinity weight ensures that prefix-cache hits are prioritized over load balancing.
+
+2. **Decode binding**: after prefill completes and KV is transferred, the sequence is bound to a decode instance for its lifetime. Selection: least-loaded decode instance (fewest active sequences). Binding is static because KV migration between decode instances is expensive.
+
+**What triggers adding/removing workers.** Production systems use horizontal pod autoscaling (HPA) with custom metrics:
+
+- **Add prefill worker**: when the average prefill queue depth across all instances exceeds a threshold (e.g., 5 queued requests) for more than 60 seconds, a new prefill pod is scheduled. The pod loads model weights (~30--120 seconds), warms its prefix cache, and begins accepting requests.
+- **Remove prefill worker**: when an instance has been idle (zero requests in queue, no active prefills) for more than 5 minutes. The instance drains in-flight requests, then terminates.
+- **Add decode worker**: when aggregate decode KV occupancy exceeds 85% or TPOT p99 exceeds 80% of SLO for > 60 seconds. A new decode pod is scheduled, loaded, and begins accepting KV transfers.
+- **Remove decode worker**: when a decode instance's active sequence count drops below a minimum (e.g., 5) for > 5 minutes, and aggregate decode KV occupancy is below 40%. The instance finishes in-flight sequences (no new bindings), then terminates.
+
+### 8.4 Batch size implications for each phase
+
+Disaggregation allows each phase to operate at its optimal batch size, which differ by an order of magnitude.
+
+**Prefill: compute-bound, small batch of large prompts.** Prefill saturates tensor cores. A single 4K-token prompt at 50% tensor-core utilization uses:
+
+$$\frac{2 \times 70 \times 10^9 \times 4096}{0.5 \times 990 \times 10^{12}} \approx 1.16 \text{ seconds of compute}$$
+
+The GPU is fully utilized during this time. Batching multiple prefills helps only when individual prompts are short (< 512 tokens). For long prompts, a batch of 1--4 large requests is sufficient to saturate compute. The optimal prefill batch size $B_p^*$ is the smallest $B$ where tensor-core utilization exceeds 70%:
+
+$$B_p^* \approx \max\left(1,\; \left\lceil \frac{0.7 \cdot \pi}{2 N \cdot \bar{S}_p}\right\rceil \right)$$
+
+For 70B on H100 with $\bar{S}_p = 2000$: $B_p^* = \lceil 0.7 \times 990 \times 10^{12} / (2 \times 70 \times 10^9 \times 2000) \rceil = \lceil 2.5 \rceil = 3$ requests. Three 2K-token prompts saturate the GPU.
+
+**Decode: memory-bandwidth-bound, large batch to amortize weight reads.** Each decode step reads 140 GB of weights regardless of batch size. Adding sequences costs only KV read bandwidth. The optimal decode batch size $B_d^*$ maximizes throughput subject to the TPOT SLO:
+
+$$B_d^* = \frac{T_{\text{SLO}} - W_{\text{bytes}} / \beta}{\bar{S} \cdot c_{\text{token}} / \beta}$$
+
+For 70B on H100 ($T_{\text{SLO}} = 50$ ms, $W = 140$ GB, $\beta = 3.35$ TB/s, $\bar{S} = 4096$, $c = 320$ KB):
+
+$$B_d^* = \frac{0.050 - 140/3350}{4096 \times 0.000320 / 3350} = \frac{0.050 - 0.0418}{0.000391} \approx 21$$
+
+But this is bandwidth-limited. The actual binding constraint is KV capacity: $B_{\max} = M_{\text{KV}} / (\bar{S} \cdot c_{\text{token}})$. With 85 GB KV pool: $B_{\max} = 85 \times 10^9 / (4096 \times 327680) \approx 63$.
+
+The key point: **prefill wants batch 1--4; decode wants batch 20--60+**. In a coupled system, the batch must accommodate both simultaneously, resulting in either under-utilized tensor cores (small batch) or KV capacity exhaustion (large batch). Disaggregation lets prefill run at $B_p^* = 3$ while decode runs at $B_d^* = 60$, each at its own optimum.
 
 ---
 

@@ -169,7 +169,7 @@ $$\text{block\_bytes} = B_s \cdot 2 \cdot n_l \cdot n_{\text{kv}} \cdot d_h \cdo
 
 For Llama-3 70B with $B_s = 16$: $16 \times 327{,}680 = 5.24$ MB per block.
 
-A global **block pool** holds all physical blocks. Each sequence maintains a **block table** mapping logical block indices to physical block indices:
+A global **block pool** holds all physical blocks. Each sequence maintains a **block table** mapping logical block indices to physical block IDs:
 
 ```
 Sequence "Hello world, how are" (18 tokens, block_size=16):
@@ -181,18 +181,62 @@ Sequence "Hello world, how are" (18 tokens, block_size=16):
   block_table = [42, 781]
 ```
 
-When a sequence appends a token that fills its current block, the allocator grabs a fresh physical block from the pool and appends its index to the block table.
+#### Block allocation during prefill
 
-### 4.3 Virtual memory analogy
+On prefill, the sequence's tokens are processed in order. The allocator assigns physical blocks greedily as the sequence grows:
+
+1. **Chunk arrives**: the scheduler computes how many new logical blocks the chunk spans: $n_{\text{new}} = \lceil (S_{\text{chunk}} + S_{\text{prev}}) / B_s \rceil - \lceil S_{\text{prev}} / B_s \rceil$.
+2. **Allocate**: pop $n_{\text{new}}$ physical block IDs from the free list. Append them to the sequence's block table.
+3. **Write**: the GPU kernel scatters $K$, $V$ vectors into the allocated physical blocks via the slot mapping (physical_block $\times B_s$ + offset).
+4. **Repeat**: the next chunk reuses already-allocated blocks and allocates new ones only for positions that spill into new logical blocks.
+
+If the free list is exhausted mid-prefill, the scheduler either (a) triggers preemption of a lower-priority sequence to reclaim blocks, or (b) splits the prefill into a smaller chunk that fits within the remaining blocks.
+
+#### Copy-on-write for forked sequences
+
+When a sequence is **forked** (parallel generation from the same prefix, as in beam search or multi-sample generation), the forked sequences initially share all prefix blocks:
+
+```
+Original sequence:  block_table = [42, 107, 203, ...]
+Forked sequence:    block_table = [42, 107, 203, ...]  (same physical blocks)
+
+At fork time: refcount on blocks 42, 107, 203 incremented.
+```
+
+Both sequences share the prefix KV data without copying. When either sequence writes a new token that lands in a fresh block, that block is exclusively owned (refcount = 1). Crucially, KV blocks are **append-only**: once a block's $B_s$ slots are filled, its content is never modified. This means copy-on-write never actually triggers a copy -- the "write" always goes to a newly allocated block, not a shared one. The COW mechanism exists for correctness guarantees but the append-only invariant makes it a no-op in practice.
+
+When a sequence finishes and its block table is released, each block's reference count is decremented. Blocks reaching refcount = 0 return to the free list. Shared prefix blocks persist as long as at least one sequence references them, and can additionally be retained by the prefix cache (hash table entry).
+
+#### Block freeing on sequence completion
+
+When a sequence produces EOS or hits `max_tokens`:
+
+1. Walk the block table from end to start.
+2. For each block: decrement reference count. If refcount reaches 0 **and** the block has no prefix-cache hash entry, return it to the free list immediately.
+3. If refcount reaches 0 but the block **does** have a prefix-cache hash entry, leave it in the cache. It will be evicted by the LRU policy when memory pressure demands it.
+
+This ensures that prefix-cached blocks survive individual request lifetimes, enabling reuse by subsequent requests.
+
+### 4.3 Virtual memory analogy (detailed)
 
 | OS Virtual Memory | PagedAttention |
 |-------------------|----------------|
-| Virtual address space | Logical token positions |
-| Physical pages | Physical KV blocks |
-| Page table | Block table |
-| Page fault | Block allocation / swap-in |
-| Shared memory (mmap) | Prefix sharing (refcounted blocks) |
+| Virtual address space | Logical token positions $[0, S-1]$ |
+| Physical pages | Physical KV blocks in pre-allocated GPU tensor |
+| Page table (`cr3` register, per-process) | Block table (per-sequence `List[int]`) |
+| Page fault (demand paging) | Block allocation on first write to a new logical block |
+| Shared memory (`mmap`, refcounted pages) | Prefix sharing (refcounted physical blocks) |
+| Copy-on-write after `fork()` | Copy-on-write for forked sequences (beam search) |
 | Swap to disk | Swap to CPU RAM / NVMe |
+| TLB (translation lookaside buffer) | Slot mapping cache (computed per-step, not cached) |
+| Page size (4 KB typical) | Block size (16 tokens typical) |
+| Overcommit (allocate more virtual than physical) | Admission control limits logical blocks to physical pool size |
+
+The mapping from logical to physical is: logical block $j$ $\to$ `block_table[j]` $\to$ physical block ID. Given a token at position $p$:
+
+$$\text{logical\_block} = \lfloor p / B_s \rfloor, \quad \text{offset} = p \bmod B_s, \quad \text{physical\_block} = \text{block\_table}[\text{logical\_block}]$$
+
+The physical address in the KV tensor is: `kv_cache[layer][k_or_v][physical_block][offset][head][d]`. This is a two-level indirection: sequence $\to$ block table $\to$ physical tensor. The slot mapping pre-computes this into a flat array for the GPU kernel, avoiding per-token block-table lookups in the hot loop.
 
 ### 4.4 Fragmentation elimination
 
@@ -260,20 +304,33 @@ Each block is identified by a hash computed over its content:
 
 $$h_i = \text{Hash}(h_{i-1},\ \text{token\_ids}[i \cdot B_s : (i+1) \cdot B_s])$$
 
-where $h_{-1} = 0$ (null hash for the root). This creates a hash chain that encodes both the block's content and its position in the prefix.
+where $h_{-1} = 0$ (null hash for the root). This creates a hash chain that encodes both the block's content and its position in the prefix. The hash must also include the KV dtype to prevent cross-dtype collisions (e.g., an FP16-cached block matching an FP8 request).
 
 **Matching algorithm:**
 
 1. When a new request arrives, compute block hashes for its prompt greedily from position 0.
-2. For each hash, check the global hash table. If a match is found, increment the physical block's reference count and skip that block.
+2. For each hash, probe the global hash table (a Python `dict` or equivalent). If a match is found:
+   - Increment the physical block's reference count.
+   - Add the physical block ID to the new sequence's block table (no KV data copied).
+   - Move to the next block.
 3. On first mismatch, stop. All subsequent blocks must be computed via prefill.
-4. Prefill only the **suffix** -- the unmatched portion.
+4. Prefill only the **suffix** -- the unmatched portion. The prefix KV is shared read-only.
 
-Reference-counted blocks are freed only when no active sequence references them. Eviction policies (LRU) apply to unreferenced blocks.
+**Cache hit detection during prefill.** The matching proceeds layer by layer in the hash chain. Because each hash $h_j$ depends on $h_{j-1}$, a match at block $j$ implies matches at blocks $0, 1, \ldots, j-1$. The first mismatch terminates the search -- there is no non-contiguous matching. The prefix match length is therefore always $j \cdot B_s$ tokens (block-aligned). This is a limitation: a prompt that shares 100 tokens of prefix but diverges at token 101 will only match $96$ tokens with $B_s = 16$ (the last 4 tokens of the matching block are different, so the entire block misses).
+
+Reference-counted blocks are freed only when no active sequence references them. Eviction policies (LRU) apply to unreferenced blocks that still have hash entries.
+
+**Eviction policy.** When the free list is exhausted and new blocks are needed:
+1. Identify all unreferenced cached blocks (refcount = 0, hash entry exists).
+2. Sort by last-access time (LRU). Evict the oldest first.
+3. Remove the hash entry, return the physical block to the free list.
+4. The evicted prefix can be recomputed on demand if a future request needs it.
+
+This is a global LRU across all sequences' unreferenced cached blocks. The LRU ordering is maintained via a doubly-linked list updated on every cache hit (move-to-front). The overhead is $O(1)$ per eviction/insertion.
 
 ### 5.3 Radix tree (SGLang RadixAttention)
 
-A radix tree (compact trie) indexes the cache by token sequence. Each node represents a token subsequence and owns the corresponding KV blocks.
+A radix tree (compact trie) indexes the cache by token sequence. Each node represents a token subsequence of arbitrary length (not necessarily block-aligned) and owns the corresponding KV blocks.
 
 ```
 Radix tree for prompts ["The cat sat", "The cat ran", "The dog sat"]:
@@ -287,12 +344,25 @@ Radix tree for prompts ["The cat sat", "The cat ran", "The dog sat"]:
  "sat"  "ran"     (leaf nodes, own KV for tokens 6-8)
 ```
 
-Advantages over hash-chain:
-- **Sub-block matching**: the radix tree can match at any node boundary, not just fixed-size block boundaries.
-- **Automatic common-prefix detection**: no explicit hash computation; the trie structure makes shared prefixes structural.
-- **Excellent for multi-turn chat**: each turn extends an existing path in the tree, so the entire history is a cache hit.
+**Indexing and lookup.** The radix tree indexes KV blocks by their prefix hash at token granularity:
 
-Overhead: tree traversal and node bookkeeping. In practice the cost is negligible because traversal is $O(S / B_s)$ integer comparisons.
+1. **Insert**: After prefill, each node's token subsequence is mapped to the physical KV blocks it occupies. The node stores: `(token_ids, physical_block_ids, refcount)`.
+2. **Lookup on prefill**: When a new request arrives, traverse the tree from the root, matching tokens one by one:
+   - At each node, compare the incoming tokens against the node's stored token sequence.
+   - If full match, move to the matching child and continue.
+   - If partial match (prefix of the node matches), the node is split: the common prefix becomes a new internal node, the remainder stays as a child. The new request follows the matching branch.
+   - If no child matches, this is the cache miss point. All matched nodes contribute shared KV blocks.
+3. **Match result**: The prefix match length can be at any token position, not just at block boundaries. This enables sub-block sharing -- the radix tree can save 3 tokens of a 16-token block that would be a complete miss under hash-chain.
+
+**Eviction.** The radix tree supports LRU eviction of leaf nodes (or any node with refcount = 0). When a node is evicted, it is removed from the tree and its physical blocks are freed. If a parent node has only one remaining child after eviction, the parent and child are merged (radix tree compaction). The LRU is tracked via access timestamps on each node, with the same $O(1)$ move-to-front on cache hit.
+
+**Advantages over hash-chain:**
+- **Sub-block matching**: the radix tree can match at any node boundary, not just fixed-size block boundaries. A prompt sharing 100 tokens of prefix with an existing entry matches all 100 tokens; hash-chain matches only 96 ($6 \times 16$).
+- **Automatic common-prefix detection**: no explicit hash computation; the trie structure makes shared prefixes structural.
+- **Excellent for multi-turn chat**: each turn extends an existing path in the tree, so the entire history is a cache hit. The tree grows naturally with the conversation.
+- **Branching support**: agentic workflows where multiple tool calls diverge from a shared system prompt create a branching structure in the tree, all sharing the common prefix KV.
+
+Overhead: tree traversal is $O(S / B_s)$ node comparisons plus memory allocation for new nodes. In practice the cost is negligible ($< 0.01$ ms) compared to prefill time ($> 10$ ms).
 
 ### 5.4 Hit rates and throughput impact
 
@@ -325,15 +395,95 @@ On rescheduling:
 
 **Decision heuristic**: swap short sequences (small transfer), recompute long sequences (transfer cost exceeds prefill cost).
 
-### 6.3 NVMe offload
+### 6.3 Worked example: 70B model offloading analysis
+
+**Scenario.** A 70B model with GQA ($n_l=80$, $n_{\text{kv}}=8$, $d_h=128$, $b=2$ for FP16 KV) serves 100 concurrent requests at average context length 4096 tokens on a single H100 (80 GB HBM).
+
+**Step 1: Total KV cache size.**
+
+Per-token KV: $c = 2 \times 80 \times 8 \times 128 \times 2 = 327{,}680$ B = 320 KB.
+
+Total KV: $100 \times 4096 \times 320{,}000 = 131{,}072{,}000{,}000$ B $\approx 122$ GB.
+
+**Step 2: HBM capacity for KV.**
+
+Model weights (FP8): 70 GB. Activation overhead: ~5 GB. Available for KV: $80 - 70 - 5 = 5$ GB.
+
+FP8 KV per-token: 160 KB. FP8 KV for 100 requests at 4096: $100 \times 4096 \times 160{,}000 = 65{,}536{,}000{,}000$ B $\approx 61$ GB.
+
+Even with FP8 KV, 61 GB exceeds the 5 GB budget. Only $\lfloor 5 \times 10^9 / (4096 \times 160{,}000) \rfloor \approx 7$ concurrent 4K-context sequences fit in HBM.
+
+**Step 3: CPU RAM offload requirement.**
+
+To serve 100 concurrent requests, we need $61 - 5 = 56$ GB of offloaded KV in CPU DRAM. With typical server configurations of 256--512 GB DDR5, this is feasible. The 5 GB of HBM holds the ~7 most active sequences; the remaining ~93 sequences have their KV in CPU DRAM.
+
+**Step 4: Swap-in latency cost.**
+
+When an offloaded sequence becomes active, its KV must be transferred from CPU to GPU:
+
+$$t_{\text{swap-in}} = \frac{4096 \times 160{,}000}{64 \times 10^9} = \frac{655{,}360{,}000}{64 \times 10^9} \approx 10.2 \text{ ms}$$
+
+This 10.2 ms is added to the first decode step's latency after rescheduling. Compared to the baseline decode step time of ~42 ms, this is a 24% increase. For the 93 sequences that are offloaded, each context switch incurs this penalty.
+
+**Round-trip PCIe time** (swap-out + swap-in for preemption/re-admission): $2 \times 10.2 = 20.4$ ms.
+
+**PCIe bandwidth saturation.** If multiple sequences are swapped simultaneously, the 64 GB/s bandwidth is shared. Two concurrent swaps of 4K-context sequences: $2 \times 655$ MB / 64 GB/s $\approx 20.4$ ms each. Four concurrent: $\approx 41$ ms. This is why production systems limit concurrent swap operations to 2--4 and queue the rest.
+
+**Step 5: Comparison with recompute.**
+
+Recompute cost for a 4096-token prompt: $2 \times 70 \times 10^9 \times 4096 = 573$ TFLOP. On H100 at 50% utilization: $573 / 495 \approx 1158$ ms. This is $114\times$ slower than swap-in (10.2 ms).
+
+But with prefix caching: if 75% of the prompt is cached (3072 tokens), recompute only needs the 1024-token suffix: $2 \times 70 \times 10^9 \times 1024 = 143$ TFLOP, taking $\approx 289$ ms. Still much slower than swap.
+
+**Conclusion for this scenario**: with 100 concurrent 4K-context requests and only 5 GB of HBM for KV, the system must aggressively offload. CPU swap is the primary mechanism because recompute is prohibitively expensive. The practical approach is to keep the 7 most active sequences in HBM and swap the rest, accepting 10 ms of swap-in latency when rescheduling. Alternatively, use 4 GPUs with TP=4 to increase the KV budget to $4 \times 5 = 20$ GB, serving $\sim 31$ sequences in HBM with the rest offloaded -- a more manageable ratio.
+
+### 6.4 NVMe offload
 
 For cold prefixes (long system prompts, RAG document caches), NVMe provides cheap capacity at 2--30 TB per node. A multi-tenant chat service with 1000 unique 4K-token system prompts needs $\sim 1.25$ TB of KV -- too large for GPU HBM or CPU DRAM on a single node. Store on NVMe; load on demand. At 15 GB/s, a 1.25 GB prefix loads in ~83 ms: acceptable for TTFT, not for mid-generation swap-in.
 
-### 6.4 NIXL (NVIDIA Inference Xfer Library)
+### 6.5 NIXL (NVIDIA Inference Xfer Library)
 
 NIXL abstracts KV movement across all tiers with a unified non-blocking API. It handles GPU-to-GPU (NVLink, IB/RoCE RDMA), GPU-to-CPU (PCIe DMA), and GPU-to-NVMe (GPUDirect Storage), overlapping transfers with computation. See [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md) for transport-layer details.
 
-### 6.5 When offloading helps vs hurts
+### 6.6 KV Cache Quantization
+
+Offloading moves KV data to slower tiers; quantization shrinks it before it ever leaves the GPU. By reducing the bits per element $b$, quantization attacks both the capacity and bandwidth constraints simultaneously.
+
+#### FP8 KV cache
+
+Quantize K and V tensors to FP8 (E4M3 for forward pass, E5M2 optional for gradients). This halves the per-token cost: $b = 1$ instead of $b = 2$.
+
+For Llama-3 70B GQA: $c_{\text{FP8}} = 2 \times 80 \times 8 \times 128 \times 1 = 163{,}840$ B $\approx 160$ KB/token, down from 320 KB. The quantization is static (absmax per head or per tensor), applied at KV store time. No calibration dataset needed. Quality impact: $< 0.1\%$ perplexity degradation for E4M3, negligible for chat quality. FP8 KV is the default in vLLM, TensorRT-LLM, and SGLang for 2025+ serving.
+
+#### Asymmetric INT4/2-bit quantization (KIVI)
+
+KIVI quantizes Keys and Values at different granularities: Keys use flat per-channel quantization (treating the channel dimension as the quantization group), Values use residual per-channel quantization. At 2-bit per element:
+
+For Llama-3 70B GQA: $c_{\text{KIVI-2bit}} = 2 \times 80 \times 8 \times 128 \times \lceil 2/8 \rceil = 2 \times 80 \times 8 \times 128 \times 1 = 163{,}840$ B $\approx 160$ KB/token using packed representation (4 elements per byte), effective cost is $\sim 40$ KB/token. Quality: $< 1\%$ perplexity at 2-bit, acceptable for long-context retrieval where the bottleneck is capacity, not precision.
+
+#### Quantized KV cache size formula
+
+For arbitrary bit width $b_{\text{kv}}$ (bits per element):
+
+$$c_{\text{quantized}} = 2 \cdot n_l \cdot n_{\text{kv}} \cdot d_h \cdot \lceil b_{\text{kv}} / 8 \rceil$$
+
+| Format | Bits/elem | Per-token (70B GQA) | Compression vs FP16 | Quality |
+|--------|-----------|---------------------|---------------------|---------|
+| FP16/BF16 | 16 | 320 KB | 1x | Baseline |
+| FP8 E4M3 | 8 | 160 KB | 2x | $< 0.1\%$ ppl loss |
+| INT8 | 8 | 160 KB | 2x | $< 0.5\%$ ppl loss |
+| INT4 (KIVI) | 4 | 80 KB | 4x | $< 1\%$ ppl loss |
+| FP4 NV | 4 | 80 KB | 4x | Emerging |
+| 2-bit (KIVI) | 2 | 40 KB | 8x | 1--2% ppl loss |
+
+#### Production considerations
+
+- **Granularity**: per-tensor (cheapest, slightly lower quality), per-head (default for FP8), per-group of 64--128 elements (best quality, used for INT4 and below).
+- **Calibration**: FP8 is calibration-free (absmax at store time). INT8/INT4 benefit from a small calibration dataset to set scale factors; KIVI avoids this via online per-channel scaling.
+- **Mixed precision**: keep recent tokens (high attention weights) in FP8, quantize older tokens to INT4 or 2-bit. This exploits the observation that long-context attention is sparse -- old tokens receive low attention scores and tolerate aggressive quantization.
+- **PagedAttention interaction**: quantization happens per block. Each block can have its own scale factors, stored as metadata alongside the block. Dequantization occurs in-register during the attention kernel, adding $< 2\%$ overhead.
+
+### 6.7 When offloading helps vs hurts
 
 Offload **cold** data (high hit rate, low urgency): prefix pools, idle sequences, RAG document caches. Never offload **hot** data (active decode sequences) -- the transfer latency stalls every decode step. Production systems (vLLM, Dynamo) use priority-based scheduling: high-priority sequences stay in HBM; low-priority sequences are preempted and swapped.
 
@@ -356,11 +506,48 @@ In disaggregated serving ([Prefill_Decode_Disaggregation](Prefill_Decode_Disaggr
 
 NVLink is fast enough that KV transfer is negligible vs prefill time (~50 ms for S=4K on H100). Even RDMA at 200 GB/s effective moves 1.25 GB in ~6 ms.
 
-### 7.3 Layer-pipelined transfer
+### 7.3 KV block serialization for transfer
+
+In disaggregated serving, KV blocks must be serialized at the prefill worker and deserialized at the decode worker. The serialization format is optimized for zero-copy where possible:
+
+**Serialization at prefill worker:**
+
+1. **Block identification**: for each block in the sequence's block table, record `(logical_block_id, physical_block_id, num_valid_tokens)`.
+2. **Data extraction**: for each layer $l$, extract the KV tensor slice: `kv_cache[l][k_or_v][physical_block_id][:num_valid]`, yielding a tensor of shape `(num_valid, n_kv / TP, d_h)` per KV type per layer.
+3. **Packing**: concatenate the per-layer tensors into a contiguous buffer. The buffer layout is `[layer_0_K, layer_0_V, layer_1_K, layer_1_V, ..., layer_{L-1}_K, layer_{L-1}_V]`. Each segment has a fixed size for full blocks and a variable size for the final partial block.
+4. **Metadata**: a header block containing `(request_id, sequence_length, num_blocks, dtype, [block_sizes])` precedes the data.
+
+Total serialization overhead: one GPU memcpy per layer per block to pack into the contiguous buffer. On H100, memcpy bandwidth is ~3.35 TB/s, so serializing 1.25 GB takes ~0.4 ms -- negligible.
+
+**RDMA write transfer:**
+
+1. The prefill worker **registers** the serialized buffer's GPU memory with the NIC via GPUDirect RDMA (e.g., `ibv_reg_mr` on the GPU buffer). This pins the memory for DMA.
+2. The decode worker **pre-allocates** a matching buffer in its GPU memory and registers it as an RDMA receive region.
+3. The prefill worker issues an **RDMA write** directly from GPU memory to the decode worker's GPU memory: `GPU_P -> NIC_P -> fabric -> NIC_D -> GPU_D`. No CPU involvement. No intermediate copies.
+4. A completion queue entry signals transfer done. The decode worker is notified via polling or event.
+
+**Bandwidth requirements for real-time transfer.** The transfer must complete within the TTFT budget. For the 70B model at $S = 4096$ with a TTFT target of 200 ms:
+
+- KV payload: 1.25 GB (FP16) or 625 MB (FP8).
+- Transfer budget: typically 10--50 ms of the TTFT (the rest is prefill compute).
+- Minimum bandwidth: $1.25 \text{ GB} / 0.05 \text{ s} = 25$ GB/s. Any RDMA link (50+ GB/s) satisfies this comfortably.
+- At $S = 32K$ (KV = 10 GB), the requirement rises to $10 \text{ GB} / 0.05 \text{ s} = 200$ GB/s. This requires NVLink or multi-port IB NDR, motivating layer pipelining to overlap transfer with compute.
+
+**Deserialization at decode worker:**
+
+1. Receive the contiguous buffer via RDMA.
+2. Parse the metadata header to determine block layout.
+3. **Allocate** physical blocks in the local block pool: pop `num_blocks` block IDs from the free list.
+4. **Scatter** the per-layer KV data from the receive buffer into the local `kv_cache` tensor at the allocated physical block positions. This is the inverse of the serialization packing: `kv_cache[l][k_or_v][new_physical_id][:] = received_data[offset:offset+block_size]`.
+5. Build the decode worker's block table mapping logical blocks to the newly allocated physical blocks.
+
+The decode worker's physical block IDs differ from the prefill worker's -- the mapping is logical-block-index-based, not physical-block-ID-based. This abstraction is essential because the two workers have independent block pools.
+
+### 7.4 Layer-pipelined transfer
 
 The prefill GPU streams KV layers as they are computed rather than waiting for the full forward pass. The decode GPU begins attending to early layers while later layers are still in transit, overlapping transfer with prefill computation. Effective transfer overhead is near-zero for multi-layer models.
 
-### 7.4 Cross-GPU KV sharing in tensor-parallel serving
+### 7.5 Cross-GPU KV sharing in tensor-parallel serving
 
 When a model is split across multiple GPUs via tensor parallelism (TP), each GPU holds a slice of the KV cache for every layer. The attention kernel requires all-gather or reduce-scatter across the TP group for each attention head, but the **KV cache itself is not replicated** -- each GPU stores its partition ($n_{\text{kv}} / \text{TP}$ heads).
 
@@ -451,8 +638,10 @@ flowchart TD
 | 19 | Prefix cache TTFT savings (system prompt) | 80--95% | Long shared prefix |
 | 20 | 70B S=4K KV transfer via NVLink | ~1.4 ms | $1.25 \text{ GB} / 900 \text{ GB/s}$ |
 | 21 | 70B S=4K KV transfer via RDMA 200 GB/s | ~6 ms | $1.25 \text{ GB} / 200 \text{ GB/s}$ |
-| 22 | FP8 KV compression | 2x | Halves $b$ in formula |
-| 23 | CPU swap-in time, 2.5 GB via PCIe | ~39 ms | $2.5 \text{ GB} / 64 \text{ GB/s}$ |
+| 22 | FP8 KV per-token (70B GQA) | 160 KB | $2 \times 80 \times 8 \times 128 \times 1$ |
+| 23 | INT4 KV per-token (70B GQA) | 80 KB | $c_{\text{FP16}} / 4$ |
+| 24 | FP8 KV quality impact | $< 0.1\%$ ppl | E4M3, calibration-free |
+| 25 | CPU swap-in time, 2.5 GB via PCIe | ~39 ms | $2.5 \text{ GB} / 64 \text{ GB/s}$ |
 
 ---
 

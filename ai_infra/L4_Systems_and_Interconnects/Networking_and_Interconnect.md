@@ -195,16 +195,77 @@ With 9 NVSwitch ASICs in NVL72, aggregate switch capacity is $9 \times 7.2 = 64.
 
 ### 2.4 UALink
 
-UALink 1.0 is the industry-standard alternative to NVLink, backed by AMD, Broadcom, Google, Intel, Meta, and others. Key specs:
+UALink 1.0 is the industry-standard alternative to NVLink, backed by the Ultra Accelerator Link Consortium (AMD, Broadcom, Google, Intel, Meta, and others). It targets the same rack-scale GPU-to-GPU communication niche as NVLink but with an open protocol, full cache coherence, and a much larger scale-up domain.
 
-- **Bandwidth**: 200 GB/s per link (matching NVLink-5)
-- **Protocol**: load/store with optional cache coherence
-- **Scale-up domain**: up to 1,024 accelerators (vs. NVLink's 72 in NVL72)
-- **Latency**: target <500 ns within a rack
+#### NVLink-5 vs. UALink 1.0 Comparison
 
-UALink's larger scale-up domain (1,024 vs 72) means that tensor parallelism can extend beyond a single rack without traversing the scale-out network. This is critical for AMD's Helios rack, which connects up to 1,024 MI355X GPUs.
+| Feature | NVLink-5 (B200/B300) | UALink 1.0 (AMD MI400+) |
+|---------|---------------------|------------------------|
+| Bandwidth per link | 200 GB/s per direction | 200 GB/s per direction |
+| Max links per GPU | 18 (1.8 TB/s bidirectional) | 14 (planned for 1.0) |
+| Max scale domain | 72 (NVL72 via NVSwitch) | 1,024 (planned via UALink switches) |
+| Cache coherence | Limited (NVLink-C2C only for GH/GB) | Full memory semantics with cache coherency |
+| Atomic operations | Limited to NVLink-C2C | Full set including fetch-and-add, CAS |
+| Memory semantics | Load/store with remote direct access | Load/store with coherent caching |
+| Multicast | Not supported | Planned for UALink 1.1 |
+| Protocol owner | NVIDIA (proprietary) | Ultra Accelerator Link Consortium (open) |
+| First silicon | B200 (2024) | MI400 (expected 2026) |
+| Switch | NVSwitch (NVIDIA) | UALink switch (Broadcom, Astera) |
 
-### 2.5 InfiniBand
+#### Key Architectural Differences
+
+**Full cache coherence enables disaggregated memory.** UALink's coherence protocol allows any GPU in the 1,024-accelerator domain to cache any remote memory location, with hardware-maintained consistency. This is fundamentally different from NVLink's point-to-point DMA model, where the remote GPU's memory is accessed as a flat address space without local caching. With UALink, a GPU can hold a remote line in its L2 cache and the protocol ensures invalidation on remote writes — the same programming model as a multi-socket CPU system, scaled to 1,024 nodes.
+
+**The 1,024-GPU scale domain targets the NVL576 problem space.** NVIDIA's NVL576 connects 576 GPUs via a three-tier NVSwitch fabric (36 NVSwitch trays). UALink targets 1,024 GPUs using a switch-based topology built from UALink switch ASICs (Broadcom, Astera). The switch-based topology simplifies cabling — each GPU connects to a UALink switch leaf, and switches connect in a fabric — but the bisection bandwidth is strictly worse than a full NVSwitch crossbar. At 1,024 GPUs, a full non-blocking crossbar would require $\binom{1024}{2} \times 200$ GB/s of switching capacity, which is infeasible. UALink switches must over-subscribe, meaning not all GPU pairs get full bandwidth simultaneously.
+
+**Atomic operations over UALink enable fine-grained synchronization.** The full set of atomics — fetch-and-add, compare-and-swap, atomic AND/OR — can be executed on remote memory without moving the entire cache line. This enables distributed synchronization primitives (barrier counters, distributed locks, credit-based flow control) that currently require NCCL over InfiniBand with CPU-mediated atomic operations. For example, a barrier across 1,024 GPUs can be implemented as a shared atomic counter: each GPU increments it via fetch-and-add, and the last GPU to arrive sees the counter reach 1,024 and broadcasts release. Over NVLink, this requires either NCCL (which sends full messages over the interconnect) or NVLink-C2C atomics (limited to Grace-Hopper pairs).
+
+**UALink is the interconnect backbone for the Ultra Ethernet Consortium's accelerated computing fabric.** The two standards are designed to compose: UALink handles scale-up (GPU-to-GPU within the rack), while UEC handles scale-out (rack-to-rack). A typical Helios-class system uses UALink for TP within the 1,024-GPU domain and UEC/RoCE for EP and DP across domains.
+
+### 2.5 Bandwidth-Delay Product (BDP)
+
+The bandwidth-delay product (BDP) is the amount of data that must be "in flight" to fully saturate a network link:
+
+$$\text{BDP} = BW \times \text{latency}$$
+
+For a 400 Gbps (50 GB/s) InfiniBand NDR link with 2 $\mu$s one-way latency:
+
+$$\text{BDP}_{IB} = 50 \text{ GB/s} \times 2\,\mu\text{s} = 100 \text{ KB}$$
+
+This means 100 KB of data must be buffered in the network pipeline (switches, NIC pipelines, link serialization) before the link reaches steady-state utilization. Messages smaller than the BDP cannot saturate the link — latency dominates.
+
+#### Implications for Training Collectives
+
+**Small-message AllReduce cannot saturate InfiniBand.** For gradient AllReduce during training, each gradient chunk must be larger than the BDP to fill the pipe. Consider tensor-parallel (TP) AllReduce over InfiniBand: each GPU sends $\frac{2D^2 L}{P}$ bytes per transformer layer (where $D$ is hidden dimension, $L$ is number of layers, and $P$ is TP degree). For Llama-3-70B with $D = 8192$, $L = 80$, TP $= 8$:
+
+$$\text{AllReduce size} = \frac{2 \times 8192^2 \times 80}{8} = 1{,}342{,}177{,}280 \text{ bytes} \approx 1.34 \text{ GB}$$
+
+Transfer time at 400 Gbps: $T = 1.34 \text{ GB} / 50 \text{ GB/s} = 26.8$ ms. BDP overhead: $100 \text{ KB} / 1.34 \text{ GB} \approx 0.007\%$ — negligible. The link is fully utilized.
+
+But for a smaller model (8B, $D = 4096$, $L = 32$, TP $= 8$):
+
+$$\text{AllReduce size} = \frac{2 \times 4096^2 \times 32}{8} \approx 134 \text{ MB}$$
+
+BDP overhead: $100 \text{ KB} / 134 \text{ MB} \approx 0.075\%$ — still small, but the gradient chunks per layer (before ring fusion) are $\sim$8 MB each, and BDP overhead per chunk is $\sim$1.2%. This is why NCCL fuses small gradient buffers before transmitting.
+
+#### RDMA Small-Message Optimization
+
+RoCE v2 with DCQCN uses packet pacing and ECN marking for congestion control. For messages smaller than the BDP, inline RDMA writes eliminate the overhead of a separate data transfer. In a standard RDMA write, the sender posts a Work Queue Element (WQE) describing the data location, then the NIC DMAs the payload from host memory. With inline writes, the data is embedded directly in the WQE:
+
+- **Standard RDMA write**: 2 $\mu$s latency (WQE processing + DMA read + network + DMA write).
+- **Inline RDMA write**: $\sim$0.8 $\mu$s latency (WQE contains data, no separate DMA read needed).
+
+Inline writes are limited to $\sim$64 bytes (the WQE size), so they only help for control messages and synchronization — but those are exactly the messages where BDP overhead is worst.
+
+#### NVLink BDP
+
+NVLink-5 at 1.8 TB/s bidirectional with $\sim$1 $\mu$s latency across NVSwitch:
+
+$$\text{BDP}_{NVLink} = 1{,}800 \text{ GB/s} \times 1\,\mu\text{s} = 1.8 \text{ MB}$$
+
+Even small AllReduce chunks (8 MB for an 8B model layer) fill the pipe easily — the chunk is 4.4× the BDP. This is another reason tensor parallelism stays within the NVLink domain: the BDP-to-message ratio is far more favorable than over InfiniBand, and there is no congestion-control overhead to compound the problem.
+
+### 2.6 InfiniBand
 
 InfiniBand remains the dominant scale-out fabric for NVIDIA-based training clusters:
 
@@ -223,7 +284,7 @@ InfiniBand features:
 
 An NDR switch provides $64 \times 400$ Gb/s $= 25.6$ Tb/s $= 3.2$ TB/s bidirectional switching capacity. A two-tier fat-tree of NDR switches supports $64^2 / 2 = 2{,}048$ endpoints.
 
-### 2.6 RoCE v2 (RDMA over Converged Ethernet)
+### 2.7 RoCE v2 (RDMA over Converged Ethernet)
 
 RoCE v2 encapsulates RDMA transport in UDP/IP, allowing RDMA over standard Ethernet switches. This is cheaper than InfiniBand but requires careful configuration for losslessness:
 

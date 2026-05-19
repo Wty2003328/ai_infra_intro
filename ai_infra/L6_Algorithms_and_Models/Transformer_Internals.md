@@ -98,7 +98,34 @@ $$\text{RMS}(\mathbf{x}) = \sqrt{\frac{1}{D}\sum_{i=1}^{D} x_i^2 + \varepsilon}$
 
 $$y_i = \gamma_i \cdot \frac{x_i}{\text{RMS}(\mathbf{x})}$$
 
-**Derivation of savings.** LayerNorm computes (1) mean, (2) variance (requires mean), (3) normalize, (4) scale and shift — four reductions over $D$. RMSNorm computes (1) sum of squares, (2) normalize, (3) scale — three reductions, and skips the mean entirely. Empirically $\sim$20% faster with no quality degradation: the mean-centering step contributes negligible information because the residual stream's mean drift is small and learned $\gamma$ absorbs any shift.
+The full formula inlined:
+
+$$\boxed{y_i = \frac{x_i}{\sqrt{\frac{1}{D}\sum_{j=1}^{D} x_j^2 + \varepsilon}} \cdot \gamma_i}$$
+
+where $\gamma \in \mathbb{R}^D$ is a learned per-dimension gain, and $\varepsilon = 10^{-6}$ (typical) prevents division by zero.
+
+**Derivation of savings vs LayerNorm.** LayerNorm computes: (1) mean $\mu = \frac{1}{D}\sum x_i$, (2) variance $\sigma^2 = \frac{1}{D}\sum (x_i - \mu)^2$ (requires the mean), (3) normalize $(x_i - \mu)/\sqrt{\sigma^2 + \varepsilon}$, (4) scale and shift $\gamma_i \hat{x}_i + \beta_i$ — four reductions over $D$ plus a bias term. RMSNorm computes: (1) sum of squares $\frac{1}{D}\sum x_i^2$, (2) normalize $x_i / \text{RMS}(\mathbf{x})$, (3) scale $\gamma_i \cdot x_i / \text{RMS}(\mathbf{x})$ — three steps, no mean subtraction, no bias. Empirically $\sim$20% faster with no quality degradation: the mean-centering step contributes negligible information because the residual stream's mean drift is small and learned $\gamma$ absorbs any shift.
+
+**Why RMSNorm works as well as LayerNorm for transformers.** In a pre-norm transformer, the normalization input $\mathbf{x}$ is the residual stream — the sum of all previous layer outputs. LayerNorm centers to zero mean *and* normalizes to unit variance. RMSNorm only normalizes by the root-mean-square, leaving the mean intact. Two reasons this is sufficient:
+
+1. The learned $\gamma$ can absorb any mean offset. LayerNorm's centering + scaling is $\gamma_i \cdot (x_i - \mu) / \sigma + \beta_i$. RMSNorm's $\gamma_i \cdot x_i / \text{RMS}(\mathbf{x})$ is equivalent to LayerNorm with $\beta_i = -\gamma_i \cdot \mu / \text{RMS}(\mathbf{x})$. Since $\mu$ is approximately constant across tokens (the residual stream's mean drifts slowly), $\gamma$ can learn to compensate.
+
+2. The scale invariance property — the critical feature for training stability — is preserved. For any scalar $c > 0$: $\text{RMSNorm}(c \cdot \mathbf{x}) = \text{RMSNorm}(\mathbf{x})$, because both the numerator $x_i$ and denominator $\text{RMS}(\mathbf{x})$ scale by $c$. This prevents activation magnitude explosion across layers, which is the primary purpose of normalization in deep transformers.
+
+**Numerical stability in the $x_i^2$ sum.** For large $D$ (e.g., $D = 8192$ for Llama-3-70B), the sum $\sum_{i=1}^{D} x_i^2$ can overflow FP16 (max $\approx 65{,}504$). If each $x_i \approx 10$ (a moderate activation), the sum is $8192 \times 100 = 819{,}200$, which overflows. Implementation uses one of two strategies:
+
+- **BF16 accumulation:** BF16 has the same dynamic range as FP32 ($\approx 3.4 \times 10^{38}$), so the sum cannot overflow for any reasonable activation magnitude. This is why all post-2022 models train in BF16 rather than FP16.
+- **Kahan / pairwise summation:** Sum pairs, then sum pairs of pairs, etc. Each intermediate sum is $O(x_i^2)$ rather than $O(D \cdot x_i^2)$, avoiding overflow. Used in FP16 inference kernels.
+
+The $\varepsilon$ term (typically $10^{-6}$) prevents division by zero but is negligible for numerical stability — it does not meaningfully help with overflow. The real protection comes from the accumulation dtype.
+
+**Worked numerical example.** For $\mathbf{x} = [3.0, 4.0, -2.0, 1.0]$ ($D = 4$, $\varepsilon = 10^{-6}$, $\gamma = \mathbf{1}$):
+
+$$\text{RMS}(\mathbf{x}) = \sqrt{\frac{9 + 16 + 4 + 1}{4} + 10^{-6}} = \sqrt{7.5 + 10^{-6}} \approx 2.739$$
+
+$$\mathbf{y} = [3.0, 4.0, -2.0, 1.0] / 2.739 = [1.095, 1.461, -0.730, 0.365]$$
+
+Compare with LayerNorm: $\mu = 1.5$, $\sigma = \sqrt{(2.25 + 6.25 + 12.25 + 0.25)/4} = \sqrt{5.25} = 2.291$. LayerNorm output: $[(3.0 - 1.5)/2.291, (4.0 - 1.5)/2.291, (-2.0 - 1.5)/2.291, (1.0 - 1.5)/2.291] = [0.655, 1.091, -1.528, -0.218]$. The outputs differ because RMSNorm does not center — but both preserve relative magnitudes and prevent scale explosion, which is the critical function.
 
 ### 3.3 Pre-norm vs. post-norm
 
@@ -163,6 +190,44 @@ For decode (single new token at position $T$, KV cache has length $T$):
 $$\text{FLOPs}_{\text{attn, decode}} = 2 B D (H + 2K) d_h + 4 B H T d_h + 2 B D^2$$
 
 The decode attention is $O(T)$ in FLOPs and $O(T)$ in bytes read (KV cache) — arithmetic intensity $\approx 2$ FLOP/byte, deeply memory-bound.
+
+### 4.5 Sliding Window Attention
+
+Full causal attention computes an $S \times S$ score matrix per head, making attention FLOPs quadratic in sequence length. **Sliding window attention** (SWA) restricts each token to attend only to the most recent $W$ tokens, converting the dense attention mask into a banded matrix of width $W$.
+
+**Mechanism.** Replace the full causal mask $M_{\text{causal}}$ with a sliding window mask:
+
+$$S_{ij} = \begin{cases} \frac{\mathbf{q}_i \cdot \mathbf{k}_j}{\sqrt{d_h}} & \text{if } j \geq i - W + 1 \text{ and } j \leq i \\ -\infty & \text{otherwise} \end{cases}$$
+
+Each query position $i$ attends to at most $W$ key positions: $\{i - W + 1, \ldots, i\}$. The score matrix changes from a full lower-triangular $S \times S$ to a banded lower-triangular matrix with bandwidth $W$. FlashAttention-style kernels can exploit this sparsity by iterating over blocks of $W$ keys per query block rather than all $S$ keys.
+
+**FLOP modification.** The $QK^T$ and $PV$ steps now operate on $W$ keys per query instead of $S$:
+
+$$\text{FLOPs}_{QK^T + PV} = 4 B H S W d_h \quad \text{(was } 4 B H S^2 d_h \text{)}$$
+
+The full prefill attention formula becomes:
+
+$$\text{FLOPs}_{\text{attn}} = \underbrace{2 B S D (H + 2K) d_h}_{\text{QKV proj}} + \underbrace{4 B H S W d_h}_{\text{QK}^T\text{ + PV (windowed)}} + \underbrace{2 B S D^2}_{\text{output proj}}$$
+
+The QKV and output projections are unchanged — only the attention score computation shrinks. The reduction factor is $S/W$: at $S = 128\text{K}$ with $W = 4096$, attention FLOPs drop by $128\text{K}/4096 = 32\times$. At short sequences ($S \leq W$), SWA degenerates to standard causal attention with no savings.
+
+**KV cache implications.** With a fixed window $W$, only the most recent $W$ positions of KV cache are needed per sequence. This makes KV cache $O(W)$ per layer instead of $O(S)$:
+
+$$\text{KV}_{\text{SWA}} = 2 L K d_h W \cdot \text{dtype\_size}$$
+
+For Mistral-7B ($L=32$, $K=32$, $d_h=128$, $W=4096$) in FP16: $2 \times 32 \times 32 \times 128 \times 4096 \times 2 = 68.7$ MB — fixed regardless of context length. Most implementations (Mistral, Gemma) use a **rolling buffer** (circular buffer): the KV cache is allocated with size $W$ and old entries are overwritten by new ones via modular indexing (`position % W`), avoiding explicit eviction logic.
+
+**Prefix + sliding window hybrid.** Production systems do not use pure sliding window attention. Mistral's implementation and Gemma combine a sliding window for the conversation body with **full attention on the system prompt prefix**. The KV cache stores the full prefix (which every token attends to) plus the most recent $W$ tokens of the conversation. This hybrid ensures that system instructions remain visible at all positions while keeping conversation-context compute linear in $W$ rather than $S$. The effective attention pattern is: each query attends to all prefix tokens plus its local window of $W$ conversation tokens.
+
+**Which models use it.**
+
+| Model | Window $W$ | Notes |
+|---|---|---|
+| Mistral-7B | 4096 | Introduced SWA for efficient long-context inference |
+| Gemma-2 (2B, 9B, 27B) | 4096 | Alternates SWA layers with full-attention layers |
+| Mistral-Nemo (12B) | 4096 | Prefix + SWA hybrid for extended context |
+
+These models extend effective context length via RoPE scaling (Section 7.2) while keeping per-layer attention compute linear: RoPE allows extrapolation to longer sequences, and SWA ensures that longer sequences do not incur quadratic attention cost. The combination yields $O(SW)$ per-layer attention FLOPs rather than $O(S^2)$.
 
 ---
 
@@ -270,6 +335,54 @@ $$\text{RoPE}(\mathbf{x})_{2i+1} = x_{2i} \sin(m\theta_i) + x_{2i+1} \cos(m\thet
 
 In practice, $\cos(m\theta_i)$ and $\sin(m\theta_i)$ are precomputed for all positions and cached. Fused Triton/CUDA kernels avoid the interleaving overhead.
 
+**Worked numerical example (head_dim = 4, positions 0, 1, 2).** With $d = 4$, there are $d/2 = 2$ dimension pairs. Base frequencies:
+
+$$\theta_0 = 10000^{-0/4} = 10000^{0} = 1.0, \qquad \theta_1 = 10000^{-2/4} = 10000^{-0.5} = 0.01$$
+
+For a query vector $\mathbf{q} = [q_0, q_1, q_2, q_3]$ at position $m$, RoPE produces:
+
+$$\mathbf{q}'_m = \begin{pmatrix} q_0 \cos(m \cdot 1.0) - q_1 \sin(m \cdot 1.0) \\ q_0 \sin(m \cdot 1.0) + q_1 \cos(m \cdot 1.0) \\ q_2 \cos(m \cdot 0.01) - q_3 \sin(m \cdot 0.01) \\ q_2 \sin(m \cdot 0.01) + q_3 \cos(m \cdot 0.01) \end{pmatrix}$$
+
+Concrete values at positions 0, 1, 2 for $\mathbf{q} = [1, 0, 1, 0]$:
+
+| Position $m$ | $\cos(m \theta_0), \sin(m \theta_0)$ | $\cos(m \theta_1), \sin(m \theta_1)$ | $\mathbf{q}'_m$ |
+|---|---|---|---|
+| 0 | 1.0, 0.0 | 1.0, 0.0 | $[1, 0, 1, 0]$ |
+| 1 | 0.540, 0.841 | 0.99995, 0.01000 | $[0.540, 0.841, 0.99995, 0.01000]$ |
+| 2 | $-0.416, 0.909$ | 0.99980, 0.02000 | $[-0.416, 0.909, 0.99980, 0.02000]$ |
+
+Now verify the relative-position property. Let $\mathbf{k} = [1, 0, 1, 0]$ at position $n = 2$. Compute $\langle \mathbf{q}'_m, \mathbf{k}'_n \rangle$ for $m = 0, 1, 2$:
+
+$$m=0: \langle [1,0,1,0],\; [-0.416, 0.909, 0.9998, 0.020] \rangle = -0.416 + 0.9998 = 0.584$$
+
+$$m=1: \langle [0.540, 0.841, 0.99995, 0.010],\; [-0.416, 0.909, 0.9998, 0.020] \rangle = -0.225 + 0.765 + 0.9997 + 0.0002 = 1.540$$
+
+$$m=2: \langle [-0.416, 0.909, 0.9998, 0.020],\; [-0.416, 0.909, 0.9998, 0.020] \rangle = 0.173 + 0.826 + 0.9996 + 0.0004 = 1.999$$
+
+**Explicit proof that $\mathbf{q}_m^T \mathbf{k}_n = f(m - n)$.** The RoPE-applied dot product for dimension pair $i$ is:
+
+$$\begin{aligned}
+&q'_{2i}^{(m)} k'_{2i}^{(n)} + q'_{2i+1}^{(m)} k'_{2i+1}^{(n)} \\
+&= (q_{2i} \cos m\theta_i - q_{2i+1} \sin m\theta_i)(k_{2i} \cos n\theta_i - k_{2i+1} \sin n\theta_i) \\
+&\quad + (q_{2i} \sin m\theta_i + q_{2i+1} \cos m\theta_i)(k_{2i} \sin n\theta_i + k_{2i+1} \cos n\theta_i)
+\end{aligned}$$
+
+Expanding and collecting terms, the cross terms cancel:
+
+$$= (q_{2i} k_{2i} + q_{2i+1} k_{2i+1}) \cos((n - m)\theta_i) + (q_{2i} k_{2i+1} - q_{2i+1} k_{2i}) \sin((n - m)\theta_i)$$
+
+Summing over all pairs $i = 0, \ldots, d/2 - 1$:
+
+$$\boxed{\langle \mathbf{q}'_m, \mathbf{k}'_n \rangle = \sum_{i=0}^{d/2-1} \Big[(q_{2i} k_{2i} + q_{2i+1} k_{2i+1}) \cos((n - m)\theta_i) + (q_{2i} k_{2i+1} - q_{2i+1} k_{2i}) \sin((n - m)\theta_i)\Big]}$$
+
+This is a function of $n - m$ only, not of $m$ or $n$ individually. Verifying with our example ($\mathbf{q} = \mathbf{k} = [1, 0, 1, 0]$):
+
+$$f(n - m) = \sum_{i=0}^{1} \cos((n - m)\theta_i)$$
+
+- $n - m = 2$: $\cos(2 \cdot 1.0) + \cos(2 \cdot 0.01) = \cos 2 + \cos 0.02 = -0.416 + 0.9998 = 0.584$ $\checkmark$
+- $n - m = 1$: $\cos(1.0) + \cos(0.01) = 0.540 + 0.99995 = 1.540$ $\checkmark$
+- $n - m = 0$: $\cos(0) + \cos(0) = 1 + 1 = 2.000$ $\checkmark$ (matches $1.999$ with rounding)
+
 **Context extension.** Standard RoPE fails when extrapolating beyond the training context length because high-frequency dimensions ($i \approx 0$) have rotation angles that cycle rapidly. Techniques for extension:
 
 - **Position Interpolation (PI):** scale position index by $1/\alpha$ where $\alpha$ is the extension factor. Smooth but wastes resolution.
@@ -340,6 +453,89 @@ $$P = 80 \times 10.25 \times 8192^2 + 128\,000 \times 8192 + 8192 \approx 55.0\t
 
 The remaining $\sim$14.6B parameters come from embedding scaling factors, the exact $d_{\text{ff}}$ rounding, and in practice the $d_{\text{ff}}$ for Llama-3-70B is 28672 (not exactly $8/3 \times 8192 = 21845$; Llama-3 uses a different FFN multiplier).
 
+### 9.3 Full parameter count derivation — Llama-style model with GQA and SwiGLU
+
+This section derives every parameter in a Llama-style model from scratch, showing exactly where each weight matrix lives and how GQA ratio and SwiGLU factor into the count.
+
+**Model hyperparameters:**
+- $L$: number of transformer blocks
+- $D$: hidden dimension
+- $H$: number of query heads
+- $K$: number of KV heads (GQA ratio = $H/K$)
+- $d_h = D/H$: head dimension
+- $d_{\text{ff}}$: FFN intermediate dimension (typically $\lfloor 8D/3 \rceil_{256}$)
+- $V$: vocabulary size
+
+**Per-block parameter count, component by component:**
+
+1. **Attention — Q projection:** $W_Q \in \mathbb{R}^{D \times H d_h}$. Since $H d_h = D$: $D^2$ parameters.
+
+2. **Attention — K projection:** $W_K \in \mathbb{R}^{D \times K d_h}$. Since $K d_h = (K/H) \cdot D$: $D^2 \cdot (K/H)$ parameters.
+
+3. **Attention — V projection:** $W_V \in \mathbb{R}^{D \times K d_h}$. Same as K: $D^2 \cdot (K/H)$ parameters.
+
+4. **Attention — Output projection:** $W_O \in \mathbb{R}^{H d_h \times D} = \mathbb{R}^{D \times D}$. $D^2$ parameters.
+
+5. **Attention subtotal:** $D^2 + D^2 \cdot (K/H) + D^2 \cdot (K/H) + D^2 = D^2(2 + 2K/H)$.
+
+6. **FFN — Gate projection (SwiGLU):** $W_{\text{gate}} \in \mathbb{R}^{D \times d_{\text{ff}}}$. $D \cdot d_{\text{ff}}$ parameters.
+
+7. **FFN — Up projection (SwiGLU):** $W_{\text{up}} \in \mathbb{R}^{D \times d_{\text{ff}}}$. $D \cdot d_{\text{ff}}$ parameters.
+
+8. **FFN — Down projection:** $W_{\text{down}} \in \mathbb{R}^{d_{\text{ff}} \times D}$. $D \cdot d_{\text{ff}}$ parameters.
+
+9. **FFN subtotal:** $3 D d_{\text{ff}}$ parameters. With $d_{\text{ff}} = 8D/3$: $3D \cdot 8D/3 = 8D^2$.
+
+10. **Normalization (2 per block):** $\gamma_1, \gamma_2 \in \mathbb{R}^D$. $2D$ parameters (negligible).
+
+**Per-block total:**
+
+$$P_{\text{block}} = D^2\!\left(2 + \frac{2K}{H}\right) + 3D \cdot d_{\text{ff}} + 2D$$
+
+**Full model total:**
+
+$$\boxed{P_{\text{total}} = L \cdot \left[D^2\!\left(2 + \frac{2K}{H}\right) + 3D \cdot d_{\text{ff}} + 2D\right] + V \cdot D + D}$$
+
+where $V \cdot D$ is the (tied) embedding / unembedding matrix and the final $D$ is the output RMSNorm gain.
+
+**Worked example: Llama-3-8B** ($L=32$, $D=4096$, $H=32$, $K=8$, $d_h=128$, $d_{\text{ff}}=14336$, $V=128256$).
+
+GQA ratio: $K/H = 8/32 = 1/4$.
+
+Per block:
+- Attention: $4096^2 \times (2 + 2 \times 1/4) = 4096^2 \times 2.5 = 41{,}943{,}040$
+- FFN: $3 \times 4096 \times 14336 = 176{,}160{,}768$
+- Norm: $2 \times 4096 = 8{,}192$
+- Block total: $218{,}111{,}992 \approx 218.1\text{M}$
+
+All 32 blocks: $32 \times 218.1\text{M} = 6{,}979{,}583{,}744$
+
+Embedding (untied output): $V \times D = 128256 \times 4096 = 525{,}336{,}576$
+
+Final RMSNorm: $4096$
+
+**Total: $6{,}979{,}583{,}744 + 525{,}336{,}576 + 4096 + 525{,}336{,}576 = 8{,}030{,}260{,}992 \approx 8.03\text{B}$**
+
+(The second $525\text{M}$ term is the untied output projection $W_{\text{out}}$.)
+
+**Worked example: Llama-3-70B** ($L=80$, $D=8192$, $H=64$, $K=8$, $d_h=128$, $d_{\text{ff}}=28672$, $V=128256$).
+
+GQA ratio: $K/H = 8/64 = 1/8$.
+
+Per block:
+- Attention: $8192^2 \times (2 + 2 \times 1/8) = 67{,}108{,}864 \times 2.25 = 150{,}994{,}944$
+- FFN: $3 \times 8192 \times 28672 = 704{,^643{,}072}$
+- Norm: $2 \times 8192 = 16{,}384$
+- Block total: $\approx 855.7\text{M}$
+
+All 80 blocks: $80 \times 855.7\text{M} = 68{,}453{,}207{,}040$
+
+Embedding + untied output: $2 \times 128256 \times 8192 = 2{,}100{,}673{,}536$
+
+Final RMSNorm: $8192$
+
+**Total: $\approx 70.55\text{B}$** (matching the published 70.6B).
+
 ---
 
 ## 10. FLOP Count per Forward Pass
@@ -371,6 +567,8 @@ Detailed breakdown per component per token:
 | Embedding + Unembed | $2 \times 2 D V$ = 4.19G | 3.0% |
 | **Total (at $S \gg 1$)** | $\approx 141$G | 100% |
 
+> **Note on percentages.** The fractions above account for the position-independent components only. The attention $QK^T + PV$ term contributes $4HS d_h / (2P)$ per token during prefill, which ranges from $<1\%$ at $S \ll D$ to dominant at $S \gg D$. At $S = 4096$ for Llama-3-70B, attention $QK^T + PV$ contributes $\approx 3.0$ GFLOPs per token, bringing the total to $\approx 144$ GFLOPs/token. The "100%" row assumes $S$ is large enough that the position-independent terms dominate; at moderate context lengths, the true total slightly exceeds the sum of the rows shown.
+
 ### 10.3 Per-token decode step
 
 During autoregressive decode, $S = 1$ but the KV cache has length $T$. The attention component changes:
@@ -386,6 +584,154 @@ For a 70B model on 8xH100 SXM (990 TFLOPS FP16 each = 7.92 PFLOPS aggregate):
 $$t_{\text{prefill}} = \frac{2 P \cdot S}{\pi_{\text{aggregate}} \cdot \text{MFU}} = \frac{2 \times 70.6\text{B} \times 4096}{7.92\text{PFLOPS} \times 0.50} = \frac{578 \text{ TFLOPs}}{3.96 \text{ PFLOPS}} \approx 0.146 \text{ s}$$
 
 Practical measurements: 0.15–0.30 s for 4K-token prefill at 50% MFU, consistent with this estimate.
+
+---
+
+## 10.5 Backward Pass — Full Gradient Derivation
+
+Training requires gradients through every operation. The backward pass through one transformer block is the chain rule applied to the residual + norm + attention + FFN structure. We derive each gradient explicitly.
+
+### Notation
+
+Let $\mathcal{L}$ be the scalar loss. We write $\bar{\mathbf{Y}} = \partial \mathcal{L} / \partial \mathbf{Y}$ for the upstream gradient of any tensor $\mathbf{Y}$. Shapes are for a single sequence ($B=1$) for clarity.
+
+### 10.5.1 Backward through the FFN sub-block
+
+The forward is: $\mathbf{y}_{\text{ffn}} = \mathbf{y}_{\text{attn}} + \text{FFN}(\text{Norm}_2(\mathbf{y}_{\text{attn}}))$.
+
+**Residual split:** $\bar{\mathbf{y}}_{\text{attn}}^{(1)} = \bar{\mathbf{y}}_{\text{ffn}}$ (gradient flows through the identity path), and the FFN path receives $\bar{\mathbf{y}}_{\text{attn}}^{(2)} = \bar{\mathbf{y}}_{\text{ffn}}$ (identical copy — the two paths sum).
+
+**RMSNorm backward.** Forward: $\hat{\mathbf{x}} = \mathbf{x} / \text{RMS}(\mathbf{x})$, $\mathbf{n} = \gamma \odot \hat{\mathbf{x}}$. The gradient w.r.t. $\mathbf{x}$:
+
+$$\bar{\gamma}_i += \bar{n}_i \cdot \hat{x}_i$$
+
+$$\bar{\mathbf{x}} = \frac{1}{\text{RMS}(\mathbf{x})} \left(\bar{\mathbf{n}} \odot \gamma - \frac{1}{D} \cdot \hat{\mathbf{x}} \cdot \left\langle \bar{\mathbf{n}} \odot \gamma,\; \hat{\mathbf{x}} \right\rangle \right)$$
+
+The second term corrects for the dependence of $\text{RMS}(\mathbf{x})$ on $\mathbf{x}$ — this is the "reduction" that makes normalization layers expensive in the backward pass (a dot product over $D$ per token).
+
+**SwiGLU FFN backward.** Forward: $\mathbf{g} = \mathbf{x} W_{\text{gate}}$, $\mathbf{u} = \mathbf{x} W_{\text{up}}$, $\mathbf{h} = \text{SiLU}(\mathbf{g}) \odot \mathbf{u}$, $\mathbf{out} = \mathbf{h} W_{\text{down}}$.
+
+$$\bar{\mathbf{h}} = \bar{\mathbf{out}} \cdot W_{\text{down}}^T$$
+
+$$\bar{W}_{\text{down}} += \mathbf{h}^T \cdot \bar{\mathbf{out}}$$
+
+$$\bar{\mathbf{g}} = \bar{\mathbf{h}} \odot \mathbf{u} \odot \text{SiLU}'(\mathbf{g}), \qquad \bar{\mathbf{u}} = \bar{\mathbf{h}} \odot \text{SiLU}(\mathbf{g})$$
+
+where $\text{SiLU}'(x) = \sigma(x) + x \sigma(x)(1-\sigma(x)) = \sigma(x)(1 + x(1-\sigma(x)))$.
+
+$$\bar{W}_{\text{gate}} += \mathbf{x}^T \cdot \bar{\mathbf{g}}, \qquad \bar{W}_{\text{up}} += \mathbf{x}^T \cdot \bar{\mathbf{u}}$$
+
+$$\bar{\mathbf{x}}_{\text{FFN}} = \bar{\mathbf{g}} \cdot W_{\text{gate}}^T + \bar{\mathbf{u}} \cdot W_{\text{up}}^T$$
+
+### 10.5.2 Backward through the Attention sub-block
+
+**Residual split + RMSNorm:** Same pattern as above — $\bar{\mathbf{x}}$ receives gradients from both the identity path and the attention path.
+
+**QKV projection backward.** Forward: $Q = \mathbf{x} W_Q$, $K = \mathbf{x} W_K$, $V = \mathbf{x} W_V$.
+
+$$\bar{W}_Q += \mathbf{x}^T \cdot \bar{Q}, \quad \bar{W}_K += \mathbf{x}^T \cdot \bar{K}, \quad \bar{W}_V += \mathbf{x}^T \cdot \bar{V}$$
+
+$$\bar{\mathbf{x}}_{\text{QKV}} = \bar{Q} \cdot W_Q^T + \bar{K} \cdot W_K^T + \bar{V} \cdot W_V^T$$
+
+**Deriving $\partial \mathcal{L} / \partial Q$, $\partial \mathcal{L} / \partial K$, $\partial \mathcal{L} / \partial V$ through the full attention mechanism.** This is the core of the backward pass through a transformer. We derive each gradient step by step, starting from the upstream gradient $\bar{\mathbf{O}} = \partial \mathcal{L} / \partial \mathbf{O}$ arriving from the output projection.
+
+The forward pass (per head, omitting batch/head indices) is:
+
+$$S = QK^T / \sqrt{d_h}, \quad P = \text{softmax}_{\text{row}}(S), \quad \mathbf{O} = PV$$
+
+**Step 1: $\partial \mathcal{L} / \partial P$ (from $\mathbf{O} = PV$).** This is a standard matmul backward:
+
+$$\bar{P} = \bar{\mathbf{O}} V^T \in \mathbb{R}^{S \times S}, \qquad \bar{V} = P^T \bar{\mathbf{O}} \in \mathbb{R}^{S \times d_h}$$
+
+**Step 2: $\partial \mathcal{L} / \partial S$ through the softmax Jacobian.** The softmax $\text{softmax}(S)_{ij} = e^{S_{ij}} / \sum_k e^{S_{ik}}$ has Jacobian:
+
+$$\frac{\partial P_{ij}}{\partial S_{i\ell}} = P_{ij}(\delta_{j\ell} - P_{i\ell})$$
+
+Applying the chain rule $\bar{S}_{i\ell} = \sum_j \bar{P}_{ij} \cdot P_{ij}(\delta_{j\ell} - P_{i\ell})$:
+
+$$\bar{S}_{i\ell} = P_{i\ell} \left(\bar{P}_{i\ell} - \sum_j P_{ij} \bar{P}_{ij}\right)$$
+
+In matrix form, defining $\mathbf{d} = \text{rowsum}(P \odot \bar{P}) \in \mathbb{R}^S$:
+
+$$\boxed{\bar{S} = P \odot (\bar{P} - \mathbf{d} \cdot \mathbf{1}^T)}$$
+
+Substituting $\bar{P} = \bar{\mathbf{O}} V^T$:
+
+$$\bar{S} = P \odot \left(\bar{\mathbf{O}} V^T - (P \odot \bar{\mathbf{O}} V^T) \cdot \mathbf{1} \cdot \mathbf{1}^T\right)$$
+
+**Step 3: $\partial \mathcal{L} / \partial Q$ and $\partial \mathcal{L} / \partial K$ from $S = QK^T / \sqrt{d_h}$.** This is another matmul backward:
+
+$$\bar{Q} = \bar{S} \cdot K / \sqrt{d_h} \in \mathbb{R}^{S \times d_h}$$
+
+$$\bar{K} = \bar{S}^T \cdot Q / \sqrt{d_h} \in \mathbb{R}^{S \times d_h}$$
+
+**Summary of the full attention backward pass (per head):**
+
+$$\boxed{\begin{aligned}
+\bar{V} &= P^T \bar{\mathbf{O}} \\
+\bar{S} &= P \odot \left(\bar{\mathbf{O}} V^T - \text{diag}\!\left(\text{rowsum}(P \odot \bar{\mathbf{O}} V^T)\right) \cdot \mathbf{1}^T\right) \\
+\bar{Q} &= \bar{S} K / \sqrt{d_h} \\
+\bar{K} &= \bar{S}^T Q / \sqrt{d_h}
+\end{aligned}}$$
+
+**FLOP cost of the attention backward.** The backward pass requires the same $QK^T$ and $PV$ matmuls as the forward, plus the softmax Jacobian ($O(S^2)$) and the element-wise rescaling. Total attention backward FLOPs $\approx 2.5 \times$ the forward attention FLOPs (two extra matmuls for $\bar{Q}$ and $\bar{K}$, plus the $\bar{V}$ matmul). Combined with the forward, the full training FLOPs per token are approximately $6P$ (three forward-equivalents: one forward, two for the backward).
+
+**Output projection backward.** Forward: $\text{out} = \mathbf{o} \cdot W_O$.
+
+$$\bar{W}_O += \mathbf{o}^T \cdot \bar{\mathbf{out}}, \qquad \bar{\mathbf{o}} = \bar{\mathbf{out}} \cdot W_O^T$$
+
+### 10.5.3 Full backward chain: from loss through residual + layer norm to input
+
+Combining both sub-blocks, the complete backward through one transformer block is:
+
+$$\bar{\mathbf{x}}_{\text{out}} = \underbrace{\bar{\mathbf{y}}_{\text{ffn}}}_{\text{from next layer}} \;+\; \underbrace{\bar{\mathbf{x}}_{\text{attn residual}}}_{\text{attention path}} \;+\; \underbrace{\bar{\mathbf{x}}_{\text{FFN residual}}}_{\text{FFN path}}$$
+
+More precisely, tracing from $\bar{\mathbf{y}}_{\text{block\_out}}$ backward:
+
+1. **FFN residual split:** $\bar{\mathbf{y}}_{\text{attn}}^{(\text{res})} = \bar{\mathbf{y}}_{\text{block\_out}}$, and the FFN path receives an identical copy.
+
+2. **FFN backward** produces $\bar{\mathbf{x}}_{\text{FFN, norm}}$.
+
+3. **RMSNorm backward** produces $\bar{\mathbf{y}}_{\text{attn}}^{(\text{norm})}$ and $\bar{\gamma}_2$.
+
+4. **Attention residual addition:** $\bar{\mathbf{y}}_{\text{attn}} = \bar{\mathbf{y}}_{\text{attn}}^{(\text{res})} + \bar{\mathbf{y}}_{\text{attn}}^{(\text{norm})}$.
+
+5. **Attention residual split:** $\bar{\mathbf{x}}^{(\text{res})} = \bar{\mathbf{y}}_{\text{attn}}$, and the attention path receives an identical copy.
+
+6. **Attention backward** (Section 10.5.2) produces $\bar{\mathbf{x}}_{\text{attn, norm}}$.
+
+7. **RMSNorm backward** produces $\bar{\mathbf{x}}^{(\text{norm})}$ and $\bar{\gamma}_1$.
+
+8. **Block input gradient:** $\bar{\mathbf{x}}_{\text{in}} = \bar{\mathbf{x}}^{(\text{res})} + \bar{\mathbf{x}}^{(\text{norm})}$.
+
+The key insight: gradients from both the identity path and the transformation path are summed at each residual connection. This is why pre-norm transformers train stably — the identity path guarantees $\|\bar{\mathbf{x}}_{\text{in}}\| \geq \|\bar{\mathbf{y}}_{\text{block\_out}}\|$, preventing gradient decay through depth.
+
+### 10.5.4 Memory cost of storing activations for backward
+
+The backward pass requires all intermediate activations from the forward pass. Per token per transformer block, the activations that must be stored are:
+
+| Activation | Shape (per token) | Bytes (BF16) |
+|---|---|---|
+| Input to attention RMSNorm | $D$ | $2D$ |
+| Attention RMSNorm output | $D$ | $2D$ |
+| $Q, K, V$ | $D + 2Kd_h$ | $2(D + 2Kd_h)$ |
+| Attention output (before $W_O$) | $D$ | $2D$ |
+| Attention residual output | $D$ | $2D$ |
+| Input to FFN RMSNorm | $D$ | $2D$ |
+| FFN RMSNorm output | $D$ | $2D$ |
+| Gate $\mathbf{g}$ | $d_{\text{ff}}$ | $2d_{\text{ff}}$ |
+| Up $\mathbf{u}$ | $d_{\text{ff}}$ | $2d_{\text{ff}}$ |
+| SiLU output $\mathbf{h}$ | $d_{\text{ff}}$ | $2d_{\text{ff}}$ |
+
+Total per layer: $\approx 2(8D + 6Kd_h + 3d_{\text{ff}}) \approx 2(8D + 6Kd_h + 8D) \approx 2(16D + 6Kd_h)$. For Llama-3-70B ($D = 8192$, $K = 8$, $d_h = 128$, $d_{\text{ff}} = 28672$): $\approx 2(16 \times 8192 + 6 \times 8 \times 128 + 3 \times 28672) \approx 2(131072 + 6144 + 86016) \approx 446$ KB per token per layer. Over 80 layers: $\approx 34.9$ MB per token. At sequence length 4096: $\approx 143$ GB of activation memory for a single sequence.
+
+**Activation checkpointing** (gradient checkpointing) addresses this by recomputing activations during the backward pass instead of storing them. The tradeoff:
+
+- **Without checkpointing:** Store all activations. Memory: $O(L \cdot S \cdot D)$ for $L$ layers. Backward pass only reads stored activations — no recomputation.
+- **With checkpointing (every layer):** Store only the input to each layer ($D$ per token per checkpoint). Recompute the full forward pass within each layer during backward. Memory: $O(S \cdot D)$ (one layer's activations at a time). Compute cost: $1.5\times$ total FLOPs (one extra forward pass per layer in the backward).
+- **With checkpointing (every $C$ layers):** Store inputs at $L/C$ checkpoints. Recompute within each segment. Memory: $O(C \cdot S \cdot D)$. This is the standard practice — $C = 1$ is most common in large-model training.
+
+For Llama-3-70B training at $S = 8192$: without checkpointing, activations consume $\approx 286$ GB per sequence (impossible on a single H100). With per-layer checkpointing: $\approx 8D \cdot 2 = 131$ KB per token $\times 8192 = 1.07$ GB — manageable. The recomputation adds $\sim$33% wall time but is unavoidable given memory constraints.
 
 ---
 

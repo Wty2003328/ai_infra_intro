@@ -237,7 +237,37 @@ $$
 
 where $C$ is the chunk size (typically 64–128). Choosing $C = \sqrt{N}$ balances the two terms. For $N = 64$, $C = 128$, the cost is $O(64 \cdot L \cdot 128) \approx O(8192\,L)$ — comparable to attention with head dimension 128, but with no KV cache at inference.
 
-### 4.3 Hardware efficiency
+### 4.3 The parallel scan — How the recurrence is computed without materializing the full state
+
+The SSD algorithm avoids materializing the full $L \times N$ state sequence by computing the recurrence in parallel using a **work-efficient parallel scan**. The key insight is that the recurrence $x_k = \bar{A}_k x_{k-1} + \bar{B}_k u_k$ can be viewed as composing affine transformations:
+
+$$
+f_k(x) = \bar{A}_k \cdot x + \bar{B}_k u_k
+$$
+
+The composition of two affine maps $f_i$ and $f_j$ is:
+
+$$
+(f_j \circ f_i)(x) = \bar{A}_j \bar{A}_i \cdot x + \bar{A}_j \bar{B}_i u_i + \bar{B}_j u_j
+$$
+
+This composition is associative: $(f_k \circ f_j) \circ f_i = f_k \circ (f_j \circ f_i)$. Therefore, the scan can be computed in $O(\log L)$ parallel steps:
+
+1. **Leaf level:** Each position $k$ has its affine map $(\bar{A}_k, \bar{B}_k u_k)$.
+2. **Combine level 1:** Compose pairs: $(\bar{A}_{2k+1}\bar{A}_{2k},\; \bar{A}_{2k+1}\bar{B}_{2k}u_{2k} + \bar{B}_{2k+1}u_{2k+1})$.
+3. **Combine level 2:** Compose pairs of pairs, etc.
+4. **After $\log_2 L$ levels:** The composed map for the entire prefix is available.
+
+**Hardware-aware algorithm that avoids materializing the full state.** Mamba-2's SSD kernel keeps the per-chunk state in shared memory (SRAM), not in HBM:
+
+1. Process the sequence in chunks of size $C$ (typically $C = 64$ or $128$).
+2. **Intra-chunk:** The diagonal block (positions within the chunk) is computed as a small matrix multiply: $\mathbf{y}_{\text{chunk}} = \mathbf{M}_{\text{chunk}} \cdot \mathbf{u}_{\text{chunk}}$, where $\mathbf{M}_{\text{chunk}}$ is a $C \times C$ lower-triangular semiseparable matrix. This maps to a tensor-core GEMM.
+3. **Inter-chunk:** After processing each chunk, compute the state summary $\mathbf{x}_{\text{out}} = \bar{A}_C \cdot \mathbf{x}_{\text{in}} + \sum_k (\prod_{j>k} \bar{A}_j) \bar{B}_k u_k$. This is an $N$-dimensional vector per chunk — small enough to keep in registers.
+4. **Propagate:** The inter-chunk scan passes $\mathbf{x}_{\text{out}}$ from each chunk to the next, accumulating the state. This scan is sequential across chunks but parallel within each chunk.
+
+The total state materialized in HBM: $O(L / C \cdot N)$ — the per-chunk summaries only. For $L = 128\text{K}$, $C = 128$, $N = 64$: $128000 / 128 \times 64 = 64{,}000$ floats $= 256$ KB. Compare to attention's KV cache: $128000 \times 128 \times 2 = 32$ MB per head. The SSM's state is $125\times$ smaller per "head."
+
+### 4.5 Hardware efficiency
 
 Mamba-2's SSD is designed to map onto the same GPU operations as FlashAttention:
 
@@ -249,7 +279,7 @@ Mamba-2's SSD is designed to map onto the same GPU operations as FlashAttention:
 
 This means Mamba-2 achieves **near-FlashAttention utilization** on Hopper and Blackwell tensor cores — roughly 60–70% of peak FP8 — which was not true for Mamba-1's custom scan kernel.
 
-### 4.4 Head structure
+### 4.6 Head structure
 
 Mamba-2 introduces a "head" dimension $H$, analogous to multi-head attention. The state dimension per head is $N_h = N/H$. Each head independently computes:
 

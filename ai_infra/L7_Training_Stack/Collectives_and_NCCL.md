@@ -101,6 +101,74 @@ This is a remarkable result: the ring AllReduce cost is *independent of $N$* for
 
 **Latency term.** The ring also has a latency component: $2(N-1) \cdot \alpha$, where $\alpha$ is the per-step startup latency. For small $M$, this term dominates.
 
+#### 2.1.1 Step-by-step Ring AllReduce worked example (4 GPUs, 4 elements each)
+
+Four GPUs each hold a buffer of 4 elements. The goal: sum all corresponding elements and distribute the result to all GPUs.
+
+**Initial state:**
+
+```
+GPU 0: [a0, a1, a2, a3]    GPU 1: [b0, b1, b2, b3]
+GPU 2: [c0, c1, c2, c3]    GPU 3: [d0, d1, d2, d3]
+```
+
+**Phase 1: Reduce-Scatter (3 steps)**
+
+Step 1 — each GPU sends chunk (i-0) mod 4 to GPU (i+1) mod 4, and accumulates received data:
+
+```
+GPU 0 sends chunk 0 [a0] → GPU 1     GPU 0 receives [d3] from GPU 3, accumulates into chunk 3
+GPU 1 sends chunk 1 [b1] → GPU 2     GPU 1 receives [a0] from GPU 0, accumulates into chunk 0
+GPU 2 sends chunk 2 [c2] → GPU 3     GPU 2 receives [b1] from GPU 1, accumulates into chunk 1
+GPU 3 sends chunk 3 [d3] → GPU 0     GPU 3 receives [c2] from GPU 2, accumulates into chunk 2
+
+After Step 1:
+GPU 0: [a0, a1, a2, a2+d3]    GPU 1: [a0+b0, b1, b2, b3]
+GPU 2: [c0, b1+c1, c2, c3]    GPU 3: [d0, d1, c2+d2, d3]
+```
+
+Step 2 — each GPU sends the accumulated chunk from step 1:
+
+```
+GPU 0 sends chunk 3 [a2+d3] → GPU 1     GPU 0 receives [b1+c1] from GPU 3 into chunk 1
+GPU 1 sends chunk 0 [a0+b0] → GPU 2     GPU 1 receives [a2+d3] from GPU 0 into chunk 3
+GPU 2 sends chunk 1 [b1+c1] → GPU 3     GPU 2 receives [a0+b0] from GPU 1 into chunk 0
+GPU 3 sends chunk 2 [c2+d2] → GPU 0     GPU 3 receives [b1+c1] from GPU 2 into chunk 1
+
+After Step 2:
+GPU 0: [a0, a1+b1+c1, a2, a2+d3]
+GPU 1: [a0+b0, b1, b2, a2+b2+d2+d3]
+GPU 2: [a0+b0+c0, b1+c1, c2, c3]
+GPU 3: [d0, b1+c1+d1, c2+d2, d3]
+```
+
+Step 3 — each GPU sends the accumulated chunk from step 2:
+
+```
+GPU 0 sends chunk 2 [a2] → GPU 1         GPU 0 receives [c2+d2] from GPU 3 into chunk 2
+GPU 1 sends chunk 3 [b2+d2+d3] → GPU 2   GPU 1 receives [a2] from GPU 0 into chunk 2
+GPU 2 sends chunk 0 [a0+b0+c0] → GPU 3   GPU 2 receives [b2+d2+d3] from GPU 1 into chunk 3
+GPU 3 sends chunk 1 [b1+c1+d1] → GPU 0   GPU 3 receives [a0+b0+c0] from GPU 2 into chunk 0
+
+After Step 3 (reduce-scatter complete):
+GPU 0: [a0, a1+b1+c1+d1, ...]     ← chunk 1 fully reduced ✓
+GPU 1: [..., ..., a2+b2+c2+d2]     ← chunk 2 fully reduced ✓
+GPU 2: [..., ..., a3+b3+c3+d3]     ← chunk 3 fully reduced ✓
+GPU 3: [a0+b0+c0+d0, ...]          ← chunk 0 fully reduced ✓
+```
+
+**Phase 2: All-Gather (3 steps)**
+
+The pattern is identical but each GPU forwards its fully reduced chunk instead of accumulating:
+
+Step 4 — GPU 0 sends its reduced chunk 1, GPU 1 sends chunk 2, GPU 2 sends chunk 3, GPU 3 sends chunk 0.
+Step 5 — forward the next chunk.
+Step 6 — forward the last chunk.
+
+After step 6, all GPUs hold $[a0{+}b0{+}c0{+}d0, \; a1{+}b1{+}c1{+}d1, \; a2{+}b2{+}c2{+}d2, \; a3{+}b3{+}c3{+}d3]$.
+
+**Total data transferred per GPU:** 3 sends × 1 element + 3 sends × 1 element = 6 elements = $2(N-1) \times M/N = 2 \times 3 \times 1 = 6$ elements. For $M$ bytes total data: $\frac{2(N-1)}{N} \times M = \frac{6}{4} \times 4 = 6$ elements per GPU.
+
 ```mermaid
 flowchart TD
     subgraph RS["Reduce-Scatter Phase (N−1 steps)"]
