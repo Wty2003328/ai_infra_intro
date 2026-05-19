@@ -8,7 +8,7 @@
 
 ## 0. The programming model in one paragraph
 
-CUDA maps a C/C++ function onto a hierarchy of threads (grid $\to$ block $\to$ warp $\to$ thread) that mirrors the physical GPU hierarchy (device $\to$ SM $\to$ warp scheduler $\to$ lane). Every optimization in [CUDA_Optimization](CUDA_Optimization.md) and every algorithm in [FlashAttention_Deep_Dive](FlashAttention_Deep_Dive.md) derives from understanding how this mapping works: which memory space a pointer lives in, how a warp's 32 lanes map to memory transactions, and where synchronization barriers must be placed to enforce ordering. This page is the reference for that programming model — thread hierarchy, memory spaces, launch configuration, synchronization primitives, memory access patterns, atomic operations, streams and events, and a complete tiled matmul kernel. It assumes fluency with the hardware in [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) and the roofline model in [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md).
+CUDA maps a C/C++ function onto a hierarchy of threads (grid $\to$ cluster $\to$ block $\to$ warp $\to$ thread) that mirrors the physical GPU hierarchy (device $\to$ GPC $\to$ SM $\to$ warp scheduler $\to$ lane). Every optimization in [CUDA_Optimization](CUDA_Optimization.md) and every algorithm in [FlashAttention_Deep_Dive](FlashAttention_Deep_Dive.md) derives from understanding how this mapping works: which memory space a pointer lives in, how a warp's 32 lanes map to memory transactions, and where synchronization barriers must be placed to enforce ordering. This page is the reference for that programming model — thread hierarchy, memory spaces, launch configuration, synchronization primitives, threadblock clusters and distributed shared memory (SM90+), memory access patterns, atomic operations, streams and events, and a complete tiled matmul kernel. It assumes fluency with the hardware in [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) and the roofline model in [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md).
 
 ---
 
@@ -43,6 +43,7 @@ flowchart TD
 
 - **Grid** — the totality of all blocks launched by a single `<<<grid, block>>>` invocation. Up to $2^{31}-1$ blocks in the x-dimension, $65535$ in y and z.
 - **Block (thread block)** — a group of up to 1024 threads mapped entirely to one SM. Threads within a block share the SM's shared memory (SMEM) and can synchronize via `__syncthreads()`. Blocks are independent: no cross-block synchronization within a kernel (without cooperative groups).
+- **Cluster (SM90+)** — a group of 1–8 threadblocks that execute on neighboring SMs within the same GPC. Blocks within a cluster can access each other's shared memory through Distributed Shared Memory (DSMEM) at ~50 GB/s, avoiding the need to route cross-block data through HBM. See [Section 5](#5-threadblock-clusters-and-distributed-shared-memory-sm90) for details.
 - **Warp** — 32 threads that execute in lockstep on a single warp scheduler (pre-Volta) or with independent thread scheduling (Volta+). The warp is the *scheduling quantum*: one instruction is issued per warp per cycle.
 - **Thread** — the finest granularity. Each thread has its own register state, program counter (post-Volta), and local memory for spills.
 
@@ -118,7 +119,7 @@ The `<<<blocks, tpb>>>` syntax is CUDA's launch extension, translated by `nvcc` 
 flowchart TD
     RF["Register file<br/>~1 cycle · per-thread<br/>256 KB/SM"]:::rf
     LM["Local memory<br/>(register spill to L1/HBM)<br/>~400 cycles"]:::lm
-    SM["Shared memory (SMEM)<br/>~8–20 cycles · per-block<br/>up to 228 KB/SM (Hopper)"]:::sm
+    SM["Shared memory (SMEM)<br/>~20–30 cycles · per-block<br/>up to 228 KB/SM (Hopper)"]:::sm
     CM["Constant memory<br/>~1 cycle (cached)<br/>64 KB total"]:::cm
     GM["Global memory (HBM)<br/>~400 cycles · per-grid<br/>80–288 GB"]:::gm
     UM["Unified memory (UVM)<br/>migration-dependent<br/>host + device"]:::um
@@ -141,7 +142,7 @@ flowchart TD
 |---|---|---|---|---|---|
 | Register | Thread | Kernel invocation | 1 cycle | 256 KB/SM (65 536 $\times$ 32-bit) | Automatic variables in kernel |
 | Local | Thread | Kernel invocation | ~400 cycles (spills to L1 then HBM) | Unbounded (spill to HBM) | Array automatics exceeding RF |
-| Shared | Block | Kernel invocation | 8–20 cycles | Up to 228 KB/SM (Hopper), 48 KB default max/block | `__shared__` |
+| Shared | Block | Kernel invocation | 20–30 cycles | Up to 228 KB/SM (Hopper), 48 KB default max/block | `__shared__` |
 | Constant | Grid | Application | ~1 cycle (if cached) | 64 KB total, 8 KB L1 cache/SM | `__constant__` (file scope) |
 | Texture/Surface | Grid | Application | ~200 cycles (cached) | HBM-backed, texture cache | `texture<>` / `surf<>` |
 | Global | Grid | Until `cudaFree` | ~400 cycles | HBM capacity (80–288 GB) | `cudaMalloc` pointers |
@@ -213,8 +214,8 @@ int n_blocks = (N + tpb - 1) / tpb;    // ceiling division to cover all elements
 
 Block size constraints:
 - Must be a multiple of warp size (32) to avoid wasted lanes.
-- Maximum 1024 threads per block (hardware limit).
-- Maximum 1024 threads per SM resident simultaneously on Hopper/Blackwell (2048 with `cudaDevAttrMaxThreadsPerMultiProcessor`).
+- Maximum 1024 threads per **block** (hardware limit; applies to a single block's `blockDim.x * blockDim.y * blockDim.z`).
+- Maximum 2048 threads per **SM** resident simultaneously on Hopper (SM90) / Blackwell — this is the aggregate across all concurrent blocks on that SM, queried via `cudaDevAttrMaxThreadsPerMultiProcessor`. Do not confuse the per-block limit (1024) with the per-SM limit (2048); the SM can host multiple blocks whose threads sum to 2048.
 - Typical sweet spot for bandwidth-bound kernels: 256–512 threads per block. For compute-bound tensor-core kernels (matmul), blocks of 128 threads (4 warps) are common because each warp group (4 warps) cooperates on one `wgmma` tile.
 
 Occupancy model:
@@ -344,9 +345,155 @@ Cooperative groups provide a uniform interface that generalizes `__syncthreads`,
 
 ---
 
-## 5. Streams, Events, and Concurrency
+## 5. Threadblock Clusters and Distributed Shared Memory (SM90+)
 
-### 5.1 CUDA streams
+### 5.1 The cluster abstraction
+
+Hopper (SM90) introduces **Threadblock Clusters** — a new level in the CUDA thread hierarchy that sits between a single threadblock and the full grid. A cluster is a group of 1–8 threadblocks that are guaranteed to execute on neighboring SMs within the same GPC (Graphics Processing Cluster) and can communicate directly through **Distributed Shared Memory (DSMEM)** without going through L2 cache or HBM.
+
+The complete hierarchy is now:
+
+$$
+\text{Thread} \;<\; \text{Warp (32)} \;<\; \text{Block (up to 1024)} \;<\; \textbf{Cluster (1–8 blocks)} \;<\; \text{Grid}
+$$
+
+Clusters fill the communication gap between single-block SMEM (fast but isolated) and full-grid global memory (shared but slow). Before clusters, any cross-block data sharing had to route through L2/HBM at ~3 TB/s bandwidth and ~400 cycle latency. DSMEM provides ~50 GB/s cross-SM bandwidth within a cluster at significantly lower latency.
+
+### 5.2 Launch configuration
+
+Clusters require explicit opt-in through launch configuration:
+
+```c
+// Annotate the kernel with cluster dimensions
+__global__ void __cluster_dims__(2, 1, 1)   // 2 blocks per cluster in x-dimension
+my_cluster_kernel(float *data, int n) {
+    // Each block in the cluster can access other blocks' shared memory
+    // via DSMEM pointers
+}
+
+// Host-side launch using cudaLaunchKernelEx (or the <<<>>> extension on recent toolkits)
+cudaLaunchConfig_t config = {0};
+config.gridDim = grid;
+config.blockDim = block;
+config.dynamicSmemBytes = smem_bytes;
+config.stream = stream;
+
+cudaLaunchAttribute cluster_attr;
+cluster_attr.id = cudaLaunchAttributeClusterDimension;
+cluster_attr.val.clusterDim.x = 2;
+cluster_attr.val.clusterDim.y = 1;
+cluster_attr.val.clusterDim.z = 1;
+config.attrs = &cluster_attr;
+config.numAttrs = 1;
+
+cudaLaunchKernelEx(&config, my_cluster_kernel, data, n);
+```
+
+Key constraints:
+- Cluster dimensions: 1–8 blocks total (product of x, y, z cluster dims).
+- All blocks in a cluster are scheduled to SMs within the same GPC. If insufficient SMs are available, the cluster waits.
+- Cluster size affects occupancy: the SM must reserve resources for all blocks in the cluster that map to it.
+
+### 5.3 Distributed Shared Memory (DSMEM)
+
+DSMEM allows a thread in one block to read or write the shared memory of another block within the same cluster. This is the primary benefit of clusters — direct cross-block data exchange without global memory round-trips.
+
+```c
+__global__ void __cluster_dims__(2, 1, 1)
+cluster_kernel(float *output, int n) {
+    // Declare shared memory as normal
+    __shared__ float my_smem[256];
+
+    // Get the cluster group
+    namespace cg = cooperative_groups;
+    cg::cluster_group cluster = cg::this_cluster();
+
+    int block_rank = cluster.block_rank();   // 0 or 1 in this 2-block cluster
+    int cluster_size = cluster.num_blocks(); // 2
+
+    // Each block fills its own SMEM
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n) my_smem[threadIdx.x] = output[gid];
+
+    // Cluster-wide barrier: ensure all blocks have filled their SMEM
+    cg::sync(cluster);
+
+    // Block 0 reads block 1's shared memory via DSMEM
+    if (block_rank == 0 && threadIdx.x < 128) {
+        // Get a pointer to the other block's shared memory
+        float *other_smem = my_smem + cluster.map_shared_rank(my_smem, 1);
+        // The above returns a DSMEM pointer to block rank 1's SMEM
+        float val = other_smem[threadIdx.x];  // read from block 1's SMEM
+        // ... process val ...
+    }
+}
+```
+
+Bandwidth comparison for cross-block data sharing:
+
+| Path | Bandwidth | Latency | Use case |
+|---|---|---|---|
+| DSMEM (cross-SM within cluster) | ~50 GB/s | Low | Direct block-to-block exchange |
+| L2 cache | ~60 TB/s (hot) / 3.35 TB/s (miss) | Moderate | Default global memory path |
+| HBM (global memory round-trip) | ~3.35 TB/s | ~400 cycles | Without clusters: the only option |
+
+DSMEM's ~50 GB/s is far slower than local SMEM (~19 TB/s per SM), but for cross-block communication it is substantially better than the alternative of writing to HBM and reading back. The key advantage is **lower latency and no L2 pollution** — data moves directly between SMs without consuming L2 cache capacity.
+
+### 5.4 Cluster synchronization and communication primitives
+
+Cluster programming introduces several new primitives:
+
+```c
+namespace cg = cooperative_groups;
+cg::cluster_group cluster = cg::this_cluster();
+
+// Cluster-wide barrier (all threads in all blocks must reach)
+cg::sync(cluster);
+
+// Map a shared-memory pointer to a specific block rank in the cluster
+float *remote_smem = cluster.map_shared_rank(my_smem, target_rank);
+
+// Query cluster metadata
+int rank = cluster.block_rank();       // this block's rank within the cluster
+int size = cluster.num_blocks();       // total blocks in cluster
+dim3 block_idx = cluster.block_index(); // this block's index in the cluster grid
+```
+
+For async data movement across the cluster, `memcpy_async` supports cluster-wide copies:
+
+```c
+// Async copy from one block's SMEM to another's (via DSMEM)
+cg::memcpy_async(cluster, dst_smem, src_smem, copy_bytes);
+cg::wait(cluster);  // wait for async copy to complete
+```
+
+Distributed barriers extend the named-barrier concept across the cluster, allowing fine-grained producer-consumer patterns between blocks.
+
+### 5.5 Use cases
+
+**Split-K reduction.** In a split-K matmul, multiple blocks compute partial products along the K dimension for the same output tile. Without clusters, each partial product is written to HBM and a separate reduction kernel sums them. With clusters, all split-K blocks for one output tile form a cluster; partial products are exchanged through DSMEM and reduced in-place, eliminating the intermediate HBM write and the second kernel launch.
+
+**Producer-consumer pipelines (FlashAttention-3).** In FlashAttention-3, one block produces an intermediate result (e.g., a partial softmax normalization factor) that the next block in the sequence consumes. Clustering these blocks allows the producer to write normalization factors to its SMEM, and the consumer to read them via DSMEM — avoiding a global memory round-trip for every attention step.
+
+**Collaborative loading.** Multiple blocks in a cluster can cooperatively load a large tile from HBM (each block loads a portion), then exchange portions via DSMEM so every block has the full tile without redundant HBM reads.
+
+### 5.6 When to use clusters vs. alternatives
+
+| Scenario | Recommended approach |
+|---|---|
+| Single block has sufficient parallelism | Regular threadblock (no cluster) |
+| Cross-block data exchange, tight coupling (1–4 blocks) | **Cluster with DSMEM** |
+| Many blocks need to share data (>8) | Global memory + kernel boundary sync |
+| Producer-consumer between blocks | **Cluster with distributed barriers** |
+| All blocks must synchronize (grid-wide) | Cooperative groups grid sync |
+
+Clusters are most beneficial when the data exchange pattern involves a small number of tightly coupled blocks (2–8) that share intermediate results. They are not a replacement for global communication; they are a targeted optimization for the specific case where block-level SMEM isolation forces unnecessary HBM traffic.
+
+---
+
+## 6. Streams, Events, and Concurrency
+
+### 6.1 CUDA streams
 
 ```mermaid
 flowchart TD
@@ -382,7 +529,7 @@ cudaMemcpyAsync(d_data, h_data, bytes, cudaMemcpyHostToDevice, s2);  // copy on 
 
 The default stream (stream 0) is **synchronizing**: it waits for all prior work on all streams to complete, and all subsequent work on all streams waits for it. Use non-default streams for any concurrent execution.
 
-### 5.2 Events for timing and inter-stream dependencies
+### 6.2 Events for timing and inter-stream dependencies
 
 ```c
 cudaEvent_t start, stop;
@@ -406,7 +553,7 @@ cudaEventRecord(done_event, compute_stream);
 cudaStreamWaitEvent(copy_stream, done_event, 0);  // copy_stream stalls until compute finishes
 ```
 
-### 5.3 Double-buffering pattern
+### 6.3 Double-buffering pattern
 
 Overlapping H2D transfer of chunk $i+1$ with computation on chunk $i$:
 
@@ -425,7 +572,7 @@ for (int chunk = 0; chunk < n_chunks; chunk++) {
 
 Requirements for overlap: pinned host memory, GPU with at least 2 copy engines (standard on datacenter GPUs; some consumer GPUs have only 1).
 
-### 5.4 CUDA graphs
+### 6.4 CUDA graphs
 
 For kernels launched in a tight loop (decode inference, small-batch training), per-launch overhead is ~5–10 $\mu$s. CUDA graphs capture the operation DAG once, then replay it:
 
@@ -452,9 +599,9 @@ For variable batch sizes (common in LLM decode), re-capturing the graph per step
 
 ---
 
-## 6. Memory Access Patterns
+## 7. Memory Access Patterns
 
-### 6.1 Coalescing
+### 7.1 Coalescing
 
 A warp's 32 threads issue a single load instruction. If the 32 addresses are consecutive 4-byte words aligned to a 128-byte segment, the hardware satisfies the load in **one memory transaction**. Any deviation requires additional transactions.
 
@@ -471,7 +618,7 @@ $$
 \text{Effective BW} \;=\; \frac{\text{Peak BW}}{\text{Transactions per warp}}
 $$
 
-### 6.2 Array of Structures vs Structure of Arrays
+### 7.2 Array of Structures vs Structure of Arrays
 
 ```c
 // AoS: each thread reads one field of its struct — strided access
@@ -489,7 +636,7 @@ __global__ void good(Particles p) { float x = p.x[threadIdx.x]; }
 // Thread 0 reads x[0], thread 1 reads x[1], ..., contiguous => 1 transaction
 ```
 
-### 6.3 Shared memory bank conflicts
+### 7.3 Shared memory bank conflicts
 
 Shared memory is organized into 32 banks of 4-byte words. Bank $b$ holds addresses at offsets $b, b+128, b+256, \ldots$ bytes. The critical rule:
 
@@ -511,7 +658,7 @@ __shared__ float smem_padded[32][33];  // 33 columns breaks the stride-32 patter
 // smem_padded[k][threadIdx.x] is now conflict-free for all k
 ```
 
-### 6.4 Alignment and vector loads
+### 7.4 Alignment and vector loads
 
 `cudaMalloc` returns 256-byte-aligned pointers. For coalesced access, 128-byte alignment suffices. Vector types enforce alignment at the type level and improve bandwidth utilization:
 
@@ -526,9 +673,9 @@ For bandwidth-bound kernels, `float4` loads typically yield 20–30% speedup ove
 
 ---
 
-## 7. Atomic Operations
+## 8. Atomic Operations
 
-### 7.1 Available operations
+### 8.1 Available operations
 
 ```c
 atomicAdd(&counter, 1);          // int, unsigned, float; double on CC >= 6.0
@@ -540,7 +687,7 @@ atomicExch(&ptr, new_val);       // exchange: returns old value
 atomicAnd / atomicOr / atomicXor // bitwise operations
 ```
 
-### 7.2 Latency and contention
+### 8.2 Latency and contention
 
 | Target | Latency | Contention scaling |
 |---|---|---|
@@ -549,7 +696,7 @@ atomicAnd / atomicOr / atomicXor // bitwise operations
 
 Heavily contended atomics (many threads writing the same address) degrade throughput by up to 32x because each atomic serializes at the memory controller. For reduction patterns, reduce within shared memory first, then use a single atomic per block.
 
-### 7.3 Block-reduce-then-atomic pattern
+### 8.3 Block-reduce-then-atomic pattern
 
 ```c
 __global__ void reduce_sum(const float *input, float *output, int n) {
@@ -576,9 +723,9 @@ This pattern is the building block for all GPU reduction algorithms. The tree re
 
 ---
 
-## 8. Error Handling
+## 9. Error Handling
 
-### 8.1 The macro pattern
+### 9.1 The macro pattern
 
 CUDA errors from runtime API calls are returned as `cudaError_t` codes. Kernel launches return errors asynchronously. The standard pattern:
 
@@ -599,7 +746,7 @@ CUDA_CHECK(cudaGetLastError());        // launch-time errors (e.g., invalid conf
 CUDA_CHECK(cudaDeviceSynchronize());   // async runtime errors from kernel body
 ```
 
-### 8.2 Common errors and their meaning
+### 9.2 Common errors and their meaning
 
 | Error | Cause | Severity |
 |---|---|---|
@@ -613,9 +760,9 @@ CUDA_CHECK(cudaDeviceSynchronize());   // async runtime errors from kernel body
 
 ---
 
-## 9. Complete Matmul Kernel
+## 10. Complete Matmul Kernel
 
-### 9.1 Tiled matrix multiplication
+### 10.1 Tiled matrix multiplication
 
 This kernel illustrates shared memory tiling, block-level synchronization, and coalesced access. It is pedagogically complete but not production-quality — real matmul uses tensor cores, double buffering, and asynchronous copies (covered in [CUDA_Optimization](CUDA_Optimization.md)).
 
@@ -674,7 +821,7 @@ __global__ void matmul(const float * __restrict__ A,
 // matmul<<<grid, block>>>(d_A, d_B, d_C, M, N, K);
 ```
 
-### 9.2 Why this kernel is far from optimal
+### 10.2 Why this kernel is far from optimal
 
 | Optimization | Status in above kernel | Impact |
 |---|---|---|
@@ -1143,7 +1290,7 @@ flowchart TD
 | Register file/SM | 256 KB (65 536 $\times$ 32-bit) | Thread register budget = floor(65536 / resident_threads) |
 | Shared memory/SM (Hopper) | 228 KB | Default max per block: 48 KB; opt in to full 228 KB |
 | Constant memory total | 64 KB | Read-only, broadcast-optimized, cached per SM |
-| SMEM latency | 8–20 cycles | ~20x faster than global memory |
+| SMEM latency | 20–30 cycles | ~15x faster than global memory (Hopper) |
 | Global memory (HBM) latency | ~400 cycles | Why high occupancy and SMEM tiling matter |
 | PCIe Gen4 x16 pinned BW | ~27 GB/s | H2D transfer ceiling; pageable is ~6 GB/s |
 | PCIe Gen5 x16 pinned BW | ~55 GB/s | Next-gen transfer ceiling |
@@ -1151,6 +1298,8 @@ flowchart TD
 | NVLink 5 BW | 1.8 TB/s (bidirectional) | GPU-to-GPU on B200 |
 | Kernel launch overhead | ~5–10 $\mu$s | Why CUDA graphs exist for small kernels |
 | SMEM banks | 32 (4-byte interleaved) | Bank conflicts serialize at same-bank accesses |
+| Cluster size (SM90+) | 1–8 threadblocks | Group of blocks sharing DSMEM |
+| DSMEM bandwidth (cross-SM) | ~50 GB/s | Direct SM-to-SM within cluster, bypasses L2 |
 | Max grid dim x | $2^{31}-1$ blocks | Effectively unlimited for 1D grids |
 | Max grid dim y, z | 65535 blocks | Common trap for 2D/3D grids |
 
@@ -1240,6 +1389,7 @@ Likely causes: (a) the transpose has no data reuse beyond one tile, so it is fun
 - NVIDIA, *PTX ISA Reference* — the virtual ISA below CUDA C; essential for understanding `wgmma`, `cp.async`, and barrier semantics.
 - NVIDIA, *Nsight Compute Documentation* — profiling methodology for memory throughput, stall reasons, and roofline analysis.
 - Jia, Maggioni et al., *Dissecting the NVIDIA Hopper Architecture*, arXiv 2402.13499 (2024) — hardware context for Hopper-specific programming features.
+- NVIDIA, *Hopper Architecture Threadblock Clusters* — programming guide for clusters, DSMEM, and distributed barriers (SM90 feature documentation).
 - Harris, *CUDA Refresher: CUDA Programming Model*, NVIDIA Developer Blog — concise overview.
 
 ---

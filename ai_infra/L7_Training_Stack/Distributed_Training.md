@@ -674,9 +674,56 @@ For DeepSeek-V3: $4096 \times (8/256) \times 7168 \times 2 = 1.84$ MB per MoE la
 
 ---
 
-## 7. Framework comparison
+## 7. Framework updates (2025–2026)
 
-### 7.1 Feature matrix
+### 7.0.1 FSDP2 and torch.compile integration
+
+PyTorch 2.12 redesigned the FSDP2 compile path. The previous approach (which relied on hooks and `fullgraph` compilation) has been replaced with a dedicated **compile wrapping** mechanism. Key changes:
+
+- **No more hook-based sharding.** FSDP2 now uses a direct compile-aware wrapping strategy that avoids the overhead and composability issues of Python-level hooks. Parameter sharding, all-gather, and reduce-scatter are lowered directly into the compiled graph.
+- **`torch.accelerator.Graph` API.** This new API provides a unified CUDA Graph interface that composes cleanly with FSDP2. Instead of manually managing graph capture and replay, `torch.accelerator.Graph` handles warmup, capture, and replay as a single abstraction. It is aware of FSDP2's communication patterns and inserts graph breaks at the correct boundaries.
+- **Improved compile overlap.** Because the compile path is no longer mediated by hooks, the compiler has full visibility into communication operations and can overlap all-gather with compute at the graph level rather than the Python level. This improves MFU by 5–10% over the hook-based path.
+
+### 7.0.2 DeepSpeed v0.15
+
+DeepSpeed v0.15 (2025) introduced several production-grade features for large-scale training:
+
+| Feature | Description |
+|---|---|
+| **DeepNVMe GDS** | GPU Direct Storage integration for direct NVMe-to-GPU checkpoint transfer, bypassing CPU RAM. Reduces checkpoint write latency by 2–3x for models with terabyte-scale state. |
+| **Universal Checkpoint for ZeRO-3** | Portable checkpoint format that can be resharded across different parallelism configurations (TP, PP, DP degree changes) without loading the full model on a single node. Critical for elastic training. |
+| **fp8-fused GEMM kernels** | Fused FP8 matmul kernels with delayed scaling, matching Transformer Engine throughput within DeepSpeed's optimizer pipeline. |
+| **MoE top-k gate support (k > 2)** | Extended expert routing to support top-k with k > 2, enabling finer-grained expert selection for models like DeepSeek-V3 (top-8 routing). |
+| **Ulysses attention integration** | Integrated Ulysses-style sequence-parallel attention, allowing heads to be distributed across the DP dimension for long-context training. |
+
+### 7.0.3 Megatron Core 0.15–0.17
+
+NVIDIA's Megatron-Core (the library layer beneath Megatron-LM) received major updates in versions 0.15 through 0.17:
+
+**MoE optimizations (0.15–0.17):**
+- **Expert Parallel A2A overlap:** All-to-all dispatch/combine for expert parallelism is overlapped with attention and MLP compute, hiding communication latency. See [Parallelism_Strategies](Parallelism_Strategies.md) Section 4.5.
+- **HybridEP:** Combines tensor parallelism (TP) and expert parallelism (EP) so experts are distributed across a hybrid group, improving GPU utilization for models with many small experts. See [Parallelism_Strategies](Parallelism_Strategies.md) Section 4.5.
+- **NVFP4 quantization for MoE:** 4-bit floating-point weight storage for MoE expert parameters during training, reducing memory footprint with minimal quality impact.
+- **Router fusion:** Fuses the expert routing computation with the preceding layer, eliminating a kernel launch and reducing latency per MoE layer.
+- **LatentMoE:** Projects input to a lower-dimensional latent space before routing to experts, reducing expert computation cost. See [Training_Optimization](Training_Optimization.md).
+
+**Multi-Token Prediction (MTP):**
+- Megatron-Core 0.15+ supports predicting multiple future tokens simultaneously during training, improving the training signal per forward pass. See [Training_Optimization](Training_Optimization.md).
+
+**RL training infrastructure (0.16–0.17):**
+- **GRPO functional tests:** Production-grade GRPO support with importance sampling and sequence packing for RL fine-tuning of reasoning models.
+- **Importance sampling:** Correctly weights samples from old policies during PPO/GRPO updates, improving sample efficiency.
+- **Sequence packing:** Packs multiple short sequences into a single training example to maximize GPU utilization during RL rollouts.
+
+**Other:**
+- **FlashAttention-4 backend:** Integration with FlashAttention-4 for improved attention throughput on Blackwell GPUs.
+- **Megatron-FSDP integration:** Hybrid mode that uses Megatron-Core's TP/PP implementation with FSDP's ZeRO-3 sharding, combining the strengths of both frameworks.
+
+---
+
+## 8. Framework comparison
+
+### 8.1 Feature matrix
 
 | Feature | FSDP (PyTorch) | DeepSpeed | Megatron-LM |
 |---|---|---|---|
@@ -687,13 +734,18 @@ For DeepSeek-V3: $4096 \times (8/256) \times 7168 \times 2 = 1.84$ MB per MoE la
 | Expert parallelism | Via DTensor + MoE APIs | Yes (DeepSpeed-MoE) | Yes (Megatron-Core MoE) |
 | Activation recomputation | Yes (checkpoint_wrapper) | Yes (activation_checkpointing) | Yes (selective, per-layer) |
 | Async checkpointing | Yes (DCP — distributed checkpoint) | Yes (DeepSpeed checkpoint) | Manual / external |
-| Offload to CPU/NVMe | No (GPU-only) | Yes (ZeRO-Offload, ZeRO-Infinity) | No |
+| Offload to CPU/NVMe | No (GPU-only) | Yes (ZeRO-Offload, ZeRO-Infinity, DeepNVMe GDS) | No |
 | Mixed precision | Native (AMP) | Native (AMP, BF16, FP8 via TE) | Via Transformer Engine |
+| CUDA Graph integration | torch.accelerator.Graph (FSDP2) | Limited | Limited |
+| MoE top-k (k > 2) | Via DTensor | Yes (v0.15+) | Yes (Megatron-Core 0.16+) |
+| RL training (GRPO/PPO) | Via external frameworks | Via external frameworks | Yes (Megatron-Core 0.16+: importance sampling, sequence packing) |
+| FlashAttention-4 | Via external library | Via external library | Yes (Megatron-Core 0.17+) |
+| Universal / portable checkpoint | Yes (DCP resharding) | Yes (Universal Checkpoint v0.15) | Manual |
 | Ecosystem integration | torch.compile, TorchDynamo | HF Accelerate, Deepspeed-MoE | NVIDIA NeMo, Megatron-Core |
 | Open source | Yes (PyTorch repo) | Yes (Microsoft) | Yes (NVIDIA) |
 | Production users | Meta (Llama), Lightning | Microsoft, academic labs | NVIDIA, MosaicML, Cohere |
 
-### 7.2 Choosing a framework
+### 8.2 Choosing a framework
 
 ```mermaid
 flowchart TD
@@ -714,7 +766,7 @@ flowchart TD
 3. **Add PP when the model exceeds one node's memory even with TP.** Each PP stage holds a subset of layers; the pipeline bubble overhead is acceptable when $M \gg P$ (many microbatches per pipeline).
 4. **Use DeepSpeed for CPU offloading** when GPU memory is scarce and CPU RAM is abundant (e.g., academic clusters with older GPUs).
 
-### 7.3 Communication volume comparison
+### 8.3 Communication volume comparison
 
 For a single training step with a 70B model, $B \cdot S = 4096$ tokens per microbatch, $L = 80$ layers:
 
@@ -729,7 +781,7 @@ Note: FSDP total communication is higher than DDP's (two all-gathers + one reduc
 
 ---
 
-## 8. Cause / effect — from memory wall to distributed training
+## 9. Cause / effect — from memory wall to distributed training
 
 ```mermaid
 flowchart TD
@@ -760,7 +812,7 @@ flowchart TD
 
 ---
 
-## 9. Worked problem 5 — end-to-end layout design
+## 10. Worked problem 5 — end-to-end layout design
 
 **Problem.** Design the distributed training layout for a 405B dense model on 4,096 H100 GPUs (512 nodes of 8 GPUs each). Sequence length $S = 8192$, microbatch $B = 1$.
 
@@ -814,7 +866,7 @@ $$N_{\text{GPU}} = 8 \times 8 \times 64 = 4{,}096 \checkmark$$
 
 ---
 
-## 10. Key numbers
+## 11. Key numbers
 
 | Quantity | Value | Note |
 |---|---|---|
@@ -830,7 +882,7 @@ $$N_{\text{GPU}} = 8 \times 8 \times 64 = 4{,}096 \checkmark$$
 
 ---
 
-## 11. References
+## 12. References
 
 **Foundational**
 
@@ -844,6 +896,19 @@ $$N_{\text{GPU}} = 8 \times 8 \times 64 = 4{,}096 \checkmark$$
 - PyTorch Team, "Getting Started with Fully Sharded Data Parallel (FSDP)," 2023.
 - PyTorch Team, "PyTorch Distributed Checkpoint (DCP)," 2024.
 - Meta, "Llama 3 Model Card and Training Details," 2024.
+- PyTorch Team, "FSDP2 and torch.accelerator.Graph API," 2025–2026.
+
+**DeepSpeed**
+
+- Microsoft DeepSpeed Team, "DeepSpeed v0.15 Release Notes," 2025.
+- Microsoft DeepSpeed Team, "DeepNVMe GDS: GPU Direct Storage for Checkpointing," 2025.
+- Microsoft DeepSpeed Team, "Universal Checkpoint for ZeRO-3," 2025.
+
+**Megatron Core**
+
+- NVIDIA, "Megatron-Core 0.15–0.17 Release Notes," 2025.
+- NVIDIA, "Megatron-FSDP Integration," 2025.
+- NVIDIA, "FlashAttention-4 Backend in Megatron-Core," 2025–2026.
 
 **MoE training**
 

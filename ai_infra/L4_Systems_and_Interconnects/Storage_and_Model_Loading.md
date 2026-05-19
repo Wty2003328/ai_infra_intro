@@ -255,6 +255,151 @@ $$T_{cold\_start} = 0.15 + \frac{140}{12.5} = 0.15 + 11.2 = 11.35 \text{ s}$$
 
 This is the motivation for model pre-warming (loading models onto local NVMe before they're needed) and model caching (keeping recently-used models on local NVMe for fast re-loading).
 
+### 3.5 Asynchronous Checkpointing
+
+#### Problem: Synchronous Checkpointing Blocks Training
+
+Traditional (synchronous) checkpointing freezes model state, serializes tensors, and writes them to storage before the training loop resumes. For large models the I/O latency dominates:
+
+| Model | Checkpoint Size (weights + Adam) | Sync Checkpoint Time | Utilization Loss |
+|---|---|---|---|
+| 8B FP16 | ~96 GB | ~1.7 s (local NVMe) | ~0.3% at 10-min interval |
+| 70B FP16 | ~840 GB | ~15 s (local NVMe) | ~2.5% at 10-min interval |
+| 400B FP16 | ~4.8 TB | ~86 s (local NVMe) | ~12.5% at 10-min interval |
+
+At 400B scale, every checkpoint wastes over a minute of GPU time. In a 10,000-GPU cluster with MTBF ≈ 12 hours and Young's-optimal interval of ~15 minutes, synchronous checkpointing burns ~12.5% of all compute — tens of millions of dollars per training run.
+
+#### Process Fork (Copy-on-Write) Approach
+
+The core idea: **fork the training process** so that a child process handles the slow I/O while the parent continues training immediately.
+
+```
+Training Process (parent)
+    │
+    ├── step N complete
+    ├── fork()                          ← ~1-2 ms overhead
+    │       │
+    │       ├── Parent: resumes step N+1 immediately
+    │       │
+    │       └── Child (COW snapshot):
+    │               ├── GPU memory is COW-shared with parent
+    │               ├── Serializes state dict to CPU buffers
+    │               ├── Writes checkpoint to local NVMe / network storage
+    │               └── exits() when done
+    │
+    ├── step N+1, N+2, ...
+```
+
+**How copy-on-write works here**: After `fork()`, parent and child share the same physical memory pages (GPU memory mapped via `cudaMallocManaged` or similar unified-memory APIs, plus host-side state). The OS marks these pages as read-only. When the parent modifies a page during continued training, the kernel intercepts the write, allocates a fresh page, copies the original data, and lets the parent write to the new page. The child retains the unmodified snapshot.
+
+**Fork overhead**: the `fork()` system call itself costs ~1–2 ms (page table duplication). The COW pages consume extra memory only as the parent mutates them. During a typical checkpoint window of 30–60 s, the parent advances through a few training steps, modifying roughly 10–20% of model pages.
+
+**GPU memory snapshot**: NVIDIA's `cudaMemcpy` can be issued from the forked child to capture the exact GPU state at fork time. Because the fork inherits the CUDA context, the child can DMA GPU memory to host buffers without disrupting the parent. The key constraint is that the parent must not free or reallocate GPU buffers during the brief window between fork and the child's snapshot read. In practice, training frameworks insert a brief "quiesce" point (a few ms) where no GPU kernels are in flight, then fork, then resume.
+
+#### PyTorch Implementation
+
+PyTorch provides two complementary async-checkpoint pathways:
+
+**`torch.distributed.checkpoint` (DCP) async save**:
+
+```python
+import torch.distributed.checkpoint as dcp
+
+# Inside training loop, at checkpoint boundary:
+dcp.save(
+    state_dict={"model": model, "optimizer": optimizer, "step": step},
+    checkpoint_id="ckpt_step_1000",
+    async_save=True,       # returns immediately; writes in background thread
+)
+# Training resumes immediately; DCP handles serialization + I/O in a
+# background thread pool.  A later dcp.wait() or barrier confirms completion.
+```
+
+Key behavior:
+- `async_save=True` spawns a background thread that serializes each rank's state-dict shard and writes to the checkpoint path.
+- The caller must not modify the state dict until the async save completes. Internally, DCP copies tensors to CPU buffers before returning, decoupling the GPU from I/O.
+- For multi-rank training, DCP coordinates via a distributed barrier so that all ranks enter the save region together, ensuring a globally consistent checkpoint.
+
+**`torch.save` with background threads** (lower-level alternative):
+
+```python
+import torch
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=4)
+
+def async_torch_save(state_dict, path):
+    # Move tensors to CPU first (frees GPU memory for continued training)
+    cpu_state = {k: v.cpu().clone() for k, v in state_dict.items()}
+    # Write to disk in background thread
+    executor.submit(torch.save, cpu_state, path)
+
+# Usage — returns after CPU clone, not after disk write:
+async_torch_save(model.state_dict(), f"ckpt_{step}.pt")
+```
+
+Tradeoff: CPU clone is fast (~1–2 s for 140 GB at ~80 GB/s DDR5 bandwidth) but temporarily doubles memory usage (GPU + CPU copy). The fork approach avoids this clone at the cost of COW page faults during continued training.
+
+#### Distributed Coordination
+
+In distributed training, all ranks must checkpoint a mutually consistent global state. Two strategies:
+
+**Barrier-then-fork**: Before forking, all ranks execute a `torch.distributed.barrier()`. This ensures every rank has completed the same training step. After the barrier, each rank forks independently. The checkpoints are consistent because they all capture the same step.
+
+```
+Rank 0 ── step N ── barrier ── fork ── resume step N+1
+Rank 1 ── step N ── barrier ── fork ── resume step N+1
+Rank 2 ── step N ── barrier ── fork ── resume step N+1
+  ...
+```
+
+**Distributed Checkpoint Protocol (DCP) for sharded async saves**: DCP handles the coordination internally. Each rank saves its FSDP/ZeRO shard asynchronously. DCP writes a metadata file after all ranks confirm completion, ensuring the checkpoint directory is only marked "valid" when every shard is on disk. This prevents torn checkpoints (some ranks written, others not) from being loaded.
+
+#### Tradeoff: Extra Memory Overhead
+
+The copy-on-write mechanism introduces memory overhead proportional to the rate at which the parent modifies pages during the checkpoint window:
+
+$$M_{overhead} \approx f_{mutate} \times M_{model}$$
+
+where $f_{mutate}$ is the fraction of model pages modified during the write window. Typical values:
+
+| Phase | $f_{mutate}$ (over ~30 s) | Overhead for 70B model |
+|---|---|---|
+| Forward pass (weights read-only) | ~0% | ~0 GB |
+| Backward pass (gradients, optimizer step) | ~10–20% | ~14–28 GB |
+| Full train step (fwd + bwd + optim) | ~15–25% | ~21–35 GB |
+
+The overhead is ~10–20% of model size during the checkpoint window. This is acceptable on modern GPUs (B300 has 192 GB HBM; a 70B model uses ~140 GB, leaving ~52 GB headroom). For larger models where headroom is tighter, the checkpoint window must be kept short (fast local NVMe writes) to minimize $f_{mutate}$.
+
+#### Integration with Object Storage
+
+In production, checkpoints must be durably stored in object storage (S3, GCS) for disaster recovery and cross-region access. The async pipeline has two stages:
+
+```
+Stage 1: GPU → local NVMe (fast, ~seconds)
+Stage 2: local NVMe → S3/GCS (slow, ~tens of seconds to minutes)
+```
+
+```python
+# Stage 1: local async checkpoint (returns in ~1-2 s)
+dcp.save(state_dict, checkpoint_id="/local_nvme/ckpt_1000", async_save=True)
+
+# Stage 2: background upload to S3 (overlapped with training)
+def upload_to_s3(local_path, s3_uri):
+    # boto3 multipart upload, ~50 MB/s per stream
+    s3_client.upload_file(local_path, "my-bucket", s3_uri)
+
+executor.submit(upload_to_s3, "/local_nvme/ckpt_1000", "checkpoints/ckpt_1000")
+```
+
+This decouples checkpoint **frequency** (set by MTBF/Young's formula) from **network bandwidth** (set by S3 throughput). A cluster can checkpoint every 5 minutes locally but upload every 30 minutes to S3, with local NVMe acting as a write-through cache. If a node fails before the S3 upload completes, the checkpoint is lost — but other nodes' shards survive, and the training run can restart from the previous S3-durable checkpoint.
+
+**Bandwidth math for S3 upload**: A 6 TB checkpoint (1T model + Adam) uploaded over a 400 Gb/s link (50 GB/s):
+
+$$T_{S3\_upload} = \frac{6{,}000}{50} = 120 \text{ s} = 2 \text{ min}$$
+
+With S3 multipart upload (10 concurrent streams at 5 GB/s each): ~120 s. This is comfortably overlapped with a 15-minute training interval.
+
 ---
 
 ## 4. KV Cache Offload Tiers
@@ -343,6 +488,12 @@ flowchart TD
     M["MTBF ≈ 12 hours at 10k GPUs"] --> N["Checkpoint every 15 min"]
     N --> O["Young's formula: T_interval = sqrt(2 × T_ckpt × MTBF)"]
 
+    P["Sync checkpoint: 30-60 s for 70B"] --> Q["12.5% utilization loss at 400B scale"]
+    Q --> R["Async checkpoint: fork + COW snapshot"]
+    R --> S["1-2 ms fork overhead; parent resumes immediately"]
+    R --> T["10-20% memory overhead during checkpoint window"]
+    S --> U["Local NVMe write → background S3 upload"]
+
 ---
 
 ## 6. Numbers to memorize
@@ -364,6 +515,9 @@ flowchart TD
 | KV cache per token (70B) | ~4 MB/token | Drives memory tier architecture |
 | HBM ↔ DDR5 swap BW | ~50 GB/s via PCIe | Tier-0 to tier-1 KV offload |
 | NVLink P2P load (1.8 TB/s) | 78 ms for 140 GB | Warm-pool model distribution |
+| Fork overhead for async checkpoint | ~1–2 ms | vs 30–60 s sync checkpoint for 70B |
+| COW memory overhead during ckpt | ~10–20% of model size | Extra pages during checkpoint window |
+| S3 upload for 6 TB checkpoint | ~120 s over 400 Gb/s | Overlapped with training; decoupled from ckpt frequency |
 
 ---
 

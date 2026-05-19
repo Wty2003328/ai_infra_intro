@@ -346,7 +346,7 @@ flowchart TD
     classDef smart fill:#bbf7d0,stroke:#15803d,color:#000
 ```
 
-Savings: **31 of 32 alignment shifters deleted per block**. A barrel shifter for 24-bit FP32 alignment is ~200 NAND2; 31 of them × 32 blocks per SM × 144 SMs = millions of gates saved per die. This is the structural reason MXFP4 hardware fits on a single SM at all.
+Savings: **31 of 32 alignment shifters deleted per block**. A barrel shifter for 24-bit FP32 alignment is ~200 NAND2; 31 of them × 32 blocks per SM × 128 SMs = millions of gates saved per die. This is the structural reason MXFP4 hardware fits on a single SM at all.
 
 ### 6.3 Numerical implications
 

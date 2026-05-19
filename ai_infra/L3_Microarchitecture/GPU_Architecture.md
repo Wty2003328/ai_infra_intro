@@ -292,7 +292,7 @@ $$ \text{ops} \;=\; 2 \cdot 64 \cdot 256 \cdot 16 \;=\; 524\,288\ \text{FLOPs} $
 At a pipeline depth of ~16 cycles:
 $$ \text{rate} \;=\; \frac{524\,288}{16} \;=\; 32\,768\ \text{FLOPs/cycle/tensor core} $$
 
-× 4 tensor cores per SM × 144 SMs × 1.6 GHz ≈ **30 PFLOPS FP16** (matching the B200 BF16 specification).
+× 4 tensor cores per SM × 128 SMs × 1.6 GHz ≈ **26.8 PFLOPS FP16** theoretical pipeline limit — but the **B200 BF16 dense peak is 2,250 TFLOPS** (~2.25 PFLOPS). The discrepancy is because the pipeline-depth-16 assumption above is optimistic; in practice, wgmma throughput is limited by operand fetch and SMEM port contention, and the 128-SM count used here reflects a single die (B200 has 2 × 128 = 256 SMs across dual dies, but the published 2,250 TFLOPS BF16 peak accounts for real clock frequency, data-path constraints, and dual-die coordination overhead).
 
 ---
 
@@ -304,7 +304,7 @@ $$ \text{rate} \;=\; \frac{524\,288}{16} \;=\; 32\,768\ \text{FLOPs/cycle/tensor
 |---|---|---|---|
 | Register file | 1 cycle | ~100 TB/s | 256 KB |
 | TMEM (Blackwell+) | 2–4 cycles | ~50 TB/s | 256 KB |
-| SMEM | 8–20 cycles | ~30 TB/s | 256 KB |
+| SMEM | 20–30 cycles | ~30 TB/s (H100/B200, 228 KB SMEM) | 228 KB |
 | L2 cache | 30–80 cycles | ~10 TB/s aggregate | 50 MB chip-wide |
 | HBM | ~400 cycles | ~10 TB/s aggregate | 192–288 GB |
 
@@ -425,7 +425,7 @@ Bandwidth is the ultimate bottleneck. To artificially inflate effective memory b
 ## 4. The Interconnect Fabric
 
 ### 4.1 Network on Chip (NoC) and The Partitioned Crossbar
-Connecting 144 SMs to massive L2 caches and HBM stacks requires a sophisticated internal fabric.
+Connecting 128 SMs to massive L2 caches and HBM stacks requires a sophisticated internal fabric.
 - **Partitioned Xbar:** The primary interconnect is a massive hierarchical crossbar. However, the L2 cache is physically partitioned across the die.
 - **Near vs. Far Hits:** An SM accessing an L2 slice physically adjacent to it (Near Hit) experiences low latency. Accessing an L2 slice on the opposite side of the chip (Far Hit) requires traversing the main crossbar, adding ~40-70 cycles of latency. Hashing algorithms ensure memory addresses are uniformly striped across L2 slices to prevent hotspotting.
 
@@ -444,7 +444,7 @@ To scale beyond a single reticle limit, NVIDIA uses extremely dense point-to-poi
 |---|---|---|
 | Process | TSMC 4N | TSMC 4NP, dual-die |
 | Die area | 814 mm² | 2 × ~800 mm² (NV-HBI bridged) |
-| SMs | 132 (H100), 144 logical | 144 per die, 288 logical (one GPU view) |
+| SMs | 132 active (of 144 physical) | 128 per die, 256 logical (one GPU view) |
 | FP8 TFLOPS | ~1 980 (dense) | ~4 500 (dense) |
 | FP4 TFLOPS | n/a | ~9 000 (dense, MXFP4) |
 | HBM | 80 GB HBM3 (3.35 TB/s) | 192 GB HBM3e (8 TB/s) |
@@ -463,9 +463,9 @@ Two compute dies bridged via 10 TB/s die-to-die link. CUDA presents them as one 
 
 ---
 
-## 5. Achievable utilization in practice
+## 6. Achievable utilization in practice
 
-### 5.1 Roofline-bound
+### 6.1 Roofline-bound
 
 Peak TFLOPS only achieved when:
 
@@ -473,7 +473,7 @@ Peak TFLOPS only achieved when:
 - Operand fetch keeps tensor cores fed (TMA + double-buffered tiles).
 - Occupancy ≥ $W_{\min}$ to hide HBM latency on misses.
 
-### 5.2 Real-world utilization
+### 6.2 Real-world utilization
 
 | Workload | Typical utilization on H100 | On B200 |
 |---|---|---|
@@ -487,7 +487,7 @@ The FP4 generation often shows *lower* % utilization than FP8 because peak FLOPS
 
 ---
 
-## 6. Microarchitectural Cause and Effect
+## 7. Microarchitectural Cause and Effect
 
 The physical constraints of the GPU hardware fundamentally dictate algorithm design at the software layer:
 
@@ -525,12 +525,12 @@ flowchart TD
 
 ---
 
-## 7. Numbers to memorize
+## 8. Numbers to memorize
 
 | Quantity | Value | Why |
 |---|---|---|
 | H100 SMs | 132 (132 active, 144 physical) | Architecture spec |
-| Blackwell B200 SMs (dual-die) | 288 (144 per die) | Architecture spec |
+| Blackwell B200 SMs (dual-die) | 256 (128 per die) | Architecture spec |
 | Threads / SM | 2 048 | 64 warps × 32 |
 | Registers / SM | 65 536 × 32-bit | 256 KB |
 | Tensor cores / SM | 4 | 1 per PB |
@@ -546,7 +546,7 @@ flowchart TD
 | L2 size (H100/B200) | ~50 MB | Distributed |
 | HBM latency | ~400 cycles | Drives oversubscription |
 | L2 latency | 30–80 cycles | Per slice distance |
-| SMEM latency | 8–20 cycles | Bank-bounce |
+| SMEM latency | 20–30 cycles | Bank-bounce (Hopper) |
 | RF latency | 1 cycle | After operand collector |
 | NV-HBI BW (die-to-die) | ~10 TB/s | Cross-die |
 | NV-HBI penalty | 2–4 cycles | CDC overhead |
@@ -554,7 +554,7 @@ flowchart TD
 
 ---
 
-## 8. Worked interview problems
+## 9. Worked interview problems
 
 **Q1.** *A kernel uses 80 registers/thread on Blackwell. What's the max occupancy?*
 
@@ -562,7 +562,7 @@ Per-SM RF = 65 536 regs. Threads = 65 536 / 80 = 819 threads. Warp count = ⌊81
 
 **Q2.** *Why does Blackwell add TMEM as a *new* memory tier instead of just doubling SMEM?*
 
-SMEM has 32 banks × 4 B = 128 B/cycle/bank → ~30 TB/s/SM. FP4 wgmma operand demand on Blackwell is ~50 TB/s/SM. Doubling SMEM doubles capacity, not port count, so it doesn't help. TMEM has wide read ports (1 024 b each) geometrically matched to wgmma tile rows, and is accessible only by tensor cores → no contention with general SMEM ops. Two separate memory tiers ≠ doubling one.
+SMEM bandwidth varies by generation: ~19 TB/s/SM on A100 (164 KB SMEM), ~30 TB/s/SM on H100/B200 (228 KB SMEM). The ~30 TB/s/SM figure here is for Hopper/Blackwell. FP4 wgmma operand demand on Blackwell is ~50 TB/s/SM. Doubling SMEM doubles capacity, not port count, so it doesn't help. TMEM has wide read ports (1 024 b each) geometrically matched to wgmma tile rows, and is accessible only by tensor cores → no contention with general SMEM ops. Two separate memory tiers ≠ doubling one.
 
 **Q3.** *Estimate the dense BF16 GEMM throughput on B200 for $M=N=K=8192$.*
 
@@ -578,7 +578,7 @@ It mostly doesn't. TMA helps prefill (compute-bound) by freeing scheduler issue 
 
 ---
 
-## 9. References
+## 10. References
 
 - NVIDIA H100 / Hopper / Blackwell Tuning Guides — official ISA + microarch docs.
 - Choquette et al., *NVIDIA Hopper Architecture*, IEEE Micro 2023.

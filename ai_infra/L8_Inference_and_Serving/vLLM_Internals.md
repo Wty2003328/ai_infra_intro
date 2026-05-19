@@ -1,6 +1,6 @@
 # vLLM Internals — Engine Architecture, Scheduler, and Block Manager
 
-> **Layer:** L8. **Prerequisites:** [Inference_Frameworks](Inference_Frameworks.md), [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md). **Hands off to:** [Production_Architecture](Production_Architecture.md), [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md).
+> **Version covered:** v0.21.0 (May 2025). **Layer:** L8. **Prerequisites:** [Inference_Frameworks](Inference_Frameworks.md), [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md). **Hands off to:** [Production_Architecture](Production_Architecture.md), [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md).
 
 ---
 
@@ -8,7 +8,7 @@
 
 vLLM is the most studied open-source LLM inference engine and the reference implementation for PagedAttention, continuous batching, and automatic prefix caching. Understanding its internals is a forcing function for understanding every other serving system: SGLang, TensorRT-LLM, Dynamo, and llm-d all implement variants of the same scheduler--block-manager--worker decomposition.
 
-This page is a code-level architectural tour. It traces a single request from HTTP arrival to streamed output, dissects the V1 engine's process topology, derives the scheduler's per-step decision loop, explains the block manager's virtual-memory-inspired allocation and copy-on-write prefix sharing, and maps every component back to its source module. Every design choice is grounded in the scheduling theory from [Batching_and_Scheduling](Batching_and_Scheduling.md) and the memory math from [KV_Cache](KV_Cache.md).
+This page is a code-level architectural tour. It traces a single request from HTTP arrival to streamed output, dissects the V1 engine's process topology, derives the scheduler's per-step decision loop, explains the block manager's virtual-memory-inspired allocation and copy-on-write prefix sharing, and maps every component back to its source module. v0.21.0 brings a redesigned ModelRunner (V2), a compiler-style IR layer, heterogeneous multi-tier memory, 2-bit KV compression, FlashAttention-4 for MLA, bi-directional disaggregated KV transfers, NIXL/Mooncake connectors, thinking budgets for reasoning models, and adaptive speculative decoding V2. Every design choice is grounded in the scheduling theory from [Batching_and_Scheduling](Batching_and_Scheduling.md) and the memory math from [KV_Cache](KV_Cache.md).
 
 ### Invariants
 
@@ -22,7 +22,8 @@ This page is a code-level architectural tour. It traces a single request from HT
 | $n_l$ | Transformer layers | 32--126 |
 | $n_{\text{kv}}$ | KV heads per layer | 1--128 |
 | $d_h$ | Head dimension | 64--256 |
-| $b$ | Bytes per KV element | 1 (FP8) or 2 (FP16/BF16) |
+| $b$ | Bytes per KV element | 0.25 (TQ2), 1 (FP8), or 2 (FP16/BF16) |
+| $T_{\text{budget}}$ | Thinking token budget for reasoning models | 0--32768 |
 
 ---
 
@@ -240,6 +241,45 @@ Victim selection among equal-priority candidates: largest KV footprint first (ma
 
 V1 uses FCFS (first-come-first-served) as the default admission policy. Priority can be set per-request via the API, mapping to integer priority levels. Within the same priority level, FCFS applies. The scheduler does not implement SRJF or EDF natively; these are left to the routing layer above (see [Production_Architecture](Production_Architecture.md)).
 
+### 3.6 Thinking budget (v0.21.0)
+
+Reasoning models (e.g., DeepSeek-R1, o-series) interleave visible "thinking" tokens with the final answer. A single request can consume tens of thousands of thinking tokens before producing any user-visible output, monopolizing KV blocks and decode budget.
+
+The thinking budget ($T_{\text{budget}}$) is a new per-request scheduler parameter that caps the number of thinking tokens a request may generate:
+
+```python
+# API parameter
+"thinking_budget": 8192  # max thinking tokens before forced transition
+```
+
+The scheduler enforces this by tracking a per-sequence thinking token counter. When the counter reaches $T_{\text{budget}}$, the scheduler injects a special control token that signals the model to exit its thinking loop and begin generating the answer. This mechanism:
+
+- **Bounds KV consumption**: A request with `thinking_budget=8192` uses at most $(S_{\text{prompt}} + 8192 + S_{\text{answer}}) / B_s$ blocks, making capacity planning predictable.
+- **Prevents starvation**: Without the budget, a burst of reasoning requests can exhaust the KV pool, forcing preemption of shorter non-reasoning requests.
+- **Enables SLO differentiation**: Different API tiers can offer different thinking budgets (e.g., 2048 for free tier, 32768 for premium).
+
+The budget applies only to thinking tokens (identified by special token IDs that demarcate the thinking region). Tokens in the answer region are governed by `max_tokens` as before.
+
+### 3.7 Adaptive speculative decoding V2 (v0.21.0)
+
+Speculative decoding (see [Speculative_Decoding](Speculative_Decoding.md)) in vLLM uses a draft model or self-speculation to propose multiple candidate tokens per step, then verifies them in a single forward pass. The original implementation used static draft length and temperature parameters.
+
+V2 integrates adaptive spec decoding directly into the scheduler's per-step loop:
+
+**Dynamic draft length adjustment.** The scheduler tracks the per-sequence acceptance rate $\alpha_i$ (fraction of draft tokens accepted by the verifier over a sliding window of 32 steps). The draft length for sequence $i$ at step $t$ is:
+
+$$L_i^{(t)} = \max\!\Big(1,\;\min\!\big(L_{\max},\;\lfloor \bar{\alpha}_i \times L_{\max} \rfloor\big)\Big)$$
+
+where $L_{\max}$ is the configured maximum draft length (default 5) and $\bar{\alpha}_i$ is the exponentially-weighted moving average of the acceptance rate. Sequences with consistently high acceptance rates get longer drafts (up to $L_{\max}$); sequences with low acceptance revert to non-speculative decode ($L = 1$).
+
+**Scheduler integration.** The draft tokens are accounted for in the token budget:
+
+$$\sum_{\text{prefill chunks}} C_i + \sum_{\text{decodes}} L_i^{(t)} \le B_{\text{tok}}$$
+
+Each speculative sequence consumes $L_i^{(t)}$ tokens from the budget rather than 1. This means the scheduler dynamically adjusts how many speculative sequences it can batch based on their acceptance rates. A batch of sequences with high acceptance rates ($\alpha \approx 0.9$, $L \approx 4$) consumes more budget per sequence but yields 3--4$\times$ the tokens per step.
+
+**Draft model switching.** For multi-tenant serving, the scheduler can switch between different draft models based on the active request's source model family. The draft model is loaded in a separate weight buffer and swapped via CUDA stream-ordered memory operations with minimal overhead (~2 ms swap time for a 1B draft model on H100).
+
 ---
 
 ## 4. The Worker and Model Runner
@@ -333,6 +373,42 @@ The sampler applies per-sequence parameters entirely on GPU:
 
 All stages operate on batched tensors with no host round-trip. The sampler returns one token ID per sequence.
 
+### 4.4 ModelRunner V2 (v0.21.0)
+
+The original ModelRunner was a monolithic `execute()` method that interleaved Python orchestration with CUDA kernel dispatch. Every layer's Python call overhead, dynamic-shape tensor construction, and conditional branching was paid on every forward pass. At high batch sizes on small models (where step time can be under 10 ms), this Python overhead consumed 15--30% of total step time.
+
+The V2 redesign decomposes execution into a **prepare-compile-execute** pipeline:
+
+1. **Prepare phase** (`prepare_inputs`): Runs in the EngineCore process. Builds a `ModelInput` proto containing all scheduling decisions (block tables, slot mappings, sequence metadata) in a flat, GPU-friendly layout. No Python logic remains in the Worker for this stage.
+
+2. **Compile phase** (`compile_model`): Runs once at startup (and on architecture change). Traces the model's forward pass through the new vLLM IR layer (Section 17) and produces an optimized execution plan. The plan records the exact sequence of kernel launches, memory addresses for intermediate tensors, and fused-operator boundaries. This is analogous to `torch.compile` but tailored for the inference serving loop -- it bakes in the PagedAttention dispatch, quantization dequantization, and all-reduce placement.
+
+3. **Execute phase** (`execute_model`): The hot path. The Worker receives a pre-built `ModelInput`, feeds it to the compiled execution plan, and runs a sequence of pre-scheduled CUDA graph segments or eager kernel launches. Python overhead drops to a single function call per step rather than $2 n_l$ Python-to-C++ transitions.
+
+**Key architectural change:** The V2 ModelRunner no longer owns scheduling logic or dynamic shape computation. Those responsibilities moved to the EngineCore's prepare phase. The Worker is now a pure execution engine -- receive plan, run kernels, return samples.
+
+```mermaid
+flowchart LR
+    subgraph "EngineCore Process"
+        PREP["prepare_inputs()<br/>flat ModelInput proto<br/>block tables, slot maps,<br/>seq metadata"]
+    end
+    subgraph "Worker Process (V2)"
+        COMPILE["compile_model()<br/>one-time trace<br/>vLLM IR → execution plan"] --> EXEC["execute_model()<br/>run compiled plan<br/>kernel launches only"]
+    end
+    PREP -->|"serialized ModelInput"| EXEC
+    EXEC -->|"SampleResult"| PREP
+
+    style PREP fill:#dbeafe,stroke:#1e40af,color:#000
+    style COMPILE fill:#fef3c7,stroke:#92400e,color:#000
+    style EXEC fill:#d1fae5,stroke:#065f46,color:#000
+```
+
+**Performance impact:** For Llama-3-8B on a single H100, V2 reduces per-step Python overhead from ~3 ms to ~0.4 ms. At batch size 256, this is a 15--20% throughput improvement. The gains are most pronounced for small models and short decode steps where Python overhead was a larger fraction of total step time.
+
+### 4.5 Execution plan caching
+
+The compiled execution plan is keyed on `(model_architecture, TP_size, PP_rank, kv_cache_dtype, block_size)`. When these parameters do not change across engine restarts, the plan can be serialized and reloaded, eliminating the one-time compile cost (typically 10--60 seconds for large models). This is particularly valuable in Kubernetes environments where pods restart frequently.
+
 ---
 
 ## 5. The Block Manager
@@ -386,6 +462,128 @@ $$\text{physical\_block} = T[\text{logical\_block}]$$
 $$\text{slot} = \text{physical\_block} \times B_s + \text{offset}$$
 
 The GPU kernel uses `slot_mapping` as a scatter index: `kv_cache[slot] = new_kv_value`. This is a single integer indirection per token -- negligible cost compared to the $d_h$-dimensional write.
+
+### 5.5 Heterogeneous Memory Architecture -- HMA (v0.21.0)
+
+The original block manager operated on a single memory tier: GPU HBM. CPU DRAM existed only as a swap target for preempted sequences (Section 3.4). HMA extends the block manager to treat GPU HBM, CPU DRAM, and NVMe SSD as a **unified three-tier memory pool**, with PagedAttention spanning all tiers transparently.
+
+#### Tier topology
+
+```mermaid
+flowchart TB
+    subgraph "Tier 0 — GPU HBM (hot)"
+        HBM["Physical KV blocks<br/>latency: ~0 ns (on-chip)<br/>bandwidth: 3.35 TB/s (H100)<br/>capacity: ~60 GB"]
+    end
+    subgraph "Tier 1 — CPU DRAM (warm)"
+        DRAM["Host KV blocks<br/>latency: ~500 ns (HBM→DRAM)<br/>bandwidth: 64 GB/s (PCIe Gen5)<br/>capacity: 256--512 GB"]
+    end
+    subgraph "Tier 2 — NVMe SSD (cold)"
+        SSD["SSD KV blocks<br/>latency: ~10 μs (DRAM→SSD)<br/>bandwidth: 7--14 GB/s (NVMe)<br/>capacity: 1--8 TB"]
+    end
+    HBM <-->|"PCIe Gen5<br/>async DMA"| DRAM
+    DRAM <-->|"NVMe DMA<br/>via NIXL/Mooncake"| SSD
+
+    style HBM fill:#d1fae5,stroke:#065f46,color:#000
+    style DRAM fill:#fef3c7,stroke:#92400e,color:#000
+    style SSD fill:#fecaca,stroke:#991b1b,color:#000
+```
+
+#### Tiered block tables
+
+Each logical block can reside in any tier. The block table is extended with a tier tag:
+
+```python
+# Block table entry: (physical_block_id, tier)
+block_table[seq_id] = [(42, "hbm"), (107, "hbm"), (0, "dram"), (3, "dram"), ...]
+```
+
+The PagedAttention kernel is tier-aware: it reads HBM blocks directly, issues asynchronous DMA prefetch for DRAM blocks (copying them into a temporary HBM staging buffer before the attention kernel launches), and signals the scheduler when all required blocks are in HBM. NVMe blocks are never read directly by the GPU -- they must be promoted to DRAM first, then to HBM.
+
+#### Tiered eviction policy
+
+When the HBM free list is exhausted, the block manager evicts blocks to the next tier:
+
+1. **HBM eviction**: Select the least-recently-accessed unreferenced block. If DRAM has capacity, DMA the block's KV data to a DRAM physical block and update the tier tag. If DRAM is full, evict a DRAM block to NVMe first.
+
+2. **DRAM eviction**: Select the least-recently-prefetched block. DMA to NVMe, update the tier tag to `"ssd"`.
+
+3. **Promotion on access**: When a sequence's attention step requires a block that is in DRAM or SSD, the scheduler schedules an asynchronous DMA promotion before the forward pass. The sequence waits (or is preempted) until the block arrives in HBM.
+
+The eviction order respects prefix cache reference counts: shared prefix blocks are never evicted from HBM while any active sequence references them. Private decode blocks (refcount = 1, no prefix hash) are evicted first.
+
+#### Memory math with HMA
+
+Effective KV capacity with HMA becomes:
+
+$$N_{\text{blk}}^{\text{eff}} = N_{\text{blk}}^{\text{HBM}} + N_{\text{blk}}^{\text{DRAM}} + N_{\text{blk}}^{\text{SSD}}$$
+
+For a 2$\times$H100 system with 512 GB CPU DRAM and 4 TB NVMe:
+
+| Tier | Capacity for KV | Blocks (Llama-3-70B, FP16, 5.24 MB/block) |
+|------|----------------|-------------------------------------------|
+| HBM | ~60 GB | ~11,440 |
+| DRAM | ~400 GB | ~76,300 |
+| SSD | ~2 TB | ~381,000 |
+| **Total** | **~2.46 TB** | **~468,740** |
+
+This is a 40$\times$ increase over HBM-only capacity, enabling the scheduler to keep far more concurrent sequences resident. The tradeoff is that sequences with blocks in SSD or DRAM incur additional latency for block promotion, increasing TTFT and occasionally TPOT when promotion is needed mid-decode.
+
+### 5.6 TurboQuant 2-bit KV Compression (v0.21.0)
+
+The block manager now supports 2-bit quantized KV cache blocks alongside the existing FP16 and FP8 formats. TurboQuant (TQ2) applies vector quantization to compress each $d_h$-dimensional KV vector from 16 bits (FP16) or 8 bits (FP8) to 2 bits per element -- a **4$\times$ capacity increase over FP16** and a **2$\times$ increase over FP8**.
+
+#### Quantization scheme
+
+TurboQuant uses a per-block codebook approach:
+
+- Each block of $B_s = 16$ tokens has a per-head, per-layer codebook of $2^2 = 4$ centroids.
+- The codebook is computed online when KV vectors are written to the block. For each $d_h$-dimensional vector, the 4 centroids are found via mini-k-means (4 iterations) on the $B_s$ vectors in the block.
+- Each element is encoded as a 2-bit index into the codebook. The codebook itself (4 $\times$ $d_h$ $\times$ 2 bytes = $8 d_h$ bytes per head per block) is stored alongside the compressed data.
+
+#### Physical layout
+
+The compressed KV cache tensor per layer has shape:
+
+$$\text{tq2\_cache\_shape} = (N_{\text{blk}},\; 2,\; B_s,\; n_{\text{kv}} / \text{TP},\; d_h / 4)$$
+
+where $d_h / 4$ reflects the 4$\times$ compression (each original $d_h$-element FP16 vector becomes $d_h / 4$ 2-bit indices, packed into uint8). The codebook is stored in a separate tensor:
+
+$$\text{codebook\_shape} = (N_{\text{blk}},\; 2,\; 4,\; n_{\text{kv}} / \text{TP},\; d_h) \quad\text{(FP16 centroids)}$$
+
+#### Integration with PagedAttention
+
+The PagedAttention kernel is extended with a TQ2 dequantization path:
+
+1. Load the 2-bit packed indices from the compressed cache via the block table.
+2. Load the per-block codebook (4 centroids per head).
+3. Dequantize: gather from the codebook using the 2-bit indices to reconstruct approximate FP16 KV vectors.
+4. Proceed with standard attention computation on the dequantized vectors.
+
+The dequantization is fused into the attention kernel -- the reconstructed vectors never materialize in full in HBM. This fusion is critical: without it, the dequantized data would exceed the original FP16 memory, negating the compression benefit.
+
+#### Quality and capacity tradeoff
+
+| KV dtype | Bits/elem | Relative capacity | Perplexity degradation (Llama-3-70B) |
+|----------|-----------|-------------------|--------------------------------------|
+| FP16 (baseline) | 16 | 1.0$\times$ | 0 |
+| FP8 (E4M3) | 8 | 2.0$\times$ | < 0.1% |
+| TQ2 (TurboQuant) | 2 | 4.0$\times$ (net ~3.2$\times$ with codebook) | 0.5--1.2% |
+
+The codebook overhead reduces the raw 8$\times$ compression (16 bit to 2 bit) to a net ~3.2$\times$ capacity gain after accounting for codebook storage. The quality impact is acceptable for most production serving workloads; for math and code tasks where precision matters, FP8 or FP16 remains preferable.
+
+#### Mixed-dtype block tables
+
+The block manager allows per-block KV dtype, enabling mixed precision:
+
+```python
+block_table[seq_id] = [
+    (42, "hbm", "fp16"),    # recent decode blocks: full precision
+    (107, "hbm", "tq2"),    # older decode blocks: compressed
+    (0, "dram", "tq2"),     # offloaded blocks: compressed
+]
+```
+
+The scheduler can configure a policy such as "compress to TQ2 after $N_{\text{keep\_fp16}}$ blocks from the tail," maintaining full precision for recent context while compressing older KV data. This is analogous to the "sliding window attention with full KV compression" pattern.
 
 ---
 
@@ -561,11 +759,127 @@ Prefill processes multiple query tokens per sequence. vLLM uses FlashAttention-s
 | `paged_attention_v1` | Short-to-medium decode ($S \le 4096$) |
 | `paged_attention_v2` | Long-sequence decode ($S > 4096$), split-K |
 | FlashAttention v3 (Hopper) | FA-native paged attention on H100+ |
+| FlashAttention v4 (Hopper) | MLA backend for DeepSeek-V3/V4; replaces FA3 on MLA paths |
 | Quantized variants | FP8 KV cache, INT8 KV cache |
+| TQ2 dequant variant | 2-bit TurboQuant KV cache with fused dequant+attention |
+
+### 8.5 FlashAttention 4 as MLA Backend (v0.21.0)
+
+Multi-head Latent Attention (MLA), introduced in DeepSeek-V2 and used in DeepSeek-V3/V4, compresses the KV cache by projecting $K$ and $V$ through a low-rank bottleneck into a compressed latent vector of dimension $d_{\text{latent}} \ll d_h \times n_{\text{kv}}$. This fundamentally changes the attention kernel's access pattern: the cached "KV" is a single latent vector per token, not separate $K$ and $V$ matrices.
+
+**Why FA4 replaces FA3 for MLA.** FlashAttention v3 was designed for standard multi-head and grouped-query attention where $K$ and $V$ are separate tensors of shape $(S, n_{\text{kv}}, d_h)$. MLA requires:
+
+1. **Latent-to-KV upprojection** fused with attention: the compressed latent $c \in \mathbb{R}^{d_{\text{latent}}}$ is projected to $K$ and $V$ on-the-fly inside the attention kernel.
+2. **Asymmetric head count**: MLA uses $n_q$ query heads but a single latent per token, requiring a broadcast-style attention pattern where all query heads share the same KV source.
+3. **Absorbed RoPE**: position-dependent projections are absorbed into the upprojection, requiring a modified RoPE application point.
+
+FlashAttention v4 introduces a dedicated MLA kernel path that:
+
+- Loads the compressed latent cache ($d_{\text{latent}} = 512$ for DeepSeek-V3, vs $d_h \times n_{\text{kv}} = 128 \times 128 = 16384$ for standard MHA) -- a **32$\times$ reduction** in cache data movement per attention step.
+- Performs the upprojection $c \to K, V$ inside the SRAM tile, avoiding intermediate writes to HBM.
+- Applies absorbed RoPE during the upprojection.
+- Computes paged attention over the projected $K$, $V$ using the standard block-table indirection.
+
+**Architectural implication for DeepSeek-V3/V4 serving.** With FA4, DeepSeek-V3's effective KV cache per token drops to $2 \times d_{\text{latent}} \times b = 2 \times 512 \times 2 = 2$ KB (FP16) or 1 KB (FP8), compared to $2 \times n_{\text{kv}} \times d_h \times b = 2 \times 128 \times 128 \times 2 = 64$ KB for a standard MHA model with equivalent head configuration. This 32$\times$ cache reduction means that:
+
+- A single H100 can serve DeepSeek-V3 (671B, 37B active per MoE expert) with KV cache for hundreds of concurrent sequences.
+- The PagedAttention block manager's effective capacity (in sequences) increases by ~32$\times$ compared to a hypothetical non-MLA DeepSeek-V3.
+- The bottleneck shifts from KV memory to compute (MoE expert routing and MLP), changing the scheduling optimization target.
 
 ---
 
-## 9. Cause and Effect: Request Flow
+## 9. Disaggregated Serving (v0.21.0 Enhancements)
+
+Disaggregated serving separates prefill and decode onto different GPU pools (see [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md) for the full design space). vLLM v0.21.0 introduces three major enhancements to the disaggregated path: bi-directional KV transfers, NIXL native transport, and Mooncake SSD-offload connector.
+
+### 9.1 Bi-directional KV transfers
+
+Previous disaggregated implementations supported only unidirectional KV movement: prefill instance computes KV, transfers to decode instance. v0.21.0 adds **bi-directional** transfer, enabling:
+
+1. **Prefill to decode (existing)**: KV computed during prefill is serialized and sent to the decode pool. This remains the primary flow for new requests.
+
+2. **Decode to prefill (new)**: KV from an active decode instance can be migrated back to a prefill instance. This enables:
+   - **Context extension**: A request that needs more context (e.g., tool-use augmentation, RAG document injection) has its existing KV migrated from the decode pool to a prefill pool, new tokens are prefilled and appended, and the combined KV is migrated back.
+   - **Load-aware migration**: When a decode instance is overloaded, its KV blocks for selected sequences are migrated to a less-loaded decode instance via the prefill pool as intermediary, enabling dynamic load balancing without recomputation.
+
+```mermaid
+flowchart LR
+    subgraph "Prefill Pool"
+        P1["Prefill GPU 1"] --- P2["Prefill GPU 2"]
+    end
+    subgraph "Decode Pool"
+        D1["Decode GPU 1"] --- D2["Decode GPU 2"]
+    end
+    P1 -->|"KV transfer<br/>(prefill→decode)"| D1
+    D1 -->|"KV migration<br/>(decode→prefill)"| P1
+    P1 -->|"KV transfer<br/>(prefill→decode)"| D2
+    D1 -->|"KV migration<br/>(decode→decode<br/>via prefill)"| D2
+
+    style P1 fill:#d1fae5,stroke:#065f46,color:#000
+    style P2 fill:#d1fae5,stroke:#065f46,color:#000
+    style D1 fill:#dbeafe,stroke:#1e40af,color:#000
+    style D2 fill:#dbeafe,stroke:#1e40af,color:#000
+```
+
+The KV transfer protocol uses a block-level checksum to ensure consistency: each block's hash (the same SHA-256 used by APC) is included in the transfer header. The receiver verifies block hashes before installing them in its block table. A mismatch triggers a discard-and-recompute fallback.
+
+Transfer granularity is at the block level ($B_s$ tokens per transfer unit). This means partial-context transfers are efficient: only the blocks that differ between sender and receiver need to be transmitted.
+
+### 9.2 NIXL connector
+
+NIXL (NVIDIA Inference Exchange Layer) is NVIDIA's high-performance transport layer for disaggregated serving data movement. v0.21.0 adds a native NIXL connector that replaces the previous custom NCCL-based transfer path.
+
+**Architecture.** NIXL provides:
+
+- **RDMA-based zero-copy transfers**: KV block data is transferred directly between GPU memory spaces without staging through host memory. The sender registers its KV cache tensor memory region with NIXL; the receiver does the same. NIXL handles the RDMA setup and transfer scheduling.
+- **Multi-path striping**: For large KV transfers (e.g., a 4096-token prompt's KV for 70B model = ~2.1 GB), NIXL stripes data across all available NVLink and PCIe paths, saturating aggregate bandwidth.
+- **Topology-aware routing**: NIXL queries the system topology (NVLink mesh, PCIe tree, NUMA affinity) and selects optimal paths. For intra-node transfers (prefill and decode GPUs on the same machine), NVLink provides ~900 GB/s. For inter-node transfers, InfiniBand/Ethernet RDMA is used.
+
+**Integration point.** The NIXL connector plugs into vLLM's `KVTransferBackend` abstraction:
+
+```python
+class NIXLConnector(KVTransferBackend):
+    def register_kv_memory(self, kv_cache_tensors: List[torch.Tensor])
+    def send_blocks(self, request_id: str, block_ids: List[int], peer: str)
+    def recv_blocks(self, request_id: str, block_ids: List[int], peer: str)
+    def barrier(self)
+```
+
+The connector is activated via `--kv-transfer-config '{"connector": "nixl"}'`. It coexists with the HMA tier system: blocks can be transferred from any tier on the sender to any tier on the receiver, with NIXL handling the staging (e.g., SSD on sender → DRAM staging → RDMA → HBM on receiver).
+
+### 9.3 MooncakeStoreConnector
+
+Mooncake is a distributed KV cache store that uses SSD as the primary storage tier for disaggregated KV sharing. v0.21.0 integrates Mooncake as a first-class connector for the disaggregated serving path.
+
+**Use case.** In a disaggregated deployment with many prefill instances and many decode instances, KV blocks produced by any prefill instance need to be accessible by any decode instance. Without a shared store, each prefill instance must send KV blocks directly to the target decode instance, requiring $O(P \times D)$ connections and complex routing.
+
+Mooncake provides a **shared SSD-backed KV store** that decouples producers from consumers:
+
+```
+Prefill Instance → write KV blocks → Mooncake SSD Store → read KV blocks → Decode Instance
+```
+
+**Architecture.** The MooncakeStoreConnector:
+
+1. **Writes**: After prefill, the prefill instance serializes KV blocks and writes them to the Mooncake store, keyed by `(request_id, block_index)`.
+2. **Indexing**: A metadata service maps request IDs to the Mooncake nodes holding their blocks.
+3. **Reads**: When a decode instance needs to begin decoding a request, it fetches the KV blocks from Mooncake, deserializes them into its local KV cache, and begins decode.
+4. **SSD tier**: Mooncake stores blocks on local NVMe SSDs with a DRAM buffer for hot blocks. This provides 100 TB+ aggregate KV storage across a cluster, sufficient for millions of concurrent request contexts.
+
+**Performance characteristics.** For a typical 70B model prefill of 4096 tokens:
+
+- KV data size: ~2.1 GB (FP16) or ~1.05 GB (FP8)
+- Mooncake write throughput: ~12 GB/s (NVMe Gen5)
+- Mooncake read throughput: ~12 GB/s
+- End-to-end transfer latency (prefill write + decode read): ~350 ms for FP16, ~175 ms for FP8
+
+The transfer latency is amortized by batching: a decode instance pulls multiple requests' KV data in parallel, saturating the SSD bandwidth. For workloads with high concurrency (>100 concurrent requests), the per-request transfer cost becomes negligible compared to the compute savings from disaggregation.
+
+**Configuration.** Enabled via `--kv-transfer-config '{"connector": "mooncake", "mooncake_config": "/path/to/mooncake.yaml"}'`. The Mooncake config specifies the cluster membership, SSD mount paths, and metadata service endpoint.
+
+---
+
+## 10. Cause and Effect: Request Flow
 
 ```mermaid
 flowchart TD
@@ -597,7 +911,7 @@ flowchart TD
 
 ---
 
-## 10. Step-by-Step Scheduling Trace
+## 11. Step-by-Step Scheduling Trace
 
 Consider Llama-3-70B on 2$\times$ H100 with TP=2:
 
@@ -622,7 +936,7 @@ Consider Llama-3-70B on 2$\times$ H100 with TP=2:
 
 ---
 
-## 11. Numbers to Know
+## 12. Numbers to Know
 
 | # | Quantity | Value | Derivation |
 |---|----------|-------|------------|
@@ -646,10 +960,23 @@ Consider Llama-3-70B on 2$\times$ H100 with TP=2:
 | 18 | Sampler latency (B=128, top-p) | ~0.2 ms | All-GPU, no host trip |
 | 19 | Block allocation latency | ~0.001 ms | Free-list pop |
 | 20 | APC prefix match length (shared chat template) | 64--2048 tokens | Depends on template length |
+| 21 | V2 ModelRunner Python overhead per step | ~0.4 ms | Eliminates $2n_l$ Python-to-C++ transitions |
+| 22 | HMA effective capacity increase (2×H100 + 512 GB DRAM + 4 TB NVMe) | ~40$\times$ over HBM-only | $N_{\text{blk}}^{\text{HBM}} + N_{\text{blk}}^{\text{DRAM}} + N_{\text{blk}}^{\text{SSD}}$ |
+| 23 | TQ2 net capacity gain (incl. codebook) | ~3.2$\times$ over FP16 | 2-bit quant + 4-centroid codebook overhead |
+| 24 | TQ2 perplexity degradation (Llama-3-70B) | 0.5--1.2% | Acceptable for most serving workloads |
+| 25 | FA4 MLA cache data reduction (DeepSeek-V3) | 32$\times$ vs standard MHA | Latent dim 512 vs $n_{\text{kv}} \times d_h = 16384$ |
+| 26 | NIXL intra-node KV transfer bandwidth (NVLink) | ~900 GB/s | Zero-copy RDMA |
+| 27 | NIXL inter-node KV transfer bandwidth (InfiniBand) | ~50--100 GB/s | Depends on IB fabric |
+| 28 | Mooncake SSD write throughput | ~12 GB/s | NVMe Gen5 |
+| 29 | Mooncake end-to-end KV transfer (4096 tokens, 70B, FP16) | ~350 ms | Write + read, amortized by batching |
+| 30 | vLLM IR compilation time | 10--60 seconds | At startup, not offline |
+| 31 | vLLM IR throughput vs TRT-LLM | ~85--95% | Trades peak perf for dynamic shapes + PagedAttention |
+| 32 | Adaptive spec dec V2 acceptance rate EWMA window | 32 steps | Exponentially weighted |
+| 33 | Thinking budget default range | 0--32768 tokens | Per-request scheduler parameter |
 
 ---
 
-## 12. Worked Problems
+## 13. Worked Problems
 
 ### Problem 1: Block Pool Capacity
 
@@ -730,9 +1057,9 @@ Total logical blocks across all 4 GPUs: 25{,}936 (each block is sharded across r
 
 ---
 
-## 13. Source Map
+## 14. Source Map
 
-The V1 codebase (approximate; rapidly evolving):
+The V1 codebase (approximate; rapidly evolving, as of v0.21.0):
 
 ```mermaid
 flowchart TB
@@ -742,29 +1069,42 @@ flowchart TB
             B["engine_core.py — EngineCore (scheduler + coordinator)"]:::py
         end
         subgraph core["core/"]
-            C["scheduler.py — Per-step scheduling logic"]:::py
-            D["block_manager.py — KV pool, block tables, free list"]:::py
+            C["scheduler.py — Per-step scheduling, thinking budget, adaptive spec dec"]:::py
+            D["block_manager.py — KV pool, block tables, free list, HMA tiers"]:::py
             E["prefix_caching.py — Hash-chain prefix cache"]:::py
         end
         subgraph wrk["worker/"]
             F["worker.py — Per-GPU process, weight loading"]:::py
-            G["model_runner.py — Forward pass, input packing"]:::py
+            G["model_runner.py — V2 prepare-compile-execute pipeline"]:::py
         end
         subgraph mx["model_executor/"]
             H["models/ — Per-architecture model definitions"]:::py
             I["layers/ — TP-aware building blocks"]:::py
         end
+        subgraph ir["compiler/"]
+            J["ir/ — IR node definitions, tracer, optimization passes"]:::py
+            K["execution_plan.py — Lowered execution plan for V2 ModelRunner"]:::py
+        end
+        subgraph disagg["distributed/"]
+            L["kv_transfer/ — Bi-directional KV transfer protocol"]:::py
+            M["nixl_connector.py — NIXL RDMA transport"]:::py
+            N["mooncake_connector.py — Mooncake SSD store connector"]:::py
+        end
+        subgraph kv["kv_cache/"]
+            O["tq2_quantizer.py — TurboQuant 2-bit KV compression"]:::py
+            P["hma_block_manager.py — Heterogeneous memory tier management"]:::py
+        end
     end
     classDef py fill:#fde68a,stroke:#b45309,color:#000
 ```
 
-Additional key directories: `attention/` (PagedAttention dispatch, ops wrappers for paged and FlashAttention kernels, backend selection), `csrc/` (custom CUDA/Triton kernels for paged attention, quantization, and activation), `entrypoints/openai/` (OpenAI-compatible HTTP frontend), and `sampling/sampler.py` (top-k, top-p, grammar, penalties).
+Additional key directories: `attention/` (PagedAttention dispatch, FA3/FA4 backend selection including MLA path), `csrc/` (custom CUDA/Triton kernels for paged attention, TQ2 dequantization, FA4 MLA), `entrypoints/openai/` (OpenAI-compatible HTTP frontend), and `sampling/sampler.py` (top-k, top-p, grammar, penalties, thinking token detection).
 
 Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_manager.py` (KV allocation and prefix cache), and `model_runner.py` (forward pass correctness).
 
 ---
 
-## 14. Performance Tuning Knobs
+## 15. Performance Tuning Knobs
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -777,10 +1117,16 @@ Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_
 | `--enable-chunked-prefill` | On (V1) | Toggle chunked prefill. Off only for latency-insensitive batch processing |
 | `--tensor-parallel-size` | 1 | TP degree. Must match GPU count |
 | `--pipeline-parallel-size` | 1 | PP degree. Rarely needed for inference |
-| `--kv-cache-dtype` | auto | FP8 KV halves cache memory at minor quality cost |
+| `--kv-cache-dtype` | auto | FP8 KV halves cache memory at minor quality cost. `tq2` enables 2-bit TurboQuant (3.2$\times$ gain, 0.5--1.2% quality loss) |
 | `--quantization` | None | Weight quantization (awq, gptq, fp8). Frees HBM for KV |
+| `--kv-transfer-config` | None (v0.21.0) | JSON config for disaggregated KV transfer. `"connector": "nixl"` or `"mooncake"` |
+| `--thinking-budget` | None (v0.21.0) | Per-request cap on thinking tokens for reasoning models |
+| `--speculative-max-model-len` | 5 (v0.21.0) | Max draft length for adaptive speculative decoding V2 |
+| `--hma-enabled` | False (v0.21.0) | Enable heterogeneous memory architecture (GPU + CPU + NVMe tiers) |
+| `--hma-dram-size` | 0 (v0.21.0) | CPU DRAM allocation for HMA tier 1 (bytes) |
+| `--hma-ssd-path` | None (v0.21.0) | NVMe mount path for HMA tier 2 |
 
-**Tuning heuristic:** increase `max_num_seqs` until p99 TPOT reaches the SLO limit. Then increase `max_num_batched_tokens` until TTFT meets its target. If KV pool is the bottleneck (frequent preemption), either quantize weights or enable FP8 KV.
+**Tuning heuristic:** increase `max_num_seqs` until p99 TPOT reaches the SLO limit. Then increase `max_num_batched_tokens` until TTFT meets its target. If KV pool is the bottleneck (frequent preemption), either quantize weights or enable FP8 KV. If KV pool is still insufficient, enable HMA with `--hma-enabled` and configure DRAM/SSD tiers. For reasoning models, set `--thinking-budget` to bound KV consumption per request.
 
 ---
 
@@ -860,19 +1206,104 @@ vLLM supports a KV transfer API (`--kv-transfer-config` or the `kv_transfer` fla
 
 ---
 
-## 19. References
+## 19. vLLM Intermediate Representation (IR) (v0.21.0)
+
+### 19.1 Motivation
+
+vLLM's original execution path was pure eager-mode PyTorch: the ModelRunner called each layer as a Python function, PyTorch's autograd dispatcher routed to CUDA kernels via the PyTorch operator registry, and every forward pass traversed the full Python-to-C++ dispatch chain. This is flexible but leaves optimization opportunities on the table:
+
+- **No global view of the compute graph**: Each layer is an island. The runtime cannot fuse operations across layer boundaries (e.g., fusing the attention output projection with the subsequent RMSNorm).
+- **No ahead-of-time memory planning**: Activation tensors are allocated on-the-fly by PyTorch's caching allocator, which can cause fragmentation and suboptimal reuse.
+- **No target-specific lowering**: The same eager PyTorch code runs on every GPU architecture, missing opportunities for hardware-specific optimization.
+
+TensorRT-LLM takes the opposite extreme: the entire model is compiled to a static execution plan at build time. This yields excellent performance but at the cost of long build times (10--60 minutes), limited dynamism (changing batch sizes or sequence lengths requires recompilation), and poor support for features like prefix caching that require runtime-determined memory access patterns.
+
+The vLLM IR is a middle ground: a compiler-style intermediate representation that captures the model's computation graph once at startup, applies graph-level optimizations, and produces an execution plan that retains the dynamism needed for inference serving (variable batch sizes, dynamic block tables, chunked prefill).
+
+### 19.2 IR structure
+
+The IR is a directed acyclic graph (DAG) of **operations** connected by **tensors**. Each operation corresponds to a logical compute step:
+
+```python
+@dataclass
+class IROperation:
+    op_type: str              # e.g., "attention", "linear", "rms_norm", "all_reduce"
+    inputs: List[IRTensor]    # input tensor references
+    outputs: List[IRTensor]   # output tensor references
+    attrs: Dict[str, Any]     # operation-specific attributes
+    metadata: OpMetadata      # scheduling hints (memory estimate, kernel preference)
+```
+
+The IR is produced by tracing the model's forward pass with dummy inputs and capturing the operator calls. Unlike `torch.fx` tracing, the vLLM IR tracer handles:
+
+- **Data-dependent control flow**: MoE models like DeepSeek-V3 use routing decisions that vary per-token. The IR captures both branches and marks the routing gate as a runtime-resolved selector.
+- **Dynamic shapes**: PagedAttention's block tables and slot mappings change every step. The IR represents these as symbolic dimensions that are resolved at execution time.
+- **Custom CUDA kernels**: PagedAttention, FlashAttention, and quantization kernels are represented as opaque IR operations with known input/output signatures.
+
+### 19.3 Optimization passes
+
+Once the IR is constructed, the compiler applies a sequence of optimization passes:
+
+| Pass | Description |
+|------|-------------|
+| **FuseNorm** | Fuses RMSNorm with the preceding linear projection into a single kernel launch |
+| **FuseQKV** | Fuses Q, K, V projections into a single GEMM, reducing kernel launch overhead and improving tensor core utilization |
+| **FuseMLP** | Fuses gate + up projections and SwiGLU activation into one kernel |
+| **MemoryPlan** | Assigns activation tensors to pre-allocated memory pools with planned reuse, eliminating PyTorch allocator overhead |
+| **QuantizeInsert** | Inserts quantization/dequantization nodes for FP8/INT8 weight and KV cache paths |
+| **AllReduceSchedule** | Schedules NCCL all-reduce operations to overlap with compute (compute next layer's independent ops during all-reduce) |
+| **KernelSelect** | Chooses the optimal kernel variant per operation (FA3 vs FA4, paged vs FlashAttention, cuBLAS vs custom GEMM) based on GPU architecture and input sizes |
+
+### 19.4 Execution plan
+
+After optimization, the IR is lowered to an **execution plan**: an ordered list of kernel launches with pre-computed memory offsets. The execution plan is executed by the V2 ModelRunner's `execute_model()` method (Section 4.4).
+
+```mermaid
+flowchart LR
+    MODEL["PyTorch<br/>Model Definition"] -->|"trace"| IR["vLLM IR<br/>(DAG of ops)"]
+    IR -->|"optimize"| OPT_IR["Optimized IR<br/>(fused, planned)"]
+    OPT_IR -->|"lower"| PLAN["Execution Plan<br/>(kernel launch schedule)"]
+    PLAN -->|"execute"| GPU["GPU Execution<br/>(V2 ModelRunner)"]
+
+    style MODEL fill:#fef3c7,stroke:#92400e,color:#000
+    style IR fill:#dbeafe,stroke:#1e40af,color:#000
+    style OPT_IR fill:#dbeafe,stroke:#1e40af,color:#000
+    style PLAN fill:#d1fae5,stroke:#065f46,color:#000
+    style GPU fill:#d1fae5,stroke:#065f46,color:#000
+```
+
+### 19.5 Relationship to TensorRT-LLM
+
+| Aspect | vLLM IR (v0.21.0) | TensorRT-LLM |
+|--------|--------------------|---------------|
+| Compilation time | 10--60 seconds (at startup) | 10--60 minutes (offline build) |
+| Dynamic shapes | Full support (symbolic dims) | Limited (requires padding/recompilation) |
+| PagedAttention | First-class IR operation | Not supported (contiguous KV only) |
+| Prefix caching | Compatible (block tables are runtime inputs) | Not supported |
+| Quantization | Runtime-inserted dequant nodes | Baked into engine at build time |
+| Kernel fusion | Conservative (proven-safe fusions) | Aggressive (extensive fusion) |
+| Peak throughput | ~85--95% of TRT-LLM | Baseline (100%) |
+
+The vLLM IR trades some peak performance for operational flexibility: no offline build step, support for runtime-dynamic features (PagedAttention, prefix caching, variable batch sizes), and fast iteration during development. As the optimization passes mature, the throughput gap is expected to narrow further.
+
+---
+
+## 20. References
 
 1. Kwon, W. et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention." *SOSP 2023*.
 2. vLLM Project. "vLLM: Easy, Fast, and Cheap LLM Serving." [GitHub](https://github.com/vllm-project/vllm).
-3. vLLM Blog (2024--2025). "V1 Engine Architecture," "Automatic Prefix Caching," "Structured Output."
+3. vLLM Blog (2024--2025). "V1 Engine Architecture," "Automatic Prefix Caching," "Structured Output," "v0.21.0 Release Notes."
 4. Yu, G.I. et al. (2022). "Orca: A Distributed Serving System for Transformer-Based Generative Models." *OSDI 2022*.
 5. Zheng, L. et al. (2024). "SGLang: Efficient Execution of Structured Language Model Programs." *NeurIPS 2024*.
 6. Holmes, C. et al. (2024). "Sarathi-Serve: Taming Compute-Utilization and Memory-Bottlenecks in LLM Serving." *OSDI 2024*.
 7. Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning." *ICLR 2024*.
+8. DeepSeek-AI (2024). "DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model." *arXiv:2405.04434*.
+9. Mooncake (2024). "Mooncake: A Serverless Architecture for LLM Serving." [GitHub](https://github.com/kvcache-ai/mooncake).
+10. NVIDIA (2025). "NIXL: NVIDIA Inference Exchange Layer." [Developer Documentation](https://developer.nvidia.com/nixl).
 
 ---
 
-## 20. Stack Links
+## 21. Stack Links
 
 **Up (deeper):**
 - [KV_Cache](KV_Cache.md) -- PagedAttention memory layout, block math, prefix caching derivations
@@ -887,4 +1318,4 @@ vLLM supports a KV transfer API (`--kv-transfer-config` or the `kv_transfer` fla
 **Lateral:**
 - [Inference_Frameworks](Inference_Frameworks.md) -- vLLM vs SGLang vs TRT-LLM feature comparison
 - [Speculative_Decoding](Speculative_Decoding.md) -- draft-then-verify integrated into the vLLM step loop
-- [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md) -- splitting the engine across prefill and decode GPU pools
+- [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md) -- splitting the engine across prefill and decode GPU pools, NIXL and Mooncake connectors

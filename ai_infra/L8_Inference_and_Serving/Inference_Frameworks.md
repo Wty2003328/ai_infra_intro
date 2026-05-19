@@ -1,5 +1,5 @@
 # Inference Frameworks — vLLM, SGLang, TensorRT-LLM, and Beyond
-> **Layer:** L8. **Prerequisites:** [Batching_and_Scheduling](Batching_and_Scheduling.md), [KV_Cache](KV_Cache.md), [Speculative_Decoding](Speculative_Decoding.md). **Hands off to:** [vLLM_Internals](vLLM_Internals.md), [Production_Architecture](Production_Architecture.md).
+> **Layer:** L8. **Prerequisites:** [Batching_and_Scheduling](Batching_and_Scheduling.md), [KV_Cache](KV_Cache.md), [Speculative_Decoding](Speculative_Decoding.md). **Hands off to:** [vLLM_Internals](vLLM_Internals.md), [Production_Architecture](Production_Architecture.md). **Last updated:** 2026-05.
 
 ---
 
@@ -15,7 +15,9 @@ The choice of framework affects:
 - **Operational complexity** — build pipelines, deployment models, observability hooks.
 - **Vendor lock-in** — NVIDIA-only vs. cross-vendor, open-source vs. proprietary kernels.
 
-This page covers seven production-grade frameworks and the architectural patterns they share. The goal is not to crown a winner — the best choice depends on workload, hardware, team expertise, and operational constraints — but to build a mental model precise enough that you can reason about the tradeoffs for any deployment.
+This page covers eight production-grade frameworks and the architectural patterns they share. The goal is not to crown a winner — the best choice depends on workload, hardware, team expertise, and operational constraints — but to build a mental model precise enough that you can reason about the tradeoffs for any deployment.
+
+> **Note (May 2026):** The inference landscape shifted significantly in late 2025 through early 2026. TGI was archived (March 2026). NVIDIA Dynamo 1.0 superseded Triton Inference Server. vLLM, SGLang, and TRT-LLM all shipped major releases. llm-d entered CNCF Sandbox. And an entirely new category emerged — 1-bit LLM inference via BitNet. This page has been updated to reflect all of these developments.
 
 ---
 
@@ -43,7 +45,7 @@ graph TD
 
 | Layer | Responsibility | Variation across frameworks |
 |-------|---------------|-----------------------------|
-| Frontend | OpenAI-compatible API, streaming SSE, request parsing | FastAPI (vLLM), FastHTTP (SGLang), Triton Inference Server (TRT-LLM), Rust HTTP (TGI) |
+| Frontend | OpenAI-compatible API, streaming SSE, request parsing | FastAPI (vLLM), FastHTTP (SGLang), NVIDIA Dynamo (TRT-LLM), Rust+Python (Dynamo) |
 | Tokenizer | Prompt $\to$ token IDs; detokenize output bytes | HuggingFace tokenizers universally; minor differences in special-token handling |
 | Scheduler | Admission control, continuous batching, chunked prefill, preemption, prefix-cache lookup | Python (vLLM V0), C++ (vLLM V1, TRT-LLM), Rust (SGLang) |
 | KV Cache Manager | Block allocation, prefix sharing, eviction, swap | Hash-based paging (vLLM), radix tree (SGLang), compiled layout (TRT-LLM) |
@@ -84,7 +86,7 @@ The step loop runs 20–100 times per second depending on batch size and context
 
 ### 4.1 Overview
 
-vLLM originated PagedAttention (SOSP 2023) and has become the de facto open-source inference standard. The engine is Python with C++/CUDA kernels for hot paths. It ships the broadest model coverage of any framework — virtually any HuggingFace model works with `vllm serve <model>`.
+vLLM originated PagedAttention (SOSP 2023) and has become the de facto open-source inference standard. The engine is Python with C++/CUDA kernels for hot paths. It ships the broadest model coverage of any framework — virtually any HuggingFace model works with `vllm serve <model>`. The latest major release is **v0.21.0** (2025–2026), which introduced heterogeneous memory management, compiler-style IR, and disaggregated KV transfer.
 
 ### 4.2 Architecture
 
@@ -110,11 +112,24 @@ The V1 engine (default since late 2024) decouples the scheduler from the workers
 - **Hash-based prefix caching** — each block hashed by `(parent_hash, token_ids)`. Shared via refcounting. Effective for system prompts and multi-turn chat.
 - **Chunked prefill** — long prompts split into configurable chunks (default 512–4096 tokens) that interleave with decode steps, avoiding TPOT spikes.
 - **Speculative decoding** — supports draft-model, Medusa, EAGLE, and MLA-based speculation. Integrated into the step loop with variable acceptance lengths.
-- **Quantization** — FP8 weights and KV, INT8 (AWQ, GPTQ, SmoothQuant), INT4, GGUF. FP8 on Hopper is essentially free and the default for production.
+- **Quantization** — FP8 weights and KV, INT8 (AWQ, GPTQ, SmoothQuant), INT4, GGUF, and **NVFP4 KV cache** (new in v0.21). FP8 on Hopper is essentially free and the default for production.
 - **Parallelism** — TP, PP, EP, and combinations. TP is the most common; PP used for models exceeding single-node memory. EP for MoE models.
 - **Multi-LoRA** — fused batched LoRA kernels (Punica/S-LoRA). Each request specifies an adapter; the matmul kernel routes rows by LoRA ID.
 - **Structured output** — via Outlines and xgrammar backends. JSON schema, regex, context-free grammar.
 - **Multimodal** — major VLMs (LLaVA, Qwen-VL, InternVL, Pixtral) supported with image/audio encoders pipelined through the same KV cache.
+
+### 4.3.1 What's New in v0.21.0
+
+v0.21.0 is the most significant vLLM release since the V1 rewrite, introducing infrastructure for next-generation memory management and compiler-style optimization:
+
+- **HMA (Heterogeneous Memory Architecture)** — a unified KV Offload layer spanning GPU HBM, CPU DRAM, and NVMe. The scheduler transparently migrates KV blocks between tiers based on access recency and available budget. This effectively triples or quadruples the usable KV cache capacity without additional GPUs.
+- **NVFP4 KV cache** — support for NVIDIA's FP4 format for KV storage, halving memory per block with minimal quality loss on supported hardware (Blackwell+).
+- **TurboQuant 2-bit KV compression** — aggressive KV cache compression achieving 4x capacity increase. Enables serving much longer contexts or larger batches within the same HBM budget.
+- **FlashAttention 4 as default MLA backend** — the latest FlashAttention generation replaces v3 for multi-head latent attention models, providing improved throughput on architectures like DeepSeek-V3.
+- **vLLM IR skeleton** — a compiler-style intermediate representation for the execution graph. This is the foundation for future graph-level optimizations (operator fusion, memory planning) that were previously only possible in compiled engines like TRT-LLM.
+- **Model Runner V2** — refactored model execution layer with cleaner separation between model logic, kernel dispatch, and memory management. Improves extensibility for new architectures.
+- **Bi-directional KV transfers** — KV blocks can flow in both directions between prefill and decode instances, enabling more flexible disaggregated serving topologies.
+- **NIXL connector + MooncakeStoreConnector** — native integration with NIXL (NVIDIA's unified transfer library) and Mooncake's distributed KV store for cross-node KV transfer in disaggregated deployments.
 
 ### 4.4 Performance Characteristics
 
@@ -139,7 +154,7 @@ The V1 rewrite closed most of the scheduler-overhead gap. On H100 with Llama-3-7
 
 ### 5.1 Overview
 
-SGLang (NeurIPS 2024) originated from the RadixAttention idea — a token-granularity prefix-sharing scheme that generalizes block-hash caching. The engine is optimized for chat, agentic, and structured-generation workloads where prompt reuse patterns are complex.
+SGLang (NeurIPS 2024) originated from the RadixAttention idea — a token-granularity prefix-sharing scheme that generalizes block-hash caching. The engine is optimized for chat, agentic, and structured-generation workloads where prompt reuse patterns are complex. The latest major release is **v0.5.12** (2025–2026), which brought speculative decoding V2, elastic MoE parallelism, and image/video generation support.
 
 ### 5.2 Architecture
 
@@ -179,6 +194,14 @@ In multi-turn chat, where each turn extends the previous conversation, the radix
 - **Quantization** — FP8, INT8 (AWQ, GPTQ), similar breadth to vLLM.
 - **Disaggregated PD** — built-in prefill-decode disaggregation since v0.4.
 
+### 5.4.1 What's New in v0.5.12
+
+- **Speculative Decoding V2 (default)** — a redesigned speculative decoding pipeline that is now enabled by default. Improves acceptance rates and integrates more tightly with the radix tree for prefix-aware draft generation.
+- **Piecewise CUDA graph capture** — instead of capturing the entire model execution as one monolithic CUDA graph, v0.5.12 captures pieces independently. This dramatically reduces graph capture time (especially for large models) and enables more flexible dynamic shapes without re-capture overhead.
+- **Elastic EP via NIXL-EP** — elastic expert parallelism for MoE models using NVIDIA's NIXL transport. Expert counts can be adjusted dynamically across nodes, enabling better resource utilization when serving heterogeneous MoE workloads.
+- **Native MLX backend for Apple Silicon** — first-class support for Apple's MLX framework, enabling efficient inference on M-series chips (M1 through M4 Ultra). This makes SGLang the only major inference framework with native backends for both NVIDIA and Apple Silicon.
+- **SGLang-Diffusion** — built-in support for image and video generation models (Stable Diffusion, Flux, DiT-based video models). This extends SGLang beyond text inference into the generative media space, using the same radix tree for prompt caching on diffusion pipelines.
+
 ### 5.5 Performance Characteristics
 
 SGLang frequently matches or exceeds vLLM on chat and agentic workloads where prefix reuse is high. The Rust scheduler provides a measurable edge at high request rates. On pure throughput benchmarks with no prefix reuse, the two frameworks are roughly tied.
@@ -201,7 +224,7 @@ On H100 with Llama-3-70B FP8, chat workload with high prefix reuse:
 
 ### 6.1 Overview
 
-TensorRT-LLM is NVIDIA's hand-tuned C++ inference engine, built on the TensorRT compiler stack. It produces the lowest single-stream latency and highest peak throughput on NVIDIA GPUs by compiling the entire model graph into optimized CUDA kernels.
+TensorRT-LLM is NVIDIA's hand-tuned C++ inference engine, built on the TensorRT compiler stack. It produces the lowest single-stream latency and highest peak throughput on NVIDIA GPUs by compiling the entire model graph into optimized CUDA kernels. The latest major release is **v1.3.0** (2025–2026), which added EAGLE-3 speculative decoding, flexible KV management, and production observability.
 
 ### 6.2 Architecture
 
@@ -224,8 +247,16 @@ graph TD
 - **Inflight batching** — NVIDIA's term for continuous batching. Implemented in C++ with zero Python on the critical path.
 - **KV cache management** — paged KV with block reuse. Prefix caching supported.
 - **Speculative decoding** — draft-model and Medusa-style.
-- **Triton Inference Server integration** — TRT-LLM is the default backend for NVIDIA's production model server. Multi-model hosting, versioning, A/B testing, dynamic batching at the server level.
+- **Triton Inference Server integration** — TRT-LLM is the default backend for NVIDIA's production model server (now superseded by NVIDIA Dynamo 1.0 for new deployments). Multi-model hosting, versioning, A/B testing, dynamic batching at the server level.
 - **Multi-LoRA** — fused batched LoRA via UniServe-style kernels.
+
+### 6.3.1 What's New in v1.3.0
+
+- **EAGLE-3 dynamic tree speculative decoding** — the third generation of EAGLE speculation with a dynamic tree structure that adapts the draft tree shape based on acceptance probabilities observed at runtime. This outperforms static draft trees by 15–25% on diverse workloads.
+- **FlexKV** — flexible KV cache management that decouples the KV allocation strategy from the compiled engine. Supports paged, contiguous, and hybrid layouts, and can switch strategies without recompiling the engine. This significantly reduces the operational burden of the traditional per-configuration build pipeline.
+- **Conversation-affinity routing** — built-in request routing that directs multi-turn conversations to the same engine replica, maximizing prefix cache hits without external routing infrastructure.
+- **Production Prometheus metrics** — comprehensive out-of-the-box metrics endpoint exposing TTFT/TPOT histograms, KV occupancy, batch utilization, prefix cache hit rates, and queue depths. Previously required custom instrumentation.
+- **Prefix caching for Mamba hybrids** — extends prefix caching to hybrid architectures that combine attention and Mamba (state-space) layers, enabling efficient caching for the next generation of non-transformer models.
 
 ### 6.4 The Build Pipeline (and Its Cost)
 
@@ -268,36 +299,56 @@ On H100 with Llama-3-70B FP8, 8K context, production mix:
 
 ### 7.1 Overview
 
-Dynamo is NVIDIA's multi-node inference fabric (GA 2024–2025). It is not a per-GPU engine but an orchestration layer that manages fleets of engines. Dynamo disaggregates prefill and decode across nodes, handles KV transfer, and routes requests with prefix-locality awareness.
+NVIDIA Dynamo 1.0 (released March 15, 2026) is the **successor to Triton Inference Server** for LLM serving. Built in Rust + Python, it is not a per-GPU engine but an orchestration layer that manages fleets of engines. Dynamo disaggregates prefill and decode across nodes, handles KV transfer with tiered eviction, and routes requests with prefix-locality awareness. It orchestrates **SGLang, TensorRT-LLM, and vLLM as pluggable backends**.
+
+> **Important:** Triton Inference Server remains supported for legacy model types (non-LLM), but NVIDIA's LLM serving roadmap is now exclusively through Dynamo. New LLM deployments should use Dynamo 1.0.
 
 ### 7.2 Architecture
 
 ```mermaid
 graph TD
-    subgraph "Dynamo Cluster"
-        Router["Frontend Router<br/>(prefix-aware, multi-tenant)"]
-        Router --> PP["Prefill Pool<br/>TRT-LLM / vLLM backends"]
-        Router --> DP["Decode Pool<br/>TRT-LLM / vLLM backends"]
+    subgraph "Dynamo 1.0 Cluster"
+        Router["Frontend Router<br/>(prefix-aware, SLA-driven)"]
+        Router --> PP["Prefill Pool<br/>SGLang / TRT-LLM / vLLM"]
+        Router --> DP["Decode Pool<br/>SGLang / TRT-LLM / vLLM"]
         PP -->|"KV Transfer<br/>(NIXL)"| DP
-        KVP["Global KV Pool<br/>(optional, CPU RAM tier)"]
+        KVP["KV Block Manager<br/>GPU → CPU → SSD → Remote"]
         PP --> KVP
         DP --> KVP
+        Planner["Planner<br/>SLA-driven autoscaler"]
+        Grove["Grove<br/>K8s operator (NVL72)"]
+        Planner --> Router
+        Grove --> PP
+        Grove --> DP
     end
 ```
 
-Dynamo treats the inference engine as a pluggable backend. TRT-LLM is the primary backend; vLLM is also supported. The orchestrator adds:
+Dynamo treats the inference engine as a pluggable backend. SGLang, TRT-LLM, and vLLM are all first-class backends. The orchestrator adds:
 
 - **NIXL transport** — unified API for GPU-to-GPU (NVLink), GPU-to-CPU, GPU-to-storage transfers. Chooses the fastest available path automatically.
 - **Prefix-aware routing** — incoming requests routed to the engine replica with the highest prefix-cache overlap.
 - **Disaggregated prefill-decode** — prefill and decode pools sized independently, scaled to their respective bottlenecks.
 - **Autoscaling hooks** — integrates with Kubernetes HPA and NVIDIA NIM operators.
 
-### 7.3 When to Choose Dynamo
+### 7.3 What's New in Dynamo 1.0
+
+- **Built in Rust + Python** — the orchestrator core is Rust for performance; Python for configuration and extension. This replaces the C++ Triton codebase with a more maintainable and extensible foundation.
+- **KV Block Manager with tiered eviction** — a four-tier KV cache hierarchy: GPU HBM → CPU DRAM → local SSD → remote object storage (S3/Azure Blob). KV blocks are automatically evicted to lower tiers under memory pressure and recalled when needed. This effectively provides unlimited KV cache capacity bounded by storage, not GPU memory.
+- **ModelExpress** — weight streaming from storage to GPU with 7x faster cold-start times compared to loading full checkpoints. Models begin serving while weights are still streaming in; the critical layers are loaded first.
+- **Planner** — an SLA-driven autoscaler that simulates deployment configurations to determine optimal replica counts for prefill and decode pools. Given target TTFT/TPOT SLOs and expected QPS, Planner recommends the right number and type of GPU instances.
+- **Grove** — a Kubernetes operator for topology-aware gang scheduling on NVIDIA NVL72 racks. Ensures that all replicas in a deployment are scheduled on the same NVL72 rack to maximize NVLink bandwidth and minimize cross-rack traffic.
+- **AIConfigurator** — simulates 10,000+ deployment configurations (model, hardware, parallelism, batch size, KV budget) and ranks them by cost-performance ratio. Reduces the manual tuning that previously took weeks of benchmarking to an automated process.
+- **Multimodal E/P/D** — disaggregated encode, prefill, and decode for multimodal models. Image/video encoders run on dedicated GPUs; the encoded representations are transferred to prefill GPUs; decode happens on a third pool. Achieves 30% faster TTFT on image inputs compared to collocated serving.
+- **Benchmarks** — NVIDIA reports 7x higher throughput on DeepSeek R1 GB200 compared to previous-generation serving stacks, and 750x throughput on GB300 NVL72 (multi-node). These are peak synthetic benchmarks; real-world gains will vary.
+
+### 7.4 When to Choose Dynamo
 
 - Multi-node deployments exceeding the capacity of a single engine instance.
 - Disaggregated serving where prefill and decode scale independently.
-- NVIDIA-centric fleets already invested in the Triton/NIM ecosystem.
-- Production deployments needing a vendor-supported orchestration layer.
+- NVIDIA-centric fleets invested in the NIM ecosystem (Dynamo 1.0 is the successor to Triton).
+- Deployments on NVL72 racks that can benefit from Grove's topology-aware scheduling.
+- Production deployments needing vendor-supported orchestration with SLA-driven autoscaling.
+- Any deployment that wants to mix-and-match SGLang, TRT-LLM, and vLLM backends in the same cluster.
 
 ---
 
@@ -305,7 +356,7 @@ Dynamo treats the inference engine as a pluggable backend. TRT-LLM is the primar
 
 ### 8.1 Overview
 
-llm-d is Meta's open-source disaggregated serving stack. Conceptually similar to Dynamo but vendor-agnostic: it runs on NVIDIA, AMD, and any accelerator with a supported PyTorch backend. The engine layer is vLLM.
+llm-d is an open-source disaggregated serving stack that entered **CNCF Sandbox** in March 2026. Founded by **Red Hat, Google Cloud, IBM Research, CoreWeave, and NVIDIA**, it is conceptually similar to Dynamo but vendor-agnostic: it runs on NVIDIA, AMD, and any accelerator with a supported PyTorch backend. The engine layer is vLLM. The latest release is **v0.6** (2026).
 
 ### 8.2 Architecture
 
@@ -315,20 +366,27 @@ llm-d is Meta's open-source disaggregated serving stack. Conceptually similar to
 - **Kubernetes-native** — Custom Resource Definitions (CRDs) for pool sizing, autoscaling, rolling updates.
 - **Vendor-agnostic** — runs on mixed GPU fleets (NVIDIA + AMD) within the same cluster.
 
-### 8.3 When to Choose llm-d
+### 8.3 Performance
+
+llm-d v0.6 achieves approximately **3,100 tok/s per B200 decode GPU** in isolated benchmarks. On a 16x16 B200 cluster (256 GPUs), it sustains up to **50,000 output tok/s** aggregate throughput. These numbers represent near-linear scaling efficiency on the B200 platform.
+
+### 8.4 When to Choose llm-d
 
 - Multi-node disaggregated serving on heterogeneous hardware.
-- Teams committed to open-source and vendor independence.
+- Teams committed to open-source and vendor independence (CNCF-governed project).
 - Deployments already running vLLM that need cluster-scale orchestration.
-- Meta-scale throughput requirements (billions of tokens per day).
+- Large-scale throughput requirements where linear scaling across many nodes matters.
+- Organizations that want a vendor-neutral alternative to NVIDIA Dynamo.
 
 ---
 
-## 9. Hugging Face TGI (Text Generation Inference)
+## 9. Hugging Face TGI (Text Generation Inference) — ARCHIVED
+
+> **Status: Archived on March 21, 2026.** The last release was **v3.3.7** (December 2025). TGI is no longer actively maintained. HuggingFace now recommends vLLM for production LLM serving. The information below is preserved for historical reference and for teams still running TGI deployments.
 
 ### 9.1 Overview
 
-TGI is HuggingFace's production serving stack. The frontend is Rust (for HTTP performance); the model runner is Python with custom CUDA kernels. It provides the best out-of-the-box experience for models hosted on HuggingFace Hub.
+TGI was HuggingFace's production serving stack. The frontend was Rust (for HTTP performance); the model runner was Python with custom CUDA kernels. It provided the best out-of-the-box experience for models hosted on HuggingFace Hub.
 
 ### 9.2 Key Features
 
@@ -345,10 +403,15 @@ TGI trades peak performance for operational simplicity. Throughput is typically 
 
 ### 9.4 When to Choose TGI
 
+> **Deprecated.** New deployments should use vLLM (HuggingFace's official recommendation) or SGLang.
+
+Previously, TGI was chosen for:
 - Rapid prototyping with HuggingFace Hub models.
 - Teams without kernel-level inference expertise.
-- Deployments where operational simplicity outweighs raw throughput.
+- Deployments where operational simplicity outweighed raw throughput.
 - HuggingFace Enterprise customers already in the HF ecosystem.
+
+Existing TGI deployments should plan migration to vLLM. The model coverage and operational simplicity that distinguished TGI are now available in vLLM with higher throughput.
 
 ---
 
@@ -373,70 +436,121 @@ LMDeploy (Shanghai AI Lab) serves Chinese open-source models (InternLM, Qwen, Yi
 
 ---
 
-## 11. Feature Comparison Matrix
+## 11. BitNet / bitnet.cpp
 
-### 11.1 Core Serving Features
+### 11.1 Overview
 
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| Continuous batching | Yes | Yes | Yes (inflight batching) | Via backend | Via vLLM | Yes | Yes |
-| Paged KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Chunked prefill | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Disaggregated prefill | Yes (V1, KV transfer API) | Yes (built-in) | Via Dynamo | Native (NIXL transport) | Native (cluster-scale) | No | No |
-| Prefix caching | Hash-based (block-aligned) | Radix tree (token-granular) | Hash-based | Via backend | Hash-based | Hash-based | Hash-based |
-| Speculative decoding | Draft model, Medusa, EAGLE, MTP | Draft model, EAGLE | Draft model, Medusa | Via backend | Via vLLM | Draft model | Partial |
-| Custom kernels | CUDA/Triton (open) + FlashAttention | FlashInfer + CUDA (open) | TensorRT closed-source fused kernels | N/A (orchestration) | Via vLLM | Custom CUDA | TurboMind C++ |
-| Streaming output | SSE | SSE | Via Triton | SSE | SSE | SSE | SSE |
+BitNet is Microsoft's official 1-bit LLM inference framework, representing an entirely different paradigm from the other frameworks on this page. Instead of running models in FP16/FP8/INT4, BitNet models use **ternary weights** ($\{-1, 0, +1\}$) that eliminate most floating-point multiplications. The framework ships CPU-optimized kernels (bitnet.cpp) and GPU kernels released in May 2025.
 
-### 11.2 Quantization and KV Cache
+### 11.2 Architecture
 
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| FP8 weights | Yes (PT, Hopper) | Yes | Yes (PT, calibration) | Via backend | Via vLLM | Yes | Yes |
-| FP8 KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Partial | Partial |
-| INT8 weights (AWQ/GPTQ/SmoothQuant) | Yes | Yes | Yes (best coverage) | Via backend | Via vLLM | Yes | Yes |
-| INT4 quantization (AWQ/GPTQ) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes (strong) |
-| KV cache quantization granularity | Per-tensor or per-head | Per-head | Per-tensor or per-channel | Via backend | Via vLLM | Per-tensor | Per-tensor |
+BitNet inverts the standard inference optimization approach. Rather than starting with a floating-point model and quantizing it, BitNet models are trained natively in 1-bit from scratch (or produced by BitNet-aware distillation). The inference kernels then exploit the ternary representation:
 
-### 11.3 Parallelism and Distributed Serving
+- **CPU kernels** — weight values of $\{-1, 0, +1\}$ allow matmul to be implemented as conditional addition/subtraction (no multiplication). This is dramatically faster on CPUs where floating-point multiply is expensive.
+- **GPU kernels** — custom CUDA kernels that pack ternary weights into 2-bit representation and use lookup-table-based accumulation, achieving throughput that scales with the extreme compression.
 
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| Tensor parallelism (TP) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes |
-| Pipeline parallelism (PP) | Yes | Yes | Yes | Via backend | Via vLLM | No | Partial |
-| Expert parallelism (EP) | Yes | Yes | Yes (optimized all-to-all) | Via backend | Via vLLM | Partial | No |
-| Multi-node | Yes | Yes | Yes | Native | Native | Partial | No |
-| Disaggregated PD | KV transfer API (V1) | Built-in v0.4+ | Via Dynamo orchestration | Native (NIXL) | Native (global KV pool) | No | No |
+### 11.3 Key Features
 
-### 11.4 Model and Architecture Support
+- **CPU-only inference at scale** — runs 100B-parameter models on a single CPU at 5–7 tok/s. This is impossible with any other framework at any quantization level.
+- **CPU performance** — 1.37x–5.07x speedup on ARM CPUs, 2.37x–6.17x on x86 CPUs compared to equivalent-accuracy FP16 baseline.
+- **Energy efficiency** — 55–82% energy reduction on CPU inference. Critical for edge, mobile, and power-constrained deployments.
+- **GPU kernels** — released May 2025, providing CUDA-accelerated inference for BitNet models on NVIDIA GPUs.
+- **Model ecosystem** — Microsoft has released BitNet-trained variants of popular architectures. The ecosystem is smaller than FP-based models but growing.
 
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| MoE models | Yes | Yes | Yes (optimized EP) | Via backend | Via vLLM | Yes | Partial |
-| Multimodal (VLM) | Yes (broadest) | Yes | Yes | Via backend | Via vLLM | Yes | Partial |
-| Multi-LoRA | Yes (Punica/S-LoRA) | Yes | Yes (UniServe) | Via backend | Via vLLM | Yes | Partial |
-| Structured output | Outlines, xgrammar | xgrammar (GPU-accelerated) | xgrammar | Via backend | Via vLLM | Outlines | Partial |
-| HuggingFace models | Broadest (any HF model) | Broad | Limited (per-model plugin) | Via backend | Broad | Broadest | Focused (Qwen/InternLM) |
+### 11.4 Performance Characteristics
 
-### 11.5 Production Readiness
+BitNet's performance profile is fundamentally different from GPU-centric frameworks:
 
-| Feature | vLLM | SGLang | TRT-LLM | Dynamo | llm-d | TGI | LMDeploy |
-|---------|------|--------|---------|--------|-------|-----|----------|
-| OpenAI-compatible API | Yes | Yes | Via Triton | Yes | Yes | Yes | Yes |
-| Kubernetes integration | Community Helm charts | Community | NVIDIA NIM operator | Native CRDs + HPA | Native CRDs | HF Inference Endpoints | Community |
-| Observability | Prometheus metrics, OpenTelemetry traces | Prometheus metrics | Triton metrics, DCGM | Cluster-level metrics | Cluster-level metrics | Prometheus metrics | Limited |
-| NVIDIA GPUs | Yes | Yes | Yes (NVIDIA-only) | Yes (NVIDIA-only) | Yes | Yes | Yes |
-| AMD GPUs | Yes (ROCm) | Partial (ROCm) | No | No | Yes (ROCm) | Partial (ROCm) | No |
-| CPU-only | Partial | No | No | No | No | Partial | No |
-| Open source | Yes (Apache 2.0) | Yes (Apache 2.0) | Weights only (NVIDIA license) | Yes | Yes (MIT) | Yes (Apache 2.0) | Yes (Apache 2.0) |
+| Platform | Model Size | Throughput | Energy |
+|----------|-----------|------------|--------|
+| ARM CPU | 7B–70B | 1.37x–5.07x vs FP16 | 55–82% less energy |
+| x86 CPU | 7B–70B | 2.37x–6.17x vs FP16 | 55–82% less energy |
+| Single CPU | 100B | 5–7 tok/s | N/A |
+| NVIDIA GPU | 70B | Competitive with INT4 | Lower memory footprint |
+
+### 11.5 When to Choose BitNet
+
+- CPU-only or edge deployments where no GPU is available.
+- Power-constrained environments (mobile, IoT, embedded).
+- Scenarios where model quality at 1-bit is acceptable (BitNet models achieve reasonable perplexity but trail FP16 by a measurable gap).
+- Cost-sensitive deployments running on commodity CPU hardware.
+- Research into 1-bit architectures and training methods.
+
+### 11.6 Limitations
+
+- **Model availability** — only BitNet-trained models work. You cannot run standard Llama, Qwen, or Mistral models with bitnet.cpp.
+- **Quality gap** — ternary weights inherently lose information compared to FP8/INT4. The gap narrows with scale but does not disappear.
+- **Ecosystem immaturity** — smaller community, fewer tools, less production battle-testing than vLLM/SGLang.
+- **No serving infrastructure** — bitnet.cpp is a library, not a serving framework. You need to build HTTP serving, batching, and streaming yourself.
 
 ---
 
-## 12. Deep Dive: SGLang vs vLLM Architecture Comparison
+## 12. Feature Comparison Matrix
+
+### 12.1 Core Serving Features
+
+| Feature | vLLM (v0.21) | SGLang (v0.5.12) | TRT-LLM (v1.3) | Dynamo (1.0) | llm-d (v0.6) | TGI (archived) | LMDeploy | BitNet |
+|---------|------|--------|---------|--------|-------|-----|----------|---------|
+| Continuous batching | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | No (library) |
+| Paged KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | No |
+| Prefix caching | Hash-based | Radix tree | FlexKV (v1.3) | Via backend | Hash-based | Hash-based | Hash-based | N/A |
+| Chunked prefill | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | N/A |
+| Disaggregated PD | Yes (bi-dir KV) | Yes | Via Dynamo | Native (4-tier) | Native | No | No | N/A |
+| Streaming output | SSE | SSE | Via Dynamo | SSE | SSE | SSE | SSE | No (library) |
+| Speculative decoding | Yes | V2 (default) | EAGLE-3 | Via backend | Via vLLM | Yes | Partial | No |
+| KV tiering (GPU→CPU→SSD) | HMA (v0.21) | No | FlexKV | Native (4-tier) | Via vLLM | No | No | N/A |
+| Kubernetes operator | Via llm-d | No | No | Grove | Native CRDs | No | No | No |
+| CPU inference | Partial | MLX (Apple) | No | No | No | Partial | No | Primary target |
+
+### 12.2 Optimization and Quantization
+
+| Feature | vLLM (v0.21) | SGLang (v0.5.12) | TRT-LLM (v1.3) | Dynamo (1.0) | llm-d (v0.6) | TGI (archived) | LMDeploy | BitNet |
+|---------|------|--------|---------|--------|-------|-----|----------|---------|
+| FlashAttention v2/v3/v4 | FA4 (MLA) | FA v2/v3 | FA v2/v3 | Via backend | Via vLLM | FA v2/v3 | FA v2/v3 | N/A |
+| FP8 weights | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | N/A |
+| FP8 KV cache | Yes | Yes | Yes | Via backend | Via vLLM | Partial | Partial | N/A |
+| NVFP4 KV cache | Yes (v0.21) | No | Yes (Blackwell) | Via backend | Via vLLM | No | No | N/A |
+| 2-bit KV compression | TurboQuant | No | No | No | No | No | No | N/A |
+| INT8 (AWQ/GPTQ) | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | N/A |
+| INT4 quantization | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | N/A |
+| 1-bit (ternary) weights | No | No | No | No | No | No | No | Native |
+| Speculative decoding | Yes | V2 (default) | EAGLE-3 | Via backend | Via vLLM | Yes | Partial | No |
+
+### 12.3 Model and Architecture Support
+
+| Feature | vLLM (v0.21) | SGLang (v0.5.12) | TRT-LLM (v1.3) | Dynamo (1.0) | llm-d (v0.6) | TGI (archived) | LMDeploy | BitNet |
+|---------|------|--------|---------|--------|-------|-----|----------|---------|
+| MoE models | Yes | Elastic EP (v0.5) | Yes | Via backend | Via vLLM | Yes | Partial | No |
+| Multimodal (VLM) | Yes | Yes | Yes | E/P/D disaggr. | Via vLLM | Yes | Partial | No |
+| Image/video generation | No | SGLang-Diffusion | No | Via backend | No | No | No | No |
+| Mamba hybrids | Yes | Yes | Prefix cache (v1.3) | Via backend | Via vLLM | No | No | No |
+| Multi-LoRA | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Partial | No |
+| Structured output | Outlines, xgrammar | xgrammar | xgrammar | Via backend | Via vLLM | Outlines | Partial | No |
+| HuggingFace models | Broadest | Broad | Limited | Via backend | Broad | Broadest | Focused | BitNet only |
+| Apple Silicon | No | MLX (v0.5) | No | No | No | No | No | ARM CPU |
+
+### 12.4 Parallelism and Deployment
+
+| Feature | vLLM (v0.21) | SGLang (v0.5.12) | TRT-LLM (v1.3) | Dynamo (1.0) | llm-d (v0.6) | TGI (archived) | LMDeploy | BitNet |
+|---------|------|--------|---------|--------|-------|-----|----------|---------|
+| Tensor parallelism | Yes | Yes | Yes | Via backend | Via vLLM | Yes | Yes | No |
+| Pipeline parallelism | Yes | Yes | Yes | Via backend | Via vLLM | No | Partial | No |
+| Expert parallelism | Yes | Elastic EP | Yes | Via backend | Via vLLM | Partial | No | No |
+| Multi-node | Yes | Yes | Yes | Native (Grove) | Native | Partial | No | No |
+| OpenAI-compatible API | Yes | Yes | Via Dynamo | Yes | Yes | Yes | Yes | No |
+| NVIDIA GPUs | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| AMD GPUs | Yes | Partial | No | No | Yes | Partial | No | No |
+| Apple Silicon | No | MLX (v0.5) | No | No | No | No | No | ARM CPU |
+| CPU-only | Partial | Partial (MLX) | No | No | No | Partial | No | Primary |
+| Open source | Yes | Yes | Weights only | Yes | Yes (CNCF) | Yes | Yes | Yes |
+
+---
+
+## 13. Deep Dive: SGLang vs vLLM Architecture Comparison
 
 The two most popular open-source engines share the same logical architecture (scheduler, block manager, model runner) but differ in three critical design choices: KV cache indexing, scheduler implementation language, and attention kernel library.
 
-### 12.1 RadixAttention vs PagedAttention prefix caching
+### 13.1 RadixAttention vs PagedAttention prefix caching
 
 | Dimension | vLLM (hash-chain APC) | SGLang (RadixAttention) |
 |-----------|------------------------|-------------------------|
@@ -460,7 +574,7 @@ SGLang radix tree: tree has a node for tokens 0--99 (the shared prefix). Three c
 
 The difference grows with shorter shared prefixes and longer block sizes. With $B_s = 16$ and a 17-token shared prefix, hash-chain matches 0 tokens (the entire block differs) while the radix tree matches all 17.
 
-### 12.2 Scheduler implementation
+### 13.2 Scheduler implementation
 
 | Dimension | vLLM V1 | SGLang |
 |-----------|---------|--------|
@@ -472,7 +586,7 @@ The difference grows with shorter shared prefixes and longer block sizes. With $
 
 Both eliminate Python from the scheduling critical path. SGLang's Rust scheduler has slightly lower overhead at very high request rates (>500 concurrent sequences), but the difference is small enough (tens of microseconds) to be negligible compared to GPU step times (20--80 ms).
 
-### 12.3 Attention kernel choice
+### 13.3 Attention kernel choice
 
 | Kernel | vLLM | SGLang |
 |--------|------|--------|
@@ -482,7 +596,7 @@ Both eliminate Python from the scheduling critical path. SGLang's Rust scheduler
 
 FlashInfer provides better performance on heterogeneous batch shapes (mixed prefill + decode with varying sequence lengths) because it compiles attention kernels JIT for the specific batch shape. vLLM's custom kernels are more portable across GPU architectures but may have higher launch overhead for ragged batches.
 
-### 12.4 Benchmark comparison
+### 13.4 Benchmark comparison
 
 Approximate performance on H100 8-GPU node, Llama-3-70B FP8:
 
@@ -498,9 +612,9 @@ The SGLang advantage concentrates in workloads with complex prefix reuse pattern
 
 ---
 
-## 13. Deep Dive: TensorRT-LLM Internals
+## 14. Deep Dive: TensorRT-LLM Internals
 
-### 13.1 The compilation pipeline
+### 14.1 The compilation pipeline
 
 TRT-LLM does not interpret a model at runtime. It compiles the full inference graph into an optimized binary engine before deployment. The pipeline:
 
@@ -528,7 +642,7 @@ flowchart LR
 
 **Step 5: Engine serialization.** The optimized graph, selected kernels, quantized weights, and memory plan are serialized into a single binary file (the "engine"). This file is typically several GB and is loaded at deployment time with zero additional compilation.
 
-### 13.2 Kernel fusion
+### 14.2 Kernel fusion
 
 TRT-LLM achieves its performance advantage primarily through aggressive kernel fusion that Python-based frameworks cannot replicate:
 
@@ -542,7 +656,7 @@ TRT-LLM achieves its performance advantage primarily through aggressive kernel f
 
 Each eliminated kernel launch saves 5--20 $\mu$s of overhead. Each eliminated global memory round-trip saves a read and write of the activation tensor ($B \times d$ elements). Across 80 layers, these savings compound to 10--30% lower latency.
 
-### 13.3 Plugin architecture
+### 14.3 Plugin architecture
 
 Not all operations can be expressed as standard TensorRT layers. TRT-LLM uses a **plugin** system for custom operations:
 
@@ -556,7 +670,7 @@ Plugins are compiled CUDA code loaded at engine build time. They are not open so
 
 **Adding a new model** requires: (1) writing a model definition in TRT-LLM's Python API that constructs the ONNX-compatible graph, (2) ensuring all operations have either a TRT native implementation or a plugin, (3) running the build pipeline for each target configuration. This typically takes days to weeks per model, compared to hours for vLLM (which just needs a PyTorch model definition).
 
-### 13.4 Batched inference handling
+### 14.4 Batched inference handling
 
 TRT-LLM handles batching differently from vLLM/SGLang:
 
@@ -567,33 +681,45 @@ TRT-LLM handles batching differently from vLLM/SGLang:
 
 ---
 
-## 14. Performance Comparison
+## 15. Performance Comparison
 
-### 14.1 Latency and Throughput
+### 15.1 Latency and Throughput
 
 Approximate performance on H100 8-GPU node, Llama-3-70B FP8, 8K context, production chat workload. These numbers shift with releases — always benchmark on your workload.
 
 | Framework | TTFT p50 | TPOT p50 | Throughput (tok/s/node) | Prefix cache benefit |
 |-----------|----------|----------|--------------------------|---------------------|
-| TRT-LLM | 40–70 ms | 12–20 ms | Highest | Moderate |
-| vLLM | 50–100 ms | 15–25 ms | High | High |
-| SGLang | 40–80 ms | 15–25 ms | High (best with prefix hits) | Highest |
-| TGI | 70–140 ms | 20–35 ms | Medium | Moderate |
+| TRT-LLM v1.3 | 35–65 ms | 10–18 ms | Highest | High (FlexKV + EAGLE-3) |
+| vLLM v0.21 | 45–90 ms | 14–22 ms | High (HMA extends capacity) | High |
+| SGLang v0.5.12 | 35–70 ms | 14–22 ms | High (best with prefix hits) | Highest (RadixAttention) |
+| TGI (archived) | 70–140 ms | 20–35 ms | Medium | Moderate |
 | LMDeploy | 50–90 ms | 15–25 ms | High (on supported models) | Moderate |
+| BitNet (CPU) | 200–500 ms | 100–300 ms | 5–7 tok/s (100B on 1 CPU) | N/A |
 
-### 14.2 Where Performance Differences Come From
+### 15.2 Multi-Node / Cluster Performance (2026)
+
+For large-scale disaggregated deployments, the orchestration-layer frameworks report:
+
+| Stack | Hardware | Throughput | Notes |
+|-------|----------|------------|-------|
+| Dynamo 1.0 | DeepSeek R1 GB200 | 7x vs prev-gen | NVIDIA benchmark |
+| Dynamo 1.0 | GB300 NVL72 (multi-node) | 750x throughput | Peak synthetic |
+| llm-d v0.6 | Single B200 decode GPU | ~3,100 tok/s | Isolated decode |
+| llm-d v0.6 | 16x16 B200 cluster (256 GPU) | ~50,000 tok/s | Near-linear scaling |
+
+### 15.3 Where Performance Differences Come From
 
 The same model on the same hardware produces different throughput across frameworks. The sources of the gap:
 
 $$\text{Throughput} = \frac{\text{Effective tokens per step}}{\text{Step latency}}$$
 
 1. **Kernel quality** — TRT-LLM's compiled kernels fuse more operations and have tighter memory access patterns. The gap is largest on quantized GEMM and attention kernels.
-2. **Scheduler overhead** — at high RPS, the time spent in `scheduler.next_step()` matters. TRT-LLM's C++ scheduler and SGLang's Rust scheduler have lower overhead than vLLM's V0 Python scheduler (largely fixed in V1).
+2. **Scheduler overhead** — at high RPS, the time spent in `scheduler.next_step()` matters. TRT-LLM's C++ scheduler, SGLang's Rust scheduler, and Dynamo's Rust orchestrator have lower overhead than vLLM's V0 Python scheduler (largely fixed in V1 C++).
 3. **Prefix cache effectiveness** — SGLang's radix tree achieves higher hit rates on chat workloads, reducing effective prefill cost per request.
 4. **Memory efficiency** — framework overhead (Python runtime, temporary buffers, framework-managed tensors) reduces the KV cache budget. TRT-LLM's compiled runtime has the smallest overhead.
 5. **Sampling path** — structured-output grammar masking adds per-step cost. Implementations vary in how much they GPU-accelerate the constraint application.
 
-### 14.3 Benchmarking Methodology
+### 15.4 Benchmarking Methodology
 
 When comparing frameworks, control for:
 
@@ -605,34 +731,36 @@ When comparing frameworks, control for:
 
 ---
 
-## 15. Choosing a Framework: Decision Framework
+## 16. Choosing a Framework: Decision Framework
 
-### 15.1 Production GPU Fleet, OpenAI-Style API
+### 16.1 Production GPU Fleet, OpenAI-Style API
 
 | Priority | Recommended | Rationale |
 |----------|-------------|-----------|
-| General-purpose, broad model coverage | vLLM | Largest model support, fastest feature uptake, massive community |
-| Lowest latency on NVIDIA | TRT-LLM | Compiled kernels, C++ scheduler, best peak perf |
-| Chat/agentic with prompt reuse | SGLang | RadixAttention, best prefix-cache hit rates |
-| Quickest time-to-production | TGI | One-command HF Hub deployment |
+| General-purpose, broad model coverage | vLLM v0.21 | Largest model support, HMA for extended KV capacity, fastest feature uptake, massive community |
+| Lowest latency on NVIDIA | TRT-LLM v1.3 | EAGLE-3 speculation, compiled kernels, C++ scheduler, best peak perf |
+| Chat/agentic with prompt reuse | SGLang v0.5.12 | RadixAttention, Spec Decoding V2, best prefix-cache hit rates |
+| Quickest time-to-production | vLLM | TGI was the previous recommendation but is now archived; vLLM fills this role |
 
-### 15.2 Multi-Node Disaggregated Serving
+### 16.2 Multi-Node Disaggregated Serving
 
 | Stack | When |
 |-------|------|
-| NVIDIA Dynamo | NVIDIA-only fleet, already using Triton, want vendor support |
-| llm-d | Heterogeneous fleet, open-source preference, vLLM-based |
+| NVIDIA Dynamo 1.0 | NVIDIA-only fleet, NVL72 racks, want vendor support, tiered KV eviction to S3/blob |
+| llm-d v0.6 | Heterogeneous fleet, open-source/CNCF preference, vLLM-based, B200 clusters |
 | SGLang disaggregated mode | Chat/agentic workloads with heavy prefix sharing at cluster scale |
 
-### 15.3 Edge and Heterogeneous
+### 16.3 Edge, CPU, and Heterogeneous
 
 | Framework | When |
 |-----------|------|
-| MLC-LLM | Cross-vendor compile-once (NVIDIA, AMD, Apple Silicon, Intel, mobile) |
+| BitNet / bitnet.cpp | CPU-only, edge, power-constrained; 1-bit models acceptable for quality |
 | llama.cpp | CPU-only, Apple Silicon, local development, GGUF quantized models |
+| SGLang (MLX backend) | Apple Silicon with vLLM-equivalent serving features |
 | vLLM (CPU mode) | CPU inference with PyTorch-based flexibility |
+| MLC-LLM | Cross-vendor compile-once (NVIDIA, AMD, Apple Silicon, Intel, mobile) |
 
-### 15.4 Research and Quick Iteration
+### 16.4 Research and Quick Iteration
 
 | Framework | When |
 |-----------|------|
@@ -642,9 +770,9 @@ When comparing frameworks, control for:
 
 ---
 
-## 16. Common Architectural Patterns
+## 17. Common Architectural Patterns
 
-### 16.1 Engine Process Model
+### 17.1 Engine Process Model
 
 Most engines run as a single process per inference replica with a worker per GPU shard:
 
@@ -663,21 +791,21 @@ flowchart TB
 
 Workers communicate via NCCL collectives (all-reduce for TP, point-to-point for PP). The scheduler dispatches step inputs to all workers; they execute in lockstep.
 
-### 16.2 KV Cache Manager
+### 17.2 KV Cache Manager
 
 Pages = fixed-size blocks of $B$ tokens (typically $B = 16$). Per-sequence block table. Allocation: pop from free list. Sharing: refcount increment on prefix match. Eviction: LRU on cached prefixes; recompute or swap on preemption.
 
 $$\text{Num blocks} = \frac{\text{HBM allocated to KV}}{2 \cdot L \cdot H_{kv} \cdot d \cdot b \cdot B}$$
 
-### 16.3 Sampling
+### 17.3 Sampling
 
 Per-sequence parameters: temperature, top-$k$, top-$p$, repetition penalty, frequency/presence penalty, logit bias, grammar mask. Implementation: GPU kernels (Triton or CUDA) with per-row parameter arrays. Output: token IDs plus optional logprobs and top-logprobs.
 
-### 16.4 Streaming
+### 17.4 Streaming
 
 Each token emitted by the sampler goes through a response queue to the client via Server-Sent Events (SSE) or chunked HTTP streaming. The tokenizer detokenizes on-the-fly with byte-pair fallback for incomplete UTF-8 sequences at chunk boundaries.
 
-### 16.5 Multi-LoRA Serving
+### 17.5 Multi-LoRA Serving
 
 Each request specifies a LoRA adapter ID. The engine:
 1. Groups requests by adapter, or
@@ -687,7 +815,7 @@ Adapter weights are small ($< 1$ GB typically), so they can be cached in GPU mem
 
 ---
 
-## 17. The Build vs. Interpret Tradeoff
+## 18. The Build vs. Interpret Tradeoff
 
 TRT-LLM's compiled approach and vLLM/SGLang's interpreted approach represent a fundamental design axis.
 
@@ -704,7 +832,7 @@ Most production deployments land on a hybrid: TRT-LLM for the latency-critical f
 
 ---
 
-## 18. Multimodal Inference
+## 19. Multimodal Inference
 
 Vision, audio, and image-generation extensions follow the same framework pattern but add complexity:
 
@@ -715,27 +843,33 @@ Vision, audio, and image-generation extensions follow the same framework pattern
 
 vLLM, SGLang, and TRT-LLM all support major VLMs. The encoder forward pass is typically a separate model execution that produces embeddings; these are then treated as additional "tokens" by the LLM's prefill step. Framework differences are in which encoder architectures are supported and how efficiently the encoder weights are managed (loaded/unloaded, shared across requests).
 
+Dynamo 1.0's Multimodal E/P/D (encode/prefill/decode disaggregation) takes this further by running each stage on dedicated GPU pools, achieving 30% faster TTFT on image inputs. SGLang v0.5.12's SGLang-Diffusion extends the framework into image and video generation, using the same radix tree for prompt caching on diffusion pipelines.
+
 ---
 
-## 19. Common Pitfalls
+## 20. Common Pitfalls
 
-1. **Picking TRT-LLM without a build pipeline.** Each model + TP + precision + max_seq_len combination is its own compiled engine. Without automated build and validation CI, deployment becomes manual and error-prone.
+1. **Picking TRT-LLM without a build pipeline.** Each model + TP + precision + max_seq_len combination is its own compiled engine. Without automated build and validation CI, deployment becomes manual and error-prone. (FlexKV in v1.3 reduces but does not eliminate this burden.)
 
-2. **Underestimating scheduler overhead.** At high RPS (hundreds of concurrent requests), the scheduler can become CPU-bound. vLLM V1's C++ scheduler and SGLang's Rust scheduler address this; older Python schedulers bottleneck at $\sim$50–100 concurrent requests.
+2. **Underestimating scheduler overhead.** At high RPS (hundreds of concurrent requests), the scheduler can become CPU-bound. vLLM V1's C++ scheduler, SGLang's Rust scheduler, and Dynamo's Rust orchestrator address this; older Python schedulers bottleneck at $\sim$50–100 concurrent requests.
 
 3. **No prefix caching.** For chat, RAG, and agentic workloads, prefix caching is a 2–5$\times$ throughput improvement that costs almost nothing to enable. Leaving it off is the single most common misconfiguration.
 
-4. **Wrong attention implementation.** Forgetting to enable FlashAttention v2/v3, or using a paged-attention kernel that doesn't support the current block size. Always verify the kernel in use via logs or profiling.
+4. **Wrong attention implementation.** Forgetting to enable FlashAttention (v2/v3/v4), or using a paged-attention kernel that doesn't support the current block size. Always verify the kernel in use via logs or profiling.
 
-5. **Ignoring quantization accuracy.** FP8 is nearly free on Hopper but INT4 AWQ can degrade quality on sensitive tasks. Always validate perplexity and downstream benchmarks after quantization, not just throughput.
+5. **Ignoring quantization accuracy.** FP8 is nearly free on Hopper but INT4 AWQ can degrade quality on sensitive tasks. Always validate perplexity and downstream benchmarks after quantization, not just throughput. BitNet's 1-bit weights have a larger quality gap — validate carefully for your use case.
 
 6. **Mismatched parallelism.** Using TP=8 on a 2-node system where PP=2 + TP=4 would be faster (TP across NVLink is fast; TP across NICs is slow). Understand the NVLink topology before choosing parallelism.
 
-7. **No observability.** Deploying without per-request TTFT/TPOT histograms, KV occupancy metrics, and prefix-cache hit rates means flying blind. SLO violations are invisible until users complain.
+7. **No observability.** Deploying without per-request TTFT/TPOT histograms, KV occupancy metrics, and prefix-cache hit rates means flying blind. SLO violations are invisible until users complain. TRT-LLM v1.3 now ships production Prometheus metrics out of the box.
+
+8. **Using TGI for new deployments.** TGI was archived in March 2026. New deployments should use vLLM (HuggingFace's recommendation) or SGLang. Existing TGI deployments should plan migration.
+
+9. **Ignoring heterogeneous memory.** vLLM's HMA and Dynamo's tiered KV eviction mean that GPU HBM is no longer the hard limit on KV cache capacity. Not using these features leaves significant throughput on the table for long-context workloads.
 
 ---
 
-## 20. Common Interview Questions
+## 21. Common Interview Questions
 
 **Q: Compare vLLM and TensorRT-LLM. When would you pick each?**
 
@@ -751,7 +885,7 @@ A: Each sequence has an independent block table over a global block pool. Sequen
 
 **Q: What is NVIDIA Dynamo's role in the inference stack?**
 
-A: Dynamo is a multi-node orchestration layer, not a per-GPU engine. It disaggregates prefill and decode across separate GPU pools, manages KV transfer via NIXL, routes requests with prefix-locality awareness, and uses TRT-LLM or vLLM as pluggable engine backends. It sits above the engine in the stack hierarchy.
+A: Dynamo 1.0 (successor to Triton Inference Server for LLM serving) is a multi-node orchestration layer built in Rust + Python, not a per-GPU engine. It disaggregates prefill and decode across separate GPU pools, manages KV transfer with tiered eviction (GPU → CPU → SSD → remote storage) via NIXL, routes requests with prefix-locality awareness, and uses SGLang, TRT-LLM, or vLLM as pluggable engine backends. Key additions in 1.0 include the Planner (SLA-driven autoscaler), Grove (K8s operator for NVL72 topology-aware scheduling), ModelExpress (7x faster cold starts), and AIConfigurator (automated deployment configuration). It sits above the engine in the stack hierarchy.
 
 **Q: What does "structured output" mean and how is it implemented?**
 
@@ -773,20 +907,26 @@ A: Compiled engines (TRT-LLM) fuse operators and auto-tune kernels at build time
 
 A: (1) Check if input distribution changed (longer prompts, bigger batch). (2) Inspect KV occupancy and prefix-cache hit rate. (3) GPU utilization from DCGM or Nsight — is the GPU compute-bound or memory-bound? (4) Compare engine version against the known-good baseline. (5) Check NCCL bus bandwidth (inter-node degradation). (6) Look for failure-mode regressions (NaN handling, synchronization barriers, sampling-path changes).
 
+**Q: What is BitNet and how does it differ from quantization-based approaches?**
+
+A: BitNet uses ternary weights ($\{-1, 0, +1\}$) trained natively from scratch rather than post-training quantization of a floating-point model. This eliminates almost all floating-point multiplications — matmul becomes conditional addition/subtraction. The result is 1.37x–6.17x CPU speedup and 55–82% energy reduction versus FP16. However, only BitNet-trained models work; you cannot run standard Llama or Qwen models. The quality gap with FP16 is measurable but narrows at scale. BitNet is best for CPU-only, edge, or power-constrained deployments where GPU inference is not feasible.
+
 **Q: When would you NOT use a data-center inference framework?**
 
-A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM compiled for the target). Research requiring full execution control (raw PyTorch with custom kernels). CPU-only inference where the overhead of GPU-oriented frameworks is wasted.
+A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM compiled for the target). CPU-only or power-constrained deployment (BitNet/bitnet.cpp runs 100B models on a single CPU at 5–7 tok/s with 55–82% energy reduction). Apple Silicon (SGLang's MLX backend). Research requiring full execution control (raw PyTorch with custom kernels). CPU-only inference where the overhead of GPU-oriented frameworks is wasted.
 
 ---
 
-## 21. Further Reading
+## 22. Further Reading
 
 - Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) — the vLLM paper.
 - Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) — RadixAttention and the SGLang engine.
-- TensorRT-LLM documentation, NVIDIA Developer — build pipeline, kernel details, deployment guides.
-- NVIDIA Dynamo documentation and GTC 2025 talks — disaggregated serving architecture.
-- llm-d project repository (Meta) — open-source disaggregated serving stack.
-- Triton Inference Server documentation — model hosting, dynamic batching, multi-framework backends.
+- TensorRT-LLM v1.3 documentation, NVIDIA Developer — EAGLE-3, FlexKV, build pipeline, deployment guides.
+- NVIDIA Dynamo 1.0 documentation and GTC 2026 talks — disaggregated serving, KV Block Manager, Grove, Planner, AIConfigurator.
+- llm-d project repository (CNCF Sandbox) — open-source disaggregated serving stack, v0.6 performance data.
+- BitNet / bitnet.cpp (Microsoft) — 1-bit LLM inference framework, CPU and GPU kernels.
+- vLLM v0.21 release notes — HMA, TurboQuant, FlashAttention 4, vLLM IR, bi-directional KV transfer.
+- SGLang v0.5.12 release notes — Spec Decoding V2, piecewise CUDA graphs, NIXL-EP, MLX backend, SGLang-Diffusion.
 - "Deep Dive into LLM Inference Acceleration" — Anyscale, Mosaic AI, and NVIDIA technical blogs.
 
 ---

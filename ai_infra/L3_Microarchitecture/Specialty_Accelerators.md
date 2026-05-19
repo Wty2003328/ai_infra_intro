@@ -143,6 +143,42 @@ Both are systolic + VLIW. Differences:
 
 Groq is the latency play; TPU is the cost play.
 
+### 2.7 Groq LPU II — next-generation deterministic inference
+
+Groq's LPU II is the successor to the original LPU, preserving the deterministic execution model while roughly doubling on-chip capacity and throughput.
+
+**Key improvements over LPU I:**
+
+| | LPU I | LPU II |
+|---|---|---|
+| On-chip SRAM | ~230 MB | ~460 MB |
+| INT8 throughput | ~750 TFLOPS | ~1,500 TFLOPS |
+| BF16 throughput | ~150 TFLOPS | ~300 TFLOPS (est.) |
+| Inter-chip fabric | GroqLink | GroqLink 2 (higher BW) |
+| TDP | ~300 W | ~400–500 W (est.) |
+
+**Architecture changes:**
+
+- **Larger SRAM** (~460 MB vs ~230 MB) enables either larger models per chip or larger batch sizes within the same chip count. A 7 B-parameter model at FP8 (~7 GB) can now fit across ~15 LPU II chips vs ~30 LPU I chips, halving the cost and power per inference replica.
+- **Higher INT8 throughput** (~1.5 TFLOPS per chip) comes from a wider functional-unit array and higher clock, maintaining the same cycle-accurate determinism.
+- **GroqLink 2** provides higher inter-chip bandwidth for activation streaming, reducing pipeline bubble overhead in multi-chip deployments.
+- **Deterministic execution model preserved**: software still schedules every cycle at compile time. No caches, no HBM, no dynamic scheduling — every operation's latency is known exactly before the chip runs.
+
+**Target workloads:**
+
+- **Single-chip inference for 7 B-class models at FP8**: ~7 GB weights fit comfortably across a small LPU II pod (~15 chips), with room for KV cache in SRAM.
+- **Multi-chip for 70 B-class models**: chip count drops from ~600 (LPU I) to ~300 (LPU II) for a 70 B FP16 model, significantly improving $/inference.
+
+**Timeline**: announced 2025, production 2026.
+
+**Revised 70 B estimate:**
+
+$$
+N_{\text{chips,II}} \;\ge\; \frac{140\,000}{460} \;\approx\; 305\ \text{chips}
+$$
+
+Halving the chip count roughly halves the capital cost per replica (from ~$12M to ~$6M at $20K/chip), narrowing the cost gap with GPU-based serving while preserving the sub-millisecond TTFT advantage.
+
 ---
 
 ## 3. Tenstorrent — RISC-V + Tensix mesh
@@ -203,24 +239,57 @@ This is **closer to a CPU programming model than a GPU one**. Trade off: less pa
 
 ---
 
-## 4. Comparison summary
+## 4. FPGA-based AI Acceleration
 
-| | Cerebras WSE-3 | Groq LPU | Tenstorrent Blackhole |
+FPGAs fill the niche between GPU flexibility and ASIC efficiency: lower volume deployments, custom data types, and ultra-low latency inference where the NRE cost of a full custom ASIC cannot be justified.
+
+### 4.1 Current FPGA AI platforms
+
+| Platform | Vendor | AI Performance | Key Feature |
 |---|---|---|---|
-| Form factor | Wafer (1 chip = 1 wafer) | Single chip | Single chip |
-| On-die SRAM | 44 GB | 230 MB | ~120 MB (1 MB × 120 tiles) |
-| HBM | none | none | HBM3 |
-| Peak FLOPS | ~125 PF FP16 | ~150 TF BF16 | ~1 PF FP8 |
-| Ridge point | ~6 FLOP/B | ~5 FLOP/B (SRAM) | ~50 FLOP/B (HBM-bound) |
-| Determinism | ~1% variance | ~0% variance | normal |
-| Programming | graph-only, no kernel | VLIW compiler | RISC-V + ML compiler |
-| Domain | Wafer = 1 system | 600+ chips per Llama-70B replica | rack-scale via Ethernet NoC |
-| Best workload | long-context + dense small models | latency-critical chat | per-watt inference |
-| TDP per chip/system | 23 kW (system) | 300 W | 300 W |
+| Versal AI Core (V70) | AMD/Xilinx | ~130 TOPS INT8 | Adaptive AI engine array with INT8/BF16 support, programmable via Vitis AI |
+| Agilex 7 | Intel | up to 40 TOPS | DSP blocks with AI-optimized BF16/FP8 support, oneAPI programmable |
+
+### 4.2 Programming model
+
+- **Vitis AI** (AMD/Xilinx): high-level flow that quantizes, compiles, and deploys ML models onto Versal AI engines. Supports TensorFlow, PyTorch, and ONNX as frontends.
+- **Intel oneAPI for FPGAs**: SYCL-based programming with FPGA-specific pragmas for pipeline parallelism and memory banking.
+- **HLS (High-Level Synthesis)**: C/C++ input that generates RTL. The standard entry point for custom FPGA kernels; requires understanding of pipeline initiation interval (II), loop unrolling, and on-chip memory banking.
+
+### 4.3 Use cases where FPGAs win
+
+- **Financial inference** (ultra-low latency): FPGA-based inference achieves < 1 us end-to-end latency for small models (e.g., options pricing, order-book prediction) — below what any GPU or even Groq can deliver because the FPGA eliminates scheduler overhead entirely and implements the inference graph as a spatial pipeline with zero-latency inter-stage communication.
+- **Custom quantization formats**: FPGAs can implement arbitrary fixed-point or floating-point formats (e.g., log-quantized, block-FP with non-standard block sizes) without waiting for GPU tensor-core support in future silicon.
+- **Early-stage hardware prototyping**: FPGA prototyping of novel AI accelerator architectures (e.g., analog compute, spiking neural networks) before tape-out.
+
+### 4.4 Tradeoffs
+
+- **5-10x lower FLOPS/Watt** than an equivalent ASIC: FPGAs pay a reconfigurability tax in routing overhead, larger configuration SRAM, and suboptimal DSP placement.
+- **Higher development cost than GPU**: FPGA development cycles are measured in weeks-to-months (HLS compilation, timing closure, floorplanning) vs hours-to-days for GPU kernel development in CUDA/Triton.
+- **Throughput ceiling**: even the highest-end FPGA (Versal V70 at ~130 TOPS INT8) is ~10x below a B200 at FP8 (~4,500 TOPS). FPGAs compete on latency and customizability, not throughput.
 
 ---
 
-## 5. End-to-end cause / effect
+## 5. Comparison summary
+
+| | Cerebras WSE-3 | Groq LPU | Groq LPU II | Tenstorrent Blackhole |
+|---|---|---|---|---|
+| Form factor | Wafer (1 chip = 1 wafer) | Single chip | Single chip | Single chip |
+| On-die SRAM | 44 GB | 230 MB | ~460 MB | ~120 MB (1 MB × 120 tiles) |
+| HBM | none | none | none | HBM3 |
+| Peak FLOPS | ~125 PF FP16 | ~150 TF BF16 | ~300 TF BF16 (est.) | ~1 PF FP8 |
+| INT8 throughput | — | ~750 TF | ~1,500 TF | — |
+| Ridge point | ~6 FLOP/B | ~5 FLOP/B (SRAM) | ~5 FLOP/B (SRAM) | ~50 FLOP/B (HBM-bound) |
+| Determinism | ~1% variance | ~0% variance | ~0% variance | normal |
+| Programming | graph-only, no kernel | VLIW compiler | VLIW compiler | RISC-V + ML compiler |
+| Domain | Wafer = 1 system | 600+ chips per Llama-70B replica | ~300 chips per Llama-70B replica | rack-scale via Ethernet NoC |
+| Best workload | long-context + dense small models | latency-critical chat | latency-critical chat (larger models) | per-watt inference |
+| TDP per chip/system | 23 kW (system) | 300 W | ~400–500 W (est.) | 300 W |
+| Timeline | shipping | shipping | announced 2025, prod 2026 | shipping |
+
+---
+
+## 6. End-to-end cause / effect
 
 ```mermaid
 flowchart TD
@@ -247,7 +316,7 @@ flowchart TD
 
 ---
 
-## 6. Numbers to memorize
+## 7. Numbers to memorize
 
 | Quantity | Value | Why |
 |---|---|---|
@@ -261,8 +330,12 @@ flowchart TD
 | Groq LPU SRAM | ~230 MB | per chip |
 | Groq LPU INT8 peak | ~750 TFLOPS | per chip |
 | Groq LPU TDP | ~300 W | per chip |
-| Groq variance | ~0% | deterministic |
-| Groq chips for 70 B FP16 | ~600 | spread weights across SRAM |
+| Groq LPU II SRAM | ~460 MB | per chip (2× LPU I) |
+| Groq LPU II INT8 peak | ~1,500 TFLOPS | per chip (2× LPU I) |
+| Groq LPU II TDP | ~400–500 W (est.) | per chip |
+| Groq LPU II chips for 70 B FP16 | ~305 | halved vs LPU I |
+| Groq variance | ~0% | deterministic (both generations) |
+| Groq chips for 70 B FP16 | ~600 | spread weights across SRAM (LPU I) |
 | Tenstorrent Tensix tiles per Blackhole | ~120 | 2D mesh |
 | Tensix tile SRAM | ~1 MB | per tile |
 | Tensix RISC-V baby cores | 5 per tile | control |
@@ -270,7 +343,7 @@ flowchart TD
 
 ---
 
-## 7. Worked interview problems
+## 8. Worked interview problems
 
 **Q1.** *Why does Cerebras "invert the roofline"?*
 
@@ -301,7 +374,7 @@ For typical LLM serving, GPUs win on $/inference at any scale where ecosystem ma
 
 ---
 
-## 8. References
+## 9. References
 
 - Lie, *Scaling Deep Learning to Wafer Scale*, Hot Chips 2024 (Cerebras WSE-3).
 - Abts et al., *Think Fast: A Tensor Streaming Processor (TSP)*, ISCA 2020 (Groq).

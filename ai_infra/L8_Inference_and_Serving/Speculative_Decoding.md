@@ -8,7 +8,7 @@
 
 Decode-phase inference for large language models is memory-bandwidth-bound: every step reads the full weight matrix from HBM whether the model emits one token or scores ten. Speculative decoding exploits this slack by guessing several future tokens cheaply, then verifying them in a single target-model forward pass that costs essentially the same as a normal decode step. Every accepted token is pure throughput gain. The method delivers $1.5$--$4\times$ wall-clock speedup with no retraining, no hardware changes, and --- when implemented correctly --- no change to the output distribution.
 
-This page derives the algorithm from scratch, proves distributional equivalence, works through the acceptance-rate and speedup math, and covers every major variant in production use as of 2025--2026: vanilla speculative decoding, self-speculation via early exit, Medusa multi-token heads, EAGLE feature-level drafting, and n-gram/lookahead methods. A comparison table at the end summarizes the tradeoffs.
+This page derives the algorithm from scratch, proves distributional equivalence, works through the acceptance-rate and speedup math, and covers every major variant in production use as of 2025--2026: vanilla speculative decoding, self-speculation via early exit, Medusa multi-token heads, EAGLE feature-level drafting, n-gram/lookahead methods, DFLASH pipelined drafting, suffix automaton decoding, native MTP heads (Gemma 4), EAGLE-3 with MLA adaptation, and adaptive speculative decoding. A comparison table at the end summarizes the tradeoffs.
 
 ---
 
@@ -357,6 +357,8 @@ The dynamic tree hedges against uncertainty: it allocates verification budget wh
 
 EAGLE-3 fuses hidden states from multiple target model layers via a cross-layer attention mechanism. The intuition is that lower layers capture syntactic patterns while higher layers capture semantic content; combining them produces richer draft features. Reported acceptance rates: $0.88$--$0.95$.
 
+**Production status (2025).** EAGLE-3 is now production-ready across all three major inference frameworks: **vLLM**, **SGLang**, and **TensorRT-LLM (TRT-LLM)**. All three frameworks expose EAGLE-3 as a configurable speculative decoding backend, with the draft head loaded alongside the target model and tree verification handled natively. This makes EAGLE-3 the most widely deployed feature-level drafting method in production serving as of 2025.
+
 ### 5.6 Properties
 
 | Property | Value |
@@ -393,17 +395,85 @@ Lookahead decoding generalizes PLD by maintaining a pool of candidate $n$-gram c
 
 ---
 
-## 7. Acceptance Rate Math: Unified Framework
+## 7. Newer Methods (2025)
+
+### 7.1 DFLASH Speculative Decoding
+
+DFLASH is a speculative decoding method that appeared simultaneously in **SGLang v0.5.12** and **TRT-LLM v1.3.0** (2025). The core idea is to decouple the draft model's flash-attention computation from the target model's verification pass, allowing the draft to run asynchronously with overlapping memory accesses.
+
+Key characteristics:
+- **Asynchronous draft generation.** The draft model begins generating candidates for step $t+1$ while the target model is still verifying candidates for step $t$. This pipelining hides most of the draft latency.
+- **Flash-attention integration.** The draft model uses a specialized flash-attention kernel that is optimized for single-token (decode-phase) inputs, reducing the fixed overhead of launching attention for each draft step.
+- **Framework support.** Available in SGLang v0.5.12+ and TRT-LLM v1.3.0+, with similar API surface to vanilla speculative decoding.
+
+DFLASH targets the regime where a draft model from the same family is available (e.g., Llama-3.1-8B drafting for Llama-3.1-70B). Reported speedups: $2.0$--$3.0\times$ on chat benchmarks with acceptance rates of $0.65$--$0.80$.
+
+### 7.2 Suffix Automaton Speculative Decoding
+
+**TRT-LLM** introduced a suffix-automaton-based speculative decoding method that uses the suffix automaton (also known as a DAWG --- Directed Acyclic Word Graph) data structure for draft token selection.
+
+**How it works:**
+
+1. Build a suffix automaton from the prompt and previously generated tokens. The suffix automaton compactly encodes all substrings of the processed text.
+2. For each decode step, query the automaton with the current suffix to find the most likely continuations based on frequency statistics in the context.
+3. Select the top-$k$ continuations as draft tokens.
+4. Verify with the target model via standard rejection sampling.
+
+**Advantages over simple n-gram methods:**
+- The suffix automaton captures **all** substring frequencies, not just fixed-length n-grams. Variable-length patterns (common in code and structured text) are naturally represented.
+- Construction and querying are $O(n)$ where $n$ is the context length, with compact memory footprint.
+- No additional model parameters or training required.
+
+**Performance.** Best suited for repetitive and structured workloads (code generation, templated output, document continuation). Acceptance rates of $0.4$--$0.65$ on structured tasks, comparable to or exceeding simple n-gram/lookahead methods.
+
+### 7.3 Adaptive Speculative Decoding V2
+
+**vLLM** introduced Adaptive Speculative Decoding V2, which dynamically adjusts draft parameters based on real-time acceptance-rate feedback:
+
+- **Dynamic draft length ($\gamma$).** Instead of a fixed draft length, the system adjusts $\gamma$ per step based on a rolling estimate of the acceptance rate $\hat{\alpha}$. When $\hat{\alpha}$ is high, $\gamma$ is increased to capitalize on the alignment; when $\hat{\alpha}$ drops, $\gamma$ is decreased to avoid wasting draft compute on tokens that will be rejected.
+- **Dynamic draft model selection.** When multiple draft models are available (e.g., a small and a medium model from the same family), the system switches between them based on observed acceptance rates and draft latency.
+- **Automatic fallback.** If $\hat{\alpha}$ drops below a threshold for sustained steps, speculative decoding is automatically disabled and the system falls back to vanilla autoregressive decode.
+
+The adaptive mechanism maintains the speedup of speculative decoding across varying workload conditions (different prompt lengths, temperatures, and domain shifts) without manual tuning.
+
+### 7.4 Gemma 4 MTP: Native Multi-Token Prediction
+
+**Gemma 4** (Google DeepMind, 2025) introduces **native multi-token prediction (MTP) heads** built into the model architecture during pretraining. Unlike Medusa or EAGLE (which are post-hoc additions), Gemma 4's MTP heads are co-trained from the start:
+
+- The model has $N$ auxiliary prediction heads (typically $N = 4$--$6$) that predict tokens at positions $t+2, t+3, \ldots, t+N+1$ in parallel with the main LM head predicting $t+1$.
+- The heads share the transformer backbone but have separate output projections with learned positional offsets.
+- During pretraining, all heads are trained jointly with a combined loss.
+
+**Inference usage.** The MTP heads provide "free" draft tokens at every decode step --- no separate draft model or additional forward pass needed. The candidates are verified using standard rejection sampling.
+
+**Quality benefit.** Because the heads are trained jointly, the inter-token dependencies are better modeled than in post-hoc approaches. Google reports that MTP pretraining also improves the main head's quality (the auxiliary loss acts as a regularizer), a beneficial side effect also observed in DeepSeek-V3.
+
+### 7.5 Kimi K2.5 EAGLE-3 with MLA
+
+**Kimi K2.5** (Moonshot AI, 2025) combines EAGLE-3 speculative decoding with **Multi-head Latent Attention (MLA)**, the attention mechanism introduced by DeepSeek that compresses key-value projections into a low-rank latent space.
+
+The challenge of adapting EAGLE-3 to MLA models is that EAGLE-3's feature-level drafting relies on the target model's hidden states as input to the draft head. In MLA models, the hidden states are projected into a low-rank latent space before attention, and the draft head must operate in this latent representation rather than the full hidden state.
+
+**Adaptations:**
+1. The draft head operates on the **latent representation** $c_t$ (the compressed KV projection) rather than the full hidden state $h_t$.
+2. A lightweight projection layer maps the latent representation back to the draft head's input space.
+3. The shared LM head remains unchanged --- only the draft head's feature extraction pathway is modified.
+
+Reported speedups for Kimi K2.5 (a large MoE model with MLA): $2.5$--$3.5\times$ on chat benchmarks, demonstrating that feature-level drafting remains effective even in the compressed-attention regime.
+
+---
+
+## 8. Acceptance Rate Math: Unified Framework
 
 All speculative decoding methods share the same mathematical skeleton. The difference is how the draft distribution $q$ is produced.
 
-### 7.1 Per-Position Acceptance
+### 8.1 Per-Position Acceptance
 
 $$\alpha = 1 - \frac{1}{2}\|p - q\|_1 = \sum_{x} \min\bigl(p(x),\; q(x)\bigr)$$
 
 This connects acceptance rate to the **total variation distance** between draft and target: $\text{TV}(p, q) = \frac{1}{2}\|p - q\|_1 = 1 - \alpha$.
 
-### 7.2 Expected Tokens per Step
+### 8.2 Expected Tokens per Step
 
 For a sequential draft of length $\gamma$ with uniform acceptance $\alpha$:
 
@@ -415,7 +485,7 @@ $$\mathbb{E}[\text{tokens}]_{\text{tree}} \approx 1 + \sum_{i=1}^{d} \bigl(1 - (
 
 The tree wins when $\alpha$ is moderate (branching hedges against rejection). Sequential wins when $\alpha$ is high (branching wastes compute on paths that would have been accepted anyway).
 
-### 7.3 Temperature Dependence
+### 8.3 Temperature Dependence
 
 At temperature $\tau$, the distributions become $p_\tau(x) \propto p(x)^{1/\tau}$ and $q_\tau(x) \propto q(x)^{1/\tau}$.
 
@@ -428,9 +498,9 @@ At temperature $\tau$, the distributions become $p_\tau(x) \propto p(x)^{1/\tau}
 
 ---
 
-## 8. Engineering Integration
+## 9. Engineering Integration
 
-### 8.1 Integration with Continuous Batching
+### 9.1 Integration with Continuous Batching
 
 Inside a continuous-batching loop (see [Batching_and_Scheduling](Batching_and_Scheduling.md)), each step becomes:
 
@@ -448,7 +518,7 @@ for each step:
     8. Admit new requests into freed batch slots.
 ```
 
-### 8.2 KV Cache Rollback
+### 9.2 KV Cache Rollback
 
 During verification, the target model writes KV cache entries for all $\gamma + 1$ candidate positions. If only $n < \gamma$ tokens are accepted, the rejected entries must be discarded. With paged KV cache (see [KV_Cache](KV_Cache.md)), this is a metadata operation:
 
@@ -458,7 +528,7 @@ During verification, the target model writes KV cache entries for all $\gamma + 
 
 No data copying is required. The key invariant: after rollback, the KV cache contains entries for exactly the tokens that were accepted, in order.
 
-### 8.3 Tree Attention Kernels
+### 9.3 Tree Attention Kernels
 
 For Medusa and EAGLE tree verification, the attention kernel must respect tree structure. Standard causal attention allows position $i$ to attend to all positions $j \leq i$. Tree attention restricts this: position $i$ attends only to its ancestors in the tree plus itself.
 
@@ -468,7 +538,7 @@ Implementation options:
 
 Tree attention adds approximately $T / (\gamma + 1) \times$ verifier compute compared to sequential speculative decoding, where $T$ is the number of tree nodes. The tradeoff is worth it when the tree's branching compensates with higher expected acceptance.
 
-### 8.4 Interaction with Constrained Decoding
+### 9.4 Interaction with Constrained Decoding
 
 When serving structured output (JSON schema, grammar constraints), the constraint mask must be applied to **both** the draft and the verifier:
 
@@ -480,7 +550,7 @@ If the draft proposes grammar-illegal tokens, the verifier will reject them, but
 
 ---
 
-## 9. Failure Modes and Mitigations
+## 10. Failure Modes and Mitigations
 
 | Failure mode | Cause | Detection | Mitigation |
 |---|---|---|---|
@@ -494,7 +564,7 @@ If the draft proposes grammar-illegal tokens, the verifier will reject them, but
 
 ---
 
-## 10. Comparison of Methods
+## 11. Comparison of Methods
 
 | Method | Draft mechanism | Draft cost | $\alpha$ (typical) | Exact $p$? | Extra params | Speedup (chat) | Speedup (code) | Training needed |
 |--------|----------------|------------|---------------------|------------|--------------|----------------|----------------|-----------------|
@@ -503,20 +573,27 @@ If the draft proposes grammar-illegal tokens, the verifier will reject them, but
 | **Medusa** | Parallel prediction heads | Very low | $0.70$--$0.85$ | Approximate | $\sim 5\%$ | $2.0$--$2.8\times$ | $2.2$--$3.0\times$ | 1K--5K steps |
 | **EAGLE / EAGLE-2** | Feature-level autoregressive draft | Low (1--2 layers) | $0.85$--$0.92$ | Yes (w/ rejection) | $\sim 2\%$ | $2.8$--$3.5\times$ | $3.0$--$3.8\times$ | 1K--3K steps |
 | **EAGLE-3** | Multi-layer feature fusion | Low--medium | $0.88$--$0.95$ | Yes (w/ rejection) | $\sim 3\%$ | $3.2$--$4.0\times$ | $3.5$--$4.2\times$ | 2K--5K steps |
+| **EAGLE-3 w/ MLA** | Feature-level draft in latent space | Low--medium | $0.82$--$0.90$ | Yes (w/ rejection) | $\sim 3\%$ | $2.5$--$3.5\times$ | $2.8$--$3.5\times$ | 2K--5K steps + MLA adaptation |
 | **N-gram / Lookahead** | Hash-table lookup | $\approx 0$ | $0.30$--$0.60$ | Yes | 0 | $1.3$--$2.0\times$ | $1.8$--$2.8\times$ | None |
+| **Suffix automaton** | Suffix automaton DAWG lookup | $\approx 0$ | $0.40$--$0.65$ | Yes | 0 | $1.4$--$2.2\times$ | $2.0$--$3.0\times$ | None |
+| **DFLASH** | Async draft model + flash-attn | Low ($T_q \approx 0.1 T_p$, pipelined) | $0.65$--$0.80$ | Yes | 0 (separate weights) | $2.0$--$3.0\times$ | $2.2$--$3.2\times$ | None |
 | **Multi-token pred (DeepSeek-V3)** | Co-trained auxiliary heads | Very low | $0.70$--$0.85$ | Approximate | $\sim 8\%$ | $1.6$--$1.9\times$ | $1.8$--$2.2\times$ | During pretraining |
+| **Gemma 4 MTP** | Co-trained native MTP heads | Very low | $0.70$--$0.85$ | Approximate | $\sim 5\%$ | $1.6$--$2.0\times$ | $1.8$--$2.3\times$ | During pretraining |
+| **Adaptive V2** | Dynamic draft params + model selection | Varies (adaptive) | Varies (targeted) | Yes | 0 (uses existing draft models) | Varies (up to $3.0\times$) | Varies (up to $3.5\times$) | None |
 
 **Selection guide:**
 
-- **Maximum speedup, willing to fine-tune:** EAGLE-2 or EAGLE-3.
-- **No fine-tuning, same-family model available:** Vanilla with a smaller sibling.
-- **Repetitive workloads (code, templated output):** N-gram / Lookahead decoding.
+- **Maximum speedup, willing to fine-tune:** EAGLE-2 or EAGLE-3 (now production in vLLM, SGLang, TRT-LLM).
+- **No fine-tuning, same-family model available:** Vanilla with a smaller sibling, or DFLASH for pipelined draft generation.
+- **Repetitive workloads (code, templated output):** N-gram / Lookahead decoding, or suffix automaton for variable-length pattern matching.
 - **Constrained deployment (one model, no extra weights):** Early exit or Medusa.
-- **Training from scratch:** Multi-token prediction heads baked into the model.
+- **Training from scratch:** Multi-token prediction heads baked into the model (DeepSeek-V3 style), or native MTP heads (Gemma 4 style).
+- **MLA-based models (DeepSeek, Kimi):** EAGLE-3 w/ MLA adaptation.
+- **Variable workloads, mixed domains:** Adaptive V2 for automatic parameter tuning.
 
 ---
 
-## 11. When (Not) To Use Speculative Decoding
+## 12. When (Not) To Use Speculative Decoding
 
 **Use it when:**
 - Decode is the bottleneck (memory-bound regime, which is almost always for models $\geq 7$B).
@@ -532,7 +609,7 @@ If the draft proposes grammar-illegal tokens, the verifier will reject them, but
 
 ---
 
-## 12. Production Monitoring
+## 13. Production Monitoring
 
 Key metrics to track:
 
@@ -548,7 +625,7 @@ Alert if effective TPOT exceeds baseline for more than a few minutes. This indic
 
 ---
 
-## 13. Further Reading
+## 14. Further Reading
 
 - Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (ICML 2023).
 - Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (arXiv 2023).
@@ -558,6 +635,11 @@ Alert if effective TPOT exceeds baseline for more than a few minutes. This indic
 - Fu et al., "Break the Sequential Dependency of LLM Inference Using Lookahead Decoding" (arXiv 2024).
 - DeepSeek-AI, "DeepSeek-V3 Technical Report" (arXiv 2024) --- multi-token prediction.
 - Spectral et al., "Prompt Lookup Decoding" (blog, 2024).
+- SGLang v0.5.12 release notes --- DFLASH speculative decoding (2025).
+- NVIDIA TensorRT-LLM v1.3.0 release notes --- DFLASH and suffix automaton speculative decoding (2025).
+- Google DeepMind, "Gemma 4 Technical Report" (2025) --- native multi-token prediction heads.
+- Moonshot AI, "Kimi K2.5 Technical Report" (2025) --- EAGLE-3 with Multi-head Latent Attention.
+- vLLM documentation --- Adaptive Speculative Decoding V2 (2025).
 
 ---
 

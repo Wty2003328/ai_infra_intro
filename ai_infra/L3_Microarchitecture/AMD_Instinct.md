@@ -25,7 +25,11 @@ This page covers CDNA 3 (MI300X), CDNA 4 (MI355X), and the rack-scale Helios arc
 | CDNA 3 | MI325X | 2024 | N5 + N6 | 256 GB HBM3e | 1 000 W | Memory-capacity refresh |
 | CDNA 4 | MI350X | 2025 | TSMC N3 (XCD) + N6 base | 288 GB HBM3e | 750 W (air) | Matrix-core overhaul; FP4/FP6 support |
 | CDNA 4 | MI355X | 2025 | N3 + N6 | 288 GB HBM3e | 1 000 W (liquid) | Liquid-cooled, full FP4/FP6 throughput |
-| CDNA-Next | MI400-class | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, native UALink |
+| CDNA-Next | MI400-class (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, native UALink |
+| CDNA-Next | MI450 (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
+| CDNA-Next | MI430X (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
+| CDNA-Next | MI455X (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
+| CDNA 4 | MI350P | 2025 | PCIe card | 144 GB HBM3E | 350 W (air) | PCIe accelerator; ~40% faster FP16/FP8 than H200 NVL |
 
 ---
 
@@ -192,7 +196,11 @@ To close the gap, AMD + Broadcom + Cisco + others formed the UALink consortium. 
 - Open standard (no NVIDIA royalty).
 - Transparent switch fabric — competitor to NVLink + NVSwitch.
 
-Helios racks (MI400-class) target 2026 deployment. The bet: open-standard rack fabrics undercut NVLink lock-in.
+Helios racks (MI400-class "Altair" series) target 2026 deployment. The bet: open-standard rack fabrics undercut NVLink lock-in.
+
+**Confirmed Helios rack configurations:** 64, 72, or 128 GPUs per rack. The UALoE72 configuration (72-GPU UALink domain) is confirmed, matching NVL72's scale-up domain.
+
+**Supply chain:** ZT Systems ($4.9B acquisition by AMD) provides rack-level engineering and integration. Sanmina serves as NPI (New Product Introduction) partner for manufacturing. Engineering samples are on track for H2 2026.
 
 ---
 
@@ -216,17 +224,65 @@ ROCm has caught up dramatically since 2023 (when it was barely usable for produc
 
 ---
 
-## 7. Helios rack architecture
+## 7. ROCm Kernel Optimization
+
+This section covers the low-level hardware primitives that kernel authors use on AMD GPUs, and how they compare to NVIDIA equivalents.
+
+### MFMA (Matrix Fused Multiply-Add) Instructions
+
+AMD's equivalent to NVIDIA's MMA/wgmma instructions. MFMA issues a matrix multiply-accumulate operation where the hardware multiplies an M×K matrix by a K×N matrix and accumulates into an M×N result.
+
+- **MFMA instruction shapes**: 16×16×16, 32×32×8, 16×32×16, etc. (M×N×K). The tile shape determines how many VGPRs are consumed for operands and results.
+- **CDNA-4 MFMA data types**: BF16, FP16, FP8 (both E4M3 and E5M2), INT8. CDNA-4 also adds FP6 and FP4 support.
+- **FP8 MFMA throughput**: 2× the throughput of FP16 MFMA, similar to NVIDIA's FP8 tensor-core behavior. The doubling comes from packing two FP8 values into the same register width as one FP16 value.
+
+Per-CU MFMA throughput (CDNA-4): ~1 TFLOPS BF16, ~2 TFLOPS FP8, ~4 TFLOPS FP4.
+
+### LDS (Local Data Share)
+
+AMD's equivalent to NVIDIA's shared memory (SMEM):
+
+- **Capacity**: 64 KB per CU on CDNA-3, configurable by the kernel.
+- **Bank structure**: 32 banks of 4-byte words. Same bank-conflict behavior as NVIDIA SMEM — simultaneous accesses to different addresses in the same bank serialize. The conflict-avoidance strategies (padding, swizzling) are identical in principle.
+- **Copy mechanisms**: both synchronous and asynchronous copy from global memory to LDS are supported. The async copy uses a DMA engine that can transfer data without occupying SIMD lanes.
+
+### Key Differences from CUDA
+
+Understanding these differences is essential when porting high-performance kernels from NVIDIA to AMD:
+
+| Feature | AMD (CDNA-3/4) | NVIDIA (Hopper/Blackwell) |
+|---|---|---|
+| Wavefront / warp size | 64 on CDNA-3; CDNA-4 supports both wave32 and wave64 | 32 |
+| Tensor memory accessor (TMA) | No TMA equivalent; AMD uses async_copy intrinsics but not descriptor-based TMA | TMA hardware unit for async global→shared transfers with descriptor-based addressing |
+| Threadblock clusters | No threadblock clusters; cross-CU sharing goes through L2 cache | Threadblock clusters enable cooperative SM groups with distributed shared memory |
+| VGPR count | 256 per thread on CDNA-3, 512 on CDNA-4 | 255 per thread on Hopper, 256 on Blackwell |
+| Register file | Vector Register File (VRF) per CU: 128 KB | Register file per SM: 256 KB (Hopper), 256 KB (Blackwell) |
+
+The wavefront-size difference (64 vs 32) has subtler implications than it appears: a wave64 executing an MFMA instruction covers twice the output tile per scheduling slot, which can improve throughput on compute-bound kernels but worsens occupancy on register-heavy kernels.
+
+### Kernel Authoring
+
+- **HIP** (Heterogeneous Interface for Portability) is the primary language for AMD kernel development, providing a CUDA-like API. Most CUDA kernel code can be translated to HIP with mechanical substitutions (`__shfl_sync` → `__shfl`, `__syncthreads()` → `__syncthreads()`, `wmma` → `MFMA` intrinsics).
+- **rocBLAS / MIOpen**: AMD's equivalents to cuBLAS / cuDNN. Provide optimized BLAS and DNN operations. rocBLAS internally dispatches to architecture-specific MFMA microkernels.
+- **Triton-ROCm**: AMD's fork of OpenAI's Triton compiler. Generates HIP/AMDGPU code from high-level tile-based Python DSL. The primary high-level option for kernel authors who want performance without writing inline assembly.
+
+### Performance Tip
+
+MFMA throughput is highest when LDS is used for input staging. The same tiling pattern used in CUDA tensor-core kernels (global → SMEM → registers → tensor core) applies directly: load a tile of A and B into LDS, then issue MFMA instructions consuming from LDS-resident data. This hides global-memory latency and keeps the Matrix Core fed at its peak rate. On CDNA-4, kernels that skip LDS and load directly from global memory into VGPRs before MFMA typically achieve only 60–70% of peak throughput due to bandwidth bottlenecks on the global-memory path.
+
+---
+
+## 8. Helios rack architecture
 
 ```mermaid
 flowchart TB
-    subgraph HELIOS["Helios rack — MI430X / MI455X class"]
+    subgraph HELIOS["Helios rack — MI430X / MI455X class (Altair)"]
         direction TB
-        subgraph GPUS[72 × MI455X]
+        subgraph GPUS[64/72/128 × MI455X (configurable)]
             G0[GPU 0]:::g
             G1[GPU 1]:::g
             GD[…]:::g
-            G71[GPU 71]:::g
+            G71[GPU N-1]:::g
         end
         subgraph SW[UALink switches]
             S0[UALink switch 0]:::sw
@@ -245,11 +301,13 @@ flowchart TB
     classDef hbm fill:#fbcfe8,stroke:#9d174d,color:#000
 ```
 
-Per Helios rack: ~31 TB HBM4 aggregate, ~150 kW power, ~3 PFLOPS FP4 dense × 72 = ~216 PFLOPS rack-scale. Fully comparable to GB300 NVL72.
+Confirmed Helios rack configurations: **64, 72, or 128 GPUs** per rack. The UALoE72 configuration (72 GPUs) directly matches NVIDIA's NVL72 domain size. At the 72-GPU config: ~31 TB HBM4 aggregate, ~150 kW power, ~35 PFLOPS FP4 dense × 72 = ~2 520 PFLOPS rack-scale. Fully comparable to GB300 NVL72.
+
+**Supply chain and manufacturing:** ZT Systems ($4.9B AMD acquisition) handles rack-level engineering and system integration. Sanmina serves as NPI manufacturing partner. MI450, MI430X, MI455X (all codenamed "Altair") engineering samples on track for H2 2026.
 
 ---
 
-## 8. End-to-end cause / effect
+## 9. End-to-end cause / effect
 
 ```mermaid
 flowchart TD
@@ -275,7 +333,7 @@ flowchart TD
 
 ---
 
-## 9. Numbers to memorize
+## 10. Numbers to memorize
 
 | Quantity | Value | Why |
 |---|---|---|
@@ -302,7 +360,7 @@ flowchart TD
 
 ---
 
-## 10. Worked interview problems
+## 11. Worked interview problems
 
 **Q1.** *Why does AMD's chiplet approach work despite the NUMA penalty?*
 
@@ -326,7 +384,7 @@ Both implement ring + tree algorithms. RCCL's bandwidth in xGMI domain (8 GPUs, 
 
 ---
 
-## 11. References
+## 12. References
 
 - AMD Instinct MI300X / MI350X / MI355X Architecture Briefs.
 - ROCm Documentation — ROCm 7 release notes.

@@ -737,6 +737,86 @@ The practical deployment stack in 2026: **SmoothQuant for W8A8** (when hardware 
 
 ---
 
+## 10. KV Cache Quantization
+
+### 10.1 Why KV cache quantization matters
+
+During autoregressive decoding, the model must store the key and value vectors for every previously generated token so that attention can attend to the full context. For a model with $L$ layers, $n_{\mathrm{kv}}$ KV heads, head dimension $d_h$, and sequence length $S$, the KV cache size in bytes is:
+
+$$
+M_{\mathrm{KV}} = 2 \cdot L \cdot n_{\mathrm{kv}} \cdot d_h \cdot S \cdot b
+$$
+
+where $b$ is bytes per element (2 for FP16, 1 for FP8, 0.5 for INT4). For LLaMA-3-70B ($L = 80$, $n_{\mathrm{kv}} = 8$, $d_h = 128$, FP16) at $S = 128\mathrm{K}$ context:
+
+$$
+M_{\mathrm{KV}} = 2 \times 80 \times 8 \times 128 \times 131\,072 \times 2 \approx 32\;\text{GB}
+$$
+
+This exceeds the model weights themselves at long contexts. The KV cache becomes the dominant memory consumer, directly limiting maximum batch size and throughput. Quantizing the KV cache is therefore not optional for long-context serving — it is the primary lever for reducing the memory bottleneck.
+
+### 10.2 FP8 KV cache (E4M3)
+
+The E4M3 format (Section 1 of [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md)) is the natural choice for FP8 KV cache. Keys and values are stored as FP8 E4M3 with per-tensor or per-token scales.
+
+**Accuracy.** Because keys and values are consumed inside the attention softmax (which is normalizing), small quantization errors are partially absorbed. Empirical results show ~0.1% perplexity increase for FP8 KV cache on standard benchmarks — effectively negligible.
+
+**Hardware support.** FP8 KV cache is natively supported on Hopper+ GPUs (H100, B200). The attention kernel reads FP8 keys/values, dequantizes to FP16/BF16 for the dot-product, and the conversion is fused into the flash-attention kernel with zero extra memory traffic.
+
+**Implementation.** vLLM enables FP8 KV cache with:
+
+```
+--kv-cache-dtype fp8_e4m3fn
+```
+
+TensorRT-LLM similarly supports FP8 KV cache through its attention plugin. No calibration is required; the scale is computed dynamically from the input activations at runtime.
+
+### 10.3 INT8 KV cache
+
+INT8 KV cache uses signed 8-bit integer representation with per-head or per-token scale factors. Unlike FP8, INT8 requires calibration to determine the appropriate scale factors:
+
+- **Per-head scales.** One scale per KV head, computed during calibration by observing the range of key/value magnitudes across representative inputs. Simpler but may be suboptimal if a single token produces extreme values.
+- **Per-token scales.** One scale per token position, stored alongside the KV cache entries. More metadata (1 extra byte per token per head) but adapts to token-level distribution shifts.
+
+INT8 KV cache is slightly less accurate than FP8 (the fixed quantization step cannot represent the dynamic range as gracefully as E4M3's floating-point exponent) but is compatible with pre-Hopper hardware that lacks native FP8 tensor-core support.
+
+### 10.4 INT4 / FP4 KV cache
+
+Aggressive 4-bit quantization of the KV cache is possible but comes with significant caveats:
+
+**Accuracy degradation.** At 4 bits, the quantization step is large enough to corrupt the attention score distribution. For attention-heavy workloads (retrieval, long-document QA, needle-in-a-haystack), INT4/FP4 KV cache can degrade accuracy by 1--5% on downstream tasks. The effect is most pronounced for "needle" tokens whose key vectors have small magnitude — these get crushed to zero or one of very few quantization levels.
+
+**Mixed-precision mitigation.** A practical strategy keeps recent tokens at higher precision and older tokens at lower precision:
+
+| Token position | Precision | Rationale |
+|---|---|---|
+| Most recent $S/4$ tokens | FP8 | Recent context is most attended-to; errors compound through subsequent layers |
+| Older tokens | INT4/FP4 | Older tokens are attended with lower frequency; some accuracy loss is tolerable |
+
+This mixed-precision KV cache retains most of the 4x memory savings while protecting accuracy at the attention "hot zone."
+
+### 10.5 Memory savings summary
+
+| KV cache format | Bytes per element | Memory vs FP16 | Typical perplexity delta |
+|---|---|---|---|
+| FP16 (baseline) | 2 | 1x | 0 |
+| FP8 E4M3 | 1 | **2x reduction** | +0.1% |
+| INT8 (calibrated) | 1 | **2x reduction** | +0.3--0.5% |
+| INT4 / FP4 | 0.5 | **4x reduction** | +1--5% (workload-dependent) |
+| INT4 mixed (recent FP8) | ~0.625 | **~3.2x reduction** | +0.5--1.5% |
+
+### 10.6 Interaction with GQA and MLA
+
+KV cache quantization is **orthogonal** to architectural compression techniques:
+
+**Grouped-Query Attention (GQA).** GQA reduces the number of KV heads $n_{\mathrm{kv}}$ by sharing each KV head across multiple query heads. For LLaMA-3-70B with GQA ratio 8:1, the KV cache is already 8x smaller than full MHA. Quantizing the already-reduced KV cache by an additional 2x (FP8) yields a **multiplicative** total reduction of $8 \times 2 = 16$x vs full MHA in FP16.
+
+**Multi-head Latent Attention (MLA).** MLA (used in DeepSeek-V2/V3) compresses the KV cache into a low-rank latent vector before caching. The latent vectors can themselves be quantized (FP8 INT4), and the compression stacks multiplicatively with MLA's inherent rank reduction.
+
+The general principle: architectural compression reduces the *number* of elements to cache; quantization reduces the *bytes per element*. The two multiply.
+
+---
+
 ## 11. End-to-end cause and effect
 
 ```mermaid
@@ -768,7 +848,77 @@ flowchart TD
 
 ---
 
-## 12. Numbers to memorize
+## 12. LLM Compression Beyond Quantization
+
+Quantization reduces the *bits per parameter* but preserves the parameter count. Three complementary techniques reduce the parameter count itself -- or otherwise compress the model in ways quantization alone cannot.
+
+### 12.1 Structured Pruning
+
+**Principle.** Remove entire structural components (attention heads, FFN neurons, full layers) from a trained model based on importance scores. Unlike unstructured pruning (which zeros individual weights and requires sparse hardware support), structured pruning produces a smaller dense model that runs on standard hardware without special kernels.
+
+**ShortGPT (Men et al., 2024).** Observes that many deep transformer models are "over-deep" -- middle layers learn redundant representations. ShortGPT identifies and removes redundant middle layers by measuring the similarity of hidden states across consecutive layers. Removing 10--20% of layers from frontier-class models costs less than 1% quality on standard benchmarks. The resulting model is shorter (fewer layers) but each layer is unchanged -- no retraining required.
+
+**LLM-Pruner (Ma et al., 2023).** Performs structured pruning of attention heads and FFN neurons guided by importance scores computed from gradient information (first-order Taylor approximation of the loss change from removing each component). After pruning, LoRA-based recovery fine-tuning restores quality. Achieves 20% parameter reduction with less than 2% quality loss.
+
+**Wanda (Sun et al., 2024) / SparseGPT (Frantar & Alistarh, 2023).** Unstructured pruning without retraining. Wanda prunes weights by the product of weight magnitude and input activation norm (magnitude x input); SparseGPT uses a Hessian-based sparse regression (related to GPTQ's approach). Both achieve 50% unstructured sparsity with minimal quality loss. However, unstructured sparsity requires specialized sparse kernels (e.g., 2:4 sparsity on NVIDIA Ampere+) to realize speedups; on dense hardware, the zeroed weights still occupy memory.
+
+**Typical compression: 20--50% parameter reduction with less than 2% quality loss** after recovery fine-tuning.
+
+**Why it matters for inference.** Fewer parameters means less data to read from HBM per token during decode. For memory-bandwidth-bound decode, pruning directly increases tokens/s in proportion to the parameter reduction -- a 30% pruned model decodes ~30% faster on the same hardware, assuming the remaining computation fits efficiently on the tensor cores.
+
+### 12.2 Knowledge Distillation
+
+**Principle.** Train a smaller "student" model using a larger "teacher" model's outputs, logit distributions, or internal representations as supervision. The student learns to approximate the teacher's behavior at a fraction of the cost.
+
+**Approaches:**
+
+| Approach | What the student matches | Typical quality |
+|---|---|---|
+| Logit-based (response-based) | Softmax distribution of teacher logits (with temperature scaling) | Good for general compression; standard KD loss |
+| Feature-based | Hidden states, attention patterns, or intermediate representations | Better for transferring structural knowledge; requires aligning layer dimensions |
+| Response-based | Only final outputs (generated text, answers) | Simplest; used when teacher API access is available but logits are not |
+
+**Industry adoption.** Distillation is standard practice for training compact models:
+
+- DistilBERT: 40% smaller, 60% faster, retains 97% of BERT's language understanding. Trained with logit-based distillation + cosine embedding loss.
+- TinyLlama (1.1B): trained with distillation from larger LLaMA models.
+- Phi series (Microsoft): trained with significant distillation from GPT-4-class teachers, achieving high performance at small sizes.
+- MiniCPM: compact models trained via multi-stage distillation from frontier models.
+
+**Reasoning model distillation.** For reasoning-focused models (math, code, logic), distillation from chain-of-thought teachers is now standard. DeepSeek-R1-Distill-7B/32B/70B models are distilled from the full R1 model, retaining much of the reasoning capability at smaller sizes. The distillation process uses the teacher's reasoning traces (not just final answers) as training data, teaching the student both the answer and the reasoning process.
+
+**Connection to speculative decoding.** The draft model in speculative decoding is essentially a "lightweight student" of the target model. It learns to predict what the target model would generate, at lower cost. This is implicit distillation: the draft model is trained (or selected) to maximize acceptance rate against the target model's distribution.
+
+### 12.3 Low-Rank Decomposition
+
+**Principle.** Factor a weight matrix $W \in \mathbb{R}^{d \times d}$ into two smaller matrices: $W \approx A \times B$ where $A \in \mathbb{R}^{d \times r}$ and $B \in \mathbb{R}^{r \times d}$, with $r \ll d$. The parameter count drops from $d^2$ to $2dr$, a compression ratio of $d / 2r$.
+
+For a 4096x4096 weight matrix with $r = 256$: original parameters = 16.7M, decomposed parameters = 2.1M -- an 8x compression per layer.
+
+**ASVD (Activation-aware SVD, Wang et al., 2024).** Standard SVD decomposes $W$ by singular value magnitude, but this ignores how the weights are used at runtime. ASVD incorporates activation statistics: it computes the SVD of $W \cdot \mathrm{diag}(\sigma_X)$ (where $\sigma_X$ captures per-channel activation variance) rather than $W$ alone. Channels with high activation variance receive more representation budget in the decomposition. ASVD typically achieves 2--4x parameter reduction with less than 1% quality loss.
+
+**TensorGPT.** Applies tensor-train decomposition to embedding layers, representing the embedding matrix as a chain of small 3D tensors. For large vocabulary models (100K+ tokens), embedding layers can dominate memory; tensor-train decomposition reduces this by 10--100x with configurable quality trade-offs.
+
+**LoRA as a special case.** LoRA (Low-Rank Adaptation) takes the opposite approach: instead of decomposing the existing weight $W$, it keeps $W$ frozen and adds a low-rank delta $W' = A \times B$ during fine-tuning. The insight is the same -- weight matrices have low effective rank -- but LoRA exploits it for efficient fine-tuning rather than compression. The connection: if you could zero out $W$ and keep only $W'$, you would have a low-rank decomposed model. In practice, LoRA is used for adaptation, not compression, but the underlying mathematics is identical.
+
+**Practical compression: 2--4x parameter reduction per layer with less than 1% quality loss** when using activation-aware decomposition (ASVD).
+
+### 12.4 Combining compression techniques
+
+These techniques are orthogonal and stack multiplicatively:
+
+| Combination | Mechanism | Typical total compression |
+|---|---|---|
+| Pruning + Quantization | Fewer parameters, fewer bits per parameter | 5--10x (2x pruning x 4x INT4) |
+| Distillation + Quantization | Smaller architecture, fewer bits | 8--20x (small student + INT4) |
+| Low-rank + Quantization | Decomposed weights, quantized factors | 4--8x (2x low-rank x 4x INT4) |
+| Pruning + Distillation + Quantization | All three | 10--40x (aggressive, requires careful tuning) |
+
+The practical recipe for deployment: start with a pre-trained model, apply structured pruning (remove redundant heads/layers), quantize the pruned model to INT4/FP8, and fine-tune with LoRA for recovery. This yields a 5--10x smaller model with less than 3% quality loss -- suitable for edge deployment or high-throughput serving.
+
+---
+
+## 13. Numbers to memorize
 
 | # | Quantity | Value | Context |
 |---|---|---|---|
@@ -797,7 +947,7 @@ flowchart TD
 
 ---
 
-## 13. Worked problems
+## 14. Worked problems
 
 **Q1.** *Compute the SQNR for symmetric INT8 quantization of a weight tensor drawn from $\mathcal{N}(0, 1)$. Use the optimal clipping threshold.*
 
@@ -885,7 +1035,7 @@ This is precisely the motivation for SmoothQuant: instead of choosing between ba
 
 ---
 
-## 14. References
+## 15. References
 
 - Frantar, Ashkboos, et al., *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers*, ICLR 2023.
 - Lin, Ji, et al., *AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration*, MLSys 2024.

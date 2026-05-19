@@ -261,7 +261,7 @@ This is what gives FlashAttention its >70% utilization on Hopper — the TMA fet
 
 ### 4.1 Why crossbars don't scale
 
-A direct crossbar between $N$ source SMs and $M$ L2 slices has $N \cdot M$ wires. For 144 SMs × 64 L2 slices = ~9 200 wires per *bit* of payload — at 256-bit transactions, ~2.4 M wires across the chip. Routing density is impossible at frontier nodes; arbitration logic alone exceeds 10% of die area.
+A direct crossbar between $N$ source SMs and $M$ L2 slices has $N \cdot M$ wires. For 128 SMs × 64 L2 slices = ~8 200 wires per *bit* of payload — at 256-bit transactions, ~2.1 M wires across the chip. Routing density is impossible at frontier nodes; arbitration logic alone exceeds 10% of die area.
 
 ### 4.2 Mesh, torus, and hierarchical NoCs
 
@@ -443,7 +443,49 @@ flowchart TD
 
 ---
 
-## 7. End-to-end cause / effect
+## 7. RAS for AI Accelerators
+
+RAS = **Reliability, Availability, Serviceability**. At rack scale, a single GPU failure rate of ~0.1% per month means a 72-GPU NVL72 pod expects a GPU failure roughly every 2 weeks. RAS features are the hardware and firmware mechanisms that keep the cluster productive despite component failures.
+
+### 7.1 ECC in datapaths
+
+SRAM arrays throughout the accelerator (SMEM, register file, L2 slices) are protected by **SECDED** — Single Error Correction, Double Error Detection — typically using a Hamming code (e.g., 72-bit codeword = 64 data bits + 8 check bits).
+
+- **Area overhead**: ~6.25% for 64-bit data (8 check bits / 128 total with ECC).
+- **Behavior on single-bit error**: hardware transparently corrects the bit in-line; no pipeline stall, no software notification required.
+- **Behavior on double-bit error**: uncorrectable; raises a machine-check interrupt. The driver must decide whether to kill the workload or attempt recovery.
+
+HBM uses a two-layer protection scheme:
+- **On-die ECC**: per-HBM-chip, transparent to the GPU. Each HBM DRAM chip stores extra check bits alongside data; single-bit errors within the DRAM chip are corrected before the data leaves the HBM package.
+- **Link-level CRC**: data in transit across the HBM PHY is protected by a CRC that detects multi-bit transmission errors (caused by EMI, voltage droop, or clock jitter on the PHY). CRC failure triggers a link-level retry.
+
+### 7.2 NoC error detection
+
+The on-chip NoC (Section 4) carries flits (flow-control units) between SMs, L2 slices, and HBM controllers. Error detection is applied at the flit level:
+
+- **Parity on flit headers**: a single parity bit covers the routing, virtual-channel, and control fields. Header parity failure indicates a routing or arbitration error.
+- **ECC on flit payload**: SECDED protection on the data payload, matching the L2/SRAM ECC scheme.
+- **Credit-based flow control with timeout-based deadlock detection**: each VC maintains a credit counter. If credits are not returned within a timeout window (typically ~1 us), the NoC raises a deadlock alert. This catches both hardware routing bugs and software-induced protocol deadlocks.
+
+### 7.3 Hardware scrubbers
+
+Soft errors (cosmic-ray-induced bit flips) accumulate in SRAM arrays over time. At the error rates typical of frontier silicon (~100–400 FIT per Mb), a 50 MB L2 cache expects ~0.5–2 soft errors per day. **Background ECC scrubbers** scan SRAM arrays during idle cycles, reading each location, checking ECC, and correcting single-bit errors before they accumulate into uncorrectable double-bit errors. Scrubbing rate is typically one full scan every 1–10 seconds.
+
+### 7.4 RAS implications for rack-scale
+
+At production scale, RAS is not optional — it is a survival requirement:
+
+- **Single GPU failure rate**: ~0.1% per month in production (based on Google and Meta fleet data). For a 72-GPU NVL72 pod, this translates to an expected GPU failure every ~2 weeks.
+- **NVL72 fault containment**: the rack-level interconnect must handle single-GPU failures without killing the entire job. Two strategies: (a) **checkpoint-restart** — periodically snapshot model state to shared storage; on failure, restart the job on the remaining 71 GPUs. (b) **Live migration** — dynamically remap the failed GPU's shard to a spare GPU in the rack, with minimal interruption. NVIDIA's NVL72 architecture includes spare GPU slots for this purpose.
+- **PCIe/CXL AER (Advanced Error Reporting)**: the PCIe/CXL link between the GPU and the host CPU provides detailed error status for link-level errors (correctable and uncorrectable), enabling the driver to distinguish between transient errors (retry) and permanent failures (isolate the GPU).
+
+### 7.5 RAS in the verification flow
+
+RAS features add to the verification burden (Section 6). Error-injection tests (deliberately flipping bits in SRAM, injecting CRC errors on HBM links, forcing NoC timeouts) are a standard part of the bring-up campaign. Formal verification can prove that SECDED correction logic is correct for all single-bit error patterns, but system-level RAS behavior (e.g., "a GPU failure during a distributed all-reduce does not corrupt the remaining GPUs") requires full-system UVM tests that are among the most complex in the verification campaign.
+
+---
+
+## 8. End-to-end cause / effect
 
 ```mermaid
 flowchart TD
@@ -473,7 +515,7 @@ flowchart TD
 
 ---
 
-## 8. Numbers to memorize
+## 9. Numbers to memorize
 
 | Quantity | Value | Why |
 |---|---|---|
@@ -501,7 +543,7 @@ flowchart TD
 
 ---
 
-## 9. Worked interview problems
+## 10. Worked interview problems
 
 **Q1.** *Why can't NVIDIA push tensor cores to 4 GHz on Blackwell?*
 
@@ -527,7 +569,7 @@ Cycles in routing dependency graph require packets that route in non-monotonic d
 
 ---
 
-## 10. References
+## 11. References
 
 **Foundational**
 - Dally & Towles, *Principles and Practices of Interconnection Networks* — NoC topology, deadlock, VCs.

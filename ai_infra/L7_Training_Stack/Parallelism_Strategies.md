@@ -426,6 +426,23 @@ $$\text{TP} = 8 \;\text{(intra-node)} \quad \times \quad \text{EP} = 32 \;\text{
 
 Each rank holds $256/32 = 8$ experts, each sharded across 8 GPUs via TP.
 
+### 4.5 Advanced EP techniques (2025–2026)
+
+**Expert Parallel A2A Overlap (Megatron Core 0.16+).** The two all-to-all operations in each MoE layer (dispatch and combine) are the dominant communication cost. Megatron Core 0.16+ overlaps these all-to-alls with the attention and MLP compute of adjacent layers:
+
+- **Dispatch overlap:** While layer $i$'s attention/MLP computes, the dispatch all-to-all for layer $i$'s MoE begins sending tokens to expert ranks. By the time attention/MLP finishes, tokens have arrived at their target experts and expert computation can begin immediately.
+- **Combine overlap:** While experts in layer $i$ compute, the combine all-to-all from layer $i-1$'s MoE is in flight, returning expert outputs to their origin ranks.
+
+This overlap reduces the effective EP communication cost by 40–60% in practice, as the all-to-all latency is hidden behind compute that must occur anyway.
+
+**HybridEP (Megatron Core 0.17).** For models with many small experts (e.g., 256+ experts with small per-expert FFN dimensions), pure EP distributes experts across ranks but each rank may have low GPU utilization (small batch per expert). Pure TP solves utilization but replicates experts. HybridEP combines both:
+
+- **Hybrid group:** A group of $T \times E$ GPUs where each expert is sharded across $T$ GPUs via TP, and $E$ unique expert groups are distributed across the EP dimension.
+- **Improved utilization:** By choosing $T$ such that each TP shard of an expert is large enough to saturate the GPU's compute units, HybridEP achieves higher MFU than pure EP for models with many small experts.
+- **Example:** For 256 experts on 64 GPUs, pure EP=64 gives 4 experts per rank. HybridEP with TP=4, EP=16 gives each rank 16 experts, each sharded 4-way. The larger per-rank expert count amortizes dispatch overhead, while TP within the expert increases per-GPU utilization.
+
+**Ring Attention integration with EP.** Ring attention (Section 5.2) has been integrated into Megatron Core's EP implementation, enabling long-context MoE training where both the sequence and experts are distributed across devices. The communication patterns of ring attention and EP all-to-all can be pipelined: while K,V chunks rotate in the ring attention phase, expert dispatch tokens can be prepared in parallel.
+
 ---
 
 ## 5. Context Parallelism (CP)
@@ -434,15 +451,24 @@ Each rank holds $256/32 = 8$ experts, each sharded across 8 GPUs via TP.
 
 For sequences exceeding 32 K tokens, the activation tensors $[B, S, d]$ become the dominant memory consumer. Context parallelism splits the sequence dimension across ranks, enabling training on sequences of $S \cdot C$ tokens where $C$ is the CP degree.
 
+**PyTorch native CP (Prototype in PyTorch 2.7).** PyTorch introduced native context parallelism as a first-class parallelism dimension. Key properties:
+
+- **Ring-style communication:** Uses ring-style communication to distribute KV cache across CP ranks, avoiding the need for all-gather of the full sequence on any single rank.
+- **Composable with TP:** CP operates alongside tensor parallelism. A typical layout uses TP within a node and CP across a subset of the NVLink domain: each GPU's work is identified by $(t, c)$ where $t$ is the TP rank and $c$ is the CP rank.
+- **New parallelism dimension:** CP is a separate dimension from SP (sequence parallelism). SP shards activations during norm/dropout operations within TP; CP shards the sequence itself across devices. They are orthogonal and can be combined.
+- **API:** Accessible via `torch.distributed.tensor` placement APIs with a dedicated `SequenceParallel` / `ContextParallel` device mesh dimension.
+
 ### 5.2 Ring attention
 
-Ring attention distributes the FlashAttention computation across CP ranks. Each rank $i$ owns a local chunk of Q, K, V: $Q_i \in \mathbb{R}^{B \times S/C \times d}$, $K_i, V_i \in \mathbb{R}^{B \times S/C \times d}$.
+Ring attention is the computational foundation of context parallelism. It distributes the FlashAttention computation across CP ranks. Each rank $i$ owns a local chunk of Q, K, V: $Q_i \in \mathbb{R}^{B \times S/C \times d}$, $K_i, V_i \in \mathbb{R}^{B \times S/C \times d}$.
 
 In $C - 1$ rounds, each rank receives a K,V chunk from its neighbor, computes partial attention scores against its local Q chunk, and passes the K,V chunk forward:
 
 $$\text{Attn}(Q_i, K_j, V_j) = \text{softmax}\!\left(\frac{Q_i K_j^T}{\sqrt{d}}\right) V_j$$
 
 Online softmax accumulation (as in FlashAttention) merges partial statistics across rounds. After $C - 1$ rounds, each rank holds the complete attention output for its Q chunk.
+
+Ring attention is now integrated into both PyTorch native CP and Megatron Core, providing production-grade implementations with communication-compute overlap.
 
 #### 5.2.1 Ring attention algorithm in detail
 
@@ -840,7 +866,9 @@ Bubble with PP=8 and $M$ microbatches: $(8-1)/(M+7) < 0.10 \Rightarrow M > 63$. 
 5. Fedus, W. et al., "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity," *JMLR*, 2022.
 6. Narayanan, D. et al., "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM," *SC21*, 2021.
 7. DeepSeek-AI, "DeepSeek-V3 Technical Report," *arXiv:2412.19437*, 2024.
-8. NVIDIA, "Megatron-Core Documentation," 2024.
+8. NVIDIA, "Megatron-Core Documentation," 2024–2026.
+9. PyTorch Team, "PyTorch Native Context Parallelism (Prototype)," 2025.
+10. NVIDIA, "Megatron-Core 0.16–0.17: HybridEP and A2A Overlap," 2025.
 
 ---
 

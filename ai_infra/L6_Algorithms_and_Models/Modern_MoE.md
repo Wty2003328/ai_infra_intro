@@ -575,6 +575,127 @@ Key observations:
 
 ---
 
+## 9a. Expert Choice routing — experts select tokens
+
+### 9a.1 The token-choice vs expert-choice distinction
+
+All routing schemes discussed so far (Sections 2–4) are **token-choice**: each token selects its top-$k$ experts. The gating function scores experts for a given token and picks the best $k$.
+
+The fundamental problem: popular experts get overloaded while unpopular experts sit idle. Auxiliary losses and bias-based balancing mitigate but do not eliminate this — they impose a soft penalty that trades model quality for load uniformity.
+
+**Expert Choice (EC) routing** inverts the selection: instead of tokens choosing experts, **experts choose tokens**. Each expert selects exactly its top-$k$ tokens from the batch.
+
+### 9a.2 Mechanism
+
+Given a batch of $N$ tokens and $E$ experts, the gating matrix is $G \in \mathbb{R}^{N \times E}$ where $G_{ij} = (W_g)_j \cdot x_i$ is the affinity of token $i$ for expert $j$.
+
+- **Token-choice:** for each row (token), select top-$k$ columns (experts).
+- **Expert Choice:** **transpose** the gating matrix. For each row of $G^T$ (each expert), select top-$k_e$ columns (tokens). Each expert picks exactly $k_e$ tokens.
+
+$$
+\text{Expert Choice:} \quad \mathcal{T}(j) = \underset{S \subseteq [N],\, |S|=k_e}{\arg\max} \sum_{i \in S} G_{ij}
+$$
+
+Each expert processes exactly $k_e$ tokens. Total tokens processed across all experts = $E \cdot k_e$. For the system to be balanced:
+
+$$
+k_e = \frac{N \cdot k_{\text{avg}}}{E}
+$$
+
+where $k_{\text{avg}}$ is the average number of experts per token in the equivalent token-choice setup.
+
+### 9a.3 The key property: guaranteed perfect load balance
+
+By construction, every expert processes exactly $k_e$ tokens. There is no load imbalance — zero wasted compute, zero token dropping, and no auxiliary loss needed. This eliminates the entire balancing apparatus (Section 3) and the capacity factor machinery (Section 8).
+
+### 9a.4 The tradeoff: non-uniform token coverage
+
+The asymmetry: in token-choice, every token sees exactly $k$ experts (uniform). In expert-choice, tokens may be selected by 0, 1, or many experts — the coverage is non-uniform. Some tokens may be processed by no expert (dropped from the MoE path), while others are processed by many.
+
+In practice, for large batches ($N \gg E$), the distribution of expert assignments per token is approximately Poisson with mean $k_{\text{avg}}$. The probability of a token being selected by zero experts is $e^{-k_{\text{avg}}}$ — for $k_{\text{avg}} = 2$, this is ~13.5%. Mitigations:
+
+- Shared experts (Section 5) guarantee every token gets at least the shared-expert computation.
+- A minimum-token guarantee can be added: after expert-choice selection, tokens with zero assignments are forcibly routed to their highest-affinity expert.
+- At large batch sizes ($N > 4E$), the non-uniformity becomes negligible.
+
+### 9a.5 Results and status
+
+Google Research (Zhou et al., 2022; additional follow-ups through 2024) shows Expert Choice achieves similar or better model quality compared to token-choice routing with auxiliary loss, while providing:
+
+- **Zero load imbalance** — every expert is fully utilized.
+- **No auxiliary loss** — no quality–balance tradeoff.
+- **Better throughput** — no capacity-factor padding, no dropped tokens, no load-balancing overhead.
+
+As of 2025–2026, Expert Choice is not yet widely adopted in production frontier models (DeepSeek V3, Mixtral, Llama-4, and Qwen-3 all use token-choice). The primary barrier is the non-uniform token coverage, which complicates training dynamics and requires careful tuning of $k_e$ and batch size. However, it is gaining traction in research and is expected to influence future MoE designs, particularly for serving workloads where load balance directly impacts throughput.
+
+---
+
+## 9b. MoE inference optimizations beyond EP
+
+Expert parallelism (Section 7) distributes experts across GPUs, but inference introduces additional optimization axes beyond the EP communication pattern.
+
+### 9b.1 Expert weight caching
+
+In typical MoE workloads, **token routing is highly skewed**: ~80% of tokens activate ~20% of experts (the "hot" experts). This creates an opportunity for tiered caching:
+
+- **Hot experts** (top ~20%): keep weights resident in GPU SRAM (SMEM/L2) or at minimum in HBM. These experts are accessed every batch and benefit from zero load latency.
+- **Warm experts** (next ~30%): keep in HBM, loaded into SRAM on-demand. Moderate access frequency justifies HBM residency but not SRAM pinning.
+- **Cold experts** (bottom ~50%): offload to CPU DRAM or NVMe. Load on-demand via async DMA when a rare token routes to them.
+
+The caching policy can be determined online by tracking a running average of each expert's routing frequency (exponential moving average over the last $N$ batches). Experts that drop below a threshold are evicted from HBM to CPU.
+
+For a 256-expert model with FP8 weights at ~38.5 MB per expert (3 matrices of $d \times d_{\text{ff}} = 7168 \times 1792$): keeping 52 hot experts in HBM costs ~2.0 GB — fits comfortably within a B200's 192 GB alongside attention weights and KV cache.
+
+### 9b.2 Dynamic expert loading
+
+Rather than keeping all expert weights in HBM simultaneously, load them on-demand as the routing decision is made per token:
+
+1. **Routing phase:** the gating function runs for all tokens in the batch, producing expert assignments.
+2. **Prefetch phase:** based on the routing schedule, issue async DMA transfers to load the required expert weights from CPU/NVMe to GPU HBM.
+3. **Overlap with compute:** while expert $E_i$ computes on its assigned tokens, the weights for expert $E_{i+1}$ are already in flight. The compute of one expert overlaps with the loading of the next.
+
+This is analogous to software pipelining: the latency of loading expert weights is hidden behind the computation of the preceding expert. The constraint is that each expert's compute time must be at least as long as the weight-load time:
+
+$$
+t_{\text{compute}}(E_i) \geq t_{\text{load}}(E_{i+1})
+$$
+
+For a fine-grained expert with $d_{\text{ff}} = 1{,}792$ and $d = 7{,}168$ (3 projections: gate, up, down for SwiGLU), FP8 weights ≈ 3 \cdot 7168 \cdot 1792 \cdot 1 = 38.5 MB. PCIe Gen5 bandwidth: ~64 GB/s. Load time: ~0.6 $\mu$s. Expert compute for 128 tokens at 4500 TFLOPS: ~0.5 $\mu$s. The overlap is tight but feasible.
+
+### 9b.3 Expert batching
+
+Tokens routed to the same expert are batched together for a single GEMM call. Without batching, each token produces a separate $1 \times d$ matmul against the expert's $d \times d_{\text{ff}}$ weight — deeply memory-bound ($I = 1$ FLOP/B). With batching of $B_{\text{expert}}$ tokens:
+
+$$
+I_{\text{batched}} = \frac{2 B_{\text{expert}} \cdot d \cdot d_{\text{ff}}}{(B_{\text{expert}} \cdot d + d \cdot d_{\text{ff}}) \cdot \text{bytes}} \approx \frac{2 d}{\text{bytes}} \text{ for } d_{\text{ff}} \gg B_{\text{expert}}
+$$
+
+For DeepSeek V3 with $d = 7{,}168$, FP8: $I \approx 2 \cdot 7168 / 1 = 14{,}336$ when $B_{\text{expert}}$ is large enough. In practice, even $B_{\text{expert}} = 16$ tokens significantly improves tensor-core utilization by converting many tiny matmuls into one batched GEMM.
+
+### 9b.4 Expert quantization at different precisions
+
+Not all experts need the same numerical precision. The tiered caching strategy extends to precision:
+
+- **Hot experts:** FP16 (full quality, accessed most frequently — quality matters most).
+- **Warm experts:** FP8 (acceptable quality degradation, half the memory/bandwidth).
+- **Cold experts:** INT4 (significant quality loss but acceptable for rarely-routed experts; 4× compression vs FP16).
+
+The gating function can incorporate a quality signal — if an expert's output has high gate weight (the token strongly prefers this expert), route it at higher precision. Weakly-selected experts contribute less to the output, so their quantization error is attenuated by the gate weight.
+
+Memory savings for DeepSeek V3: if 52 hot experts at FP16 (~77 MB each), 76 warm at FP8 (~38.5 MB each), 128 cold at INT4 (~19.3 MB each): total ≈ 4.0 + 2.9 + 2.5 = 9.4 GB — vs 19.7 GB for all-FP16. A 2.1× reduction.
+
+### 9b.5 Precomputation of routing tables
+
+The gating function is cheap ($d \times E$ matmul) but must run for every token at every MoE layer. Optimization: **precompute the full routing schedule** at the start of the forward pass:
+
+1. Run all gating functions for all layers in one batched operation (all 61 MoE layers' gate weights concatenated into one large matmul).
+2. Produce a routing table: for each token, for each layer, the set of selected experts.
+3. Use this table to pre-schedule expert weight loads, expert batching, and precision selection for the entire forward pass.
+
+This converts 61 separate small matmuls into one larger operation (better utilization) and enables global optimization of the inference schedule — e.g., if expert $E_{42}$ is needed at layers 3, 7, and 15, its weights can be loaded once and kept warm in HBM across those layers.
+
+---
+
 ## 10. FLOP and memory math — MoE vs dense
 
 ### 10.1 Per-token FLOPs

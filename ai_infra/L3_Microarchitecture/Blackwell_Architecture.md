@@ -46,8 +46,8 @@ gantt
 | Blackwell B100 | 2024 | TSMC 4NP | dual-die | 192 GB HBM3e | 700 W | early sample / DGX |
 | Blackwell B200 | 2024 | TSMC 4NP | dual-die | 192 GB HBM3e | 1000 W | mainstream FP4 part |
 | Blackwell Ultra B300 | 2025 | TSMC 4NP | dual-die | 288 GB HBM3e | 1200 W | larger HBM, higher TDP |
-| Rubin R100 (proj.) | 2026 | TSMC 3NP | dual-die | 288 GB HBM4 | ~1500 W | NVLink-6, FP3 likely |
-| Rubin Ultra (proj.) | 2027 | TSMC 3NP / A16 | quad-die | ~512 GB HBM4 | ~1800 W | NVL576 domain |
+| Rubin R100 (announced) | 2026 | TSMC 3NP | dual-die | 288 GB HBM4 | ~1500 W | NVLink-6, FP3 likely; Vera Rubin platform |
+| Rubin Ultra (announced) | 2027 | TSMC 3NP / A16 | quad-die | ~512 GB HBM4 | ~1800 W | NVL576 domain; announced at GTC March 2026 |
 
 ---
 
@@ -65,8 +65,8 @@ flowchart TD
         H1[HBM 1]:::hbm
         H4[HBM 4]:::hbm
         H5[HBM 5]:::hbm
-        DA["Compute die A<br/>≈144 SMs<br/>≈800 mm²"]:::die
-        DB["Compute die B<br/>≈144 SMs<br/>≈800 mm²"]:::die
+        DA["Compute die A<br/>≈128 SMs<br/>≈800 mm²"]:::die
+        DB["Compute die B<br/>≈128 SMs<br/>≈800 mm²"]:::die
         H2[HBM 2]:::hbm
         H3[HBM 3]:::hbm
         H6[HBM 6]:::hbm
@@ -120,7 +120,7 @@ For most workloads the penalty is negligible (decode is HBM-bound; the few extra
 | **NVFP4** | B200 | 4× | NVIDIA variant (K=16, FP8 scale) |
 | **FP6 E3M2** | B200 | 3× | research |
 | **MX-FP8** | B200 | 2× | block-scaled FP8 |
-| FP3 (proj.) | R100 | 8× | Rubin frontier |
+| FP3 (announced) | R100 | 8× | Rubin frontier |
 
 ### 3.2 Sub-word SIMD inside the tensor core
 
@@ -364,11 +364,12 @@ The NVSwitch-4 ASIC (Blackwell generation) features:
 - ~300 W TDP per ASIC, liquid-cooled
 - 9 trays × 2 ASICs × 300 W = 5.4 kW just for NVSwitch — significant fraction of rack power
 
-### 6.3 NVL576 (announced for Rubin)
+#### 6.3 NVL576 (announced for Vera Rubin at GTC 2026)
 
 - 576-GPU coherent domain via 2-tier NVSwitch + optical interconnects.
 - Required for trillion-parameter dense models in TP+EP mode.
 - Scale-out (multi-NVL576) still goes via InfiniBand at L4.
+- Officially announced as part of the Vera Rubin platform at GTC March 2026.
 
 ---
 
@@ -438,8 +439,9 @@ at a strict 10 °C inlet-to-outlet rise (HBM thermal-zone-2 requires inlet ≤ 3
 
 ## 9. Rubin outlook
 
-Public projections (NVIDIA roadmap disclosures):
+Announced at GTC March 2026 as the **Vera Rubin** platform (Vera CPU + Rubin GPU). Public projections confirmed:
 
+- **Platform name:** Vera Rubin (Vera ARM CPU + Rubin GPU)
 - **Process:** TSMC 3NP (Rubin) → A16 (Rubin Ultra)
 - **Die config:** dual-die (Rubin) → quad-die (Rubin Ultra)
 - **HBM:** HBM4 → HBM4e
@@ -486,7 +488,7 @@ flowchart TD
 | Quantity | Value | Why |
 |---|---|---|
 | B200 die count | 2 | NV-HBI bridged |
-| B200 SMs (logical) | 288 (144 × 2) | dual-die unified |
+| B200 SMs (logical) | 256 (128 × 2) | dual-die unified |
 | B200 BF16 dense | 2 250 TFLOPS | spec |
 | B200 FP8 dense | 4 500 TFLOPS | spec |
 | B200 FP4 dense | 9 000 TFLOPS | NVFP4 |

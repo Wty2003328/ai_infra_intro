@@ -425,7 +425,7 @@ For comparison, a non-reasoning 70B model answering the same prompt (no thinking
 
 ## 8. Reasoning Model Comparison
 
-| Feature | o1 | o3 | o4-mini | DeepSeek-R1 | Qwen-3 (thinking) | Claude-4 (extended thinking) |
+| Feature | o1 | o3 | o4-mini | DeepSeek-R1 | Qwen-3 (thinking) | Claude Opus 4.7 (extended thinking) |
 |---|---|---|---|---|---|---|
 | Base model size | ~200B (est.) | ~200B (est.) | ~70B (est.) | 671B / 37B active | Various (8B--72B) | ~200B (est.) |
 | Open weights | No | No | No | Yes | Yes | No |

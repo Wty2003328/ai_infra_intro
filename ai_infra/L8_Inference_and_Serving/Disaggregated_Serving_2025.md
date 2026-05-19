@@ -179,6 +179,41 @@ NVIDIA's flagship multi-node inference fabric, generally available in 2024--2025
 
 Dynamo is NVL72-aware: when prefill and decode instances share an NVL72 rack, it routes KV transfer over the NVLink fabric at 1.8 TB/s aggregate per GPU, eliminating the InfiniBand hop entirely.
 
+#### 4.1.1 Dynamo 1.0 Production Disaggregation (2025)
+
+Dynamo 1.0, released in 2025, represents the first production-grade disaggregated serving stack with fully automated KV lifecycle management. Three capabilities distinguish it from the initial release:
+
+**KV Block Manager with tiered eviction.** Dynamo 1.0 introduces a four-tier KV eviction hierarchy: GPU HBM (hot, actively serving) → CPU RAM (warm, recent sequences) → local SSD (cold, prefix-cache eligible) → remote KV store (archival, cross-rack reuse). The block manager tracks per-block reference counts and access recency, promoting blocks upward on re-access and evicting downward under memory pressure. Tier promotion latency:
+
+| Tier transition | Latency | Bandwidth | Use case |
+|----------------|---------|-----------|----------|
+| GPU → CPU | ~1 ms | 12--32 GB/s (PCIe Gen5) | Decode eviction on HBM pressure |
+| CPU → SSD | ~5 ms | 7--14 GB/s (NVMe) | Long-prefix archival |
+| SSD → CPU → GPU | ~10--20 ms | 7--14 GB/s | Prefix-cache hit on re-access |
+| Remote store → CPU → GPU | ~50--100 ms | 50--100 GB/s (RDMA) | Cross-rack prefix reuse |
+
+The block manager is transparent to the inference engine: vLLM or TensorRT-LLM sees a flat KV address space, and the block manager handles tier placement behind PagedAttention's block table.
+
+**K8s-native service discovery.** Dynamo 1.0 replaces static configuration files with Kubernetes-native service discovery. Prefill and decode pools register as K8s Services with custom endpoints. The Dynamo router queries the Kubernetes API to discover available instances, their health, and their KV cache occupancy. Pool resizing is automatic: the router detects when new prefill or decode replicas join and begins routing traffic immediately.
+
+**Zero-config DGDR mode.** Disaggregated GPU-Disaggregated Routing (DGDR) mode provides one-command disaggregated deployment. A single YAML manifest specifies model name, SLO targets, and GPU pool constraints. Dynamo 1.0 automatically determines optimal P:D ratios, selects transport (NVLink for intra-rack, IB for inter-rack), configures NIXL endpoints, and begins serving. This eliminates the manual pool-sizing and topology configuration that made earlier disaggregated deployments error-prone.
+
+#### 4.1.2 Multimodal Encode/Prefill/Decode (E/P/D)
+
+Dynamo 1.0 introduces a three-way disaggregation split for multimodal models: **Encode** (visual token processing), **Prefill** (text token processing + cross-attention), and **Decode** (autoregressive generation). This addresses the observation that visual encoding is fundamentally different from both text prefill and decode:
+
+- **Encode pool** runs vision transformers (ViT, SigLIP) which are compute-heavy with large activation footprints but produce relatively few output tokens. These workloads benefit from high-FLOPS GPUs (B200, B300).
+- **Prefill pool** handles text token embedding and the multimodal cross-attention fusion. Standard prefill optimization (chunked prefill, large batch sizes) applies.
+- **Decode pool** generates output tokens autoregressively. Memory-bandwidth-bound, same as text-only decode.
+
+The E/P/D split yields approximately 30% faster TTFT on image-heavy workloads (document understanding, video analysis) because the encode pool can process visual tokens in parallel with text prefill rather than serially. KV transfer occurs in two stages: encode → prefill (visual KV) and prefill → decode (fused KV).
+
+| Split | Pools | TTFT improvement (image) | Complexity | Best for |
+|-------|-------|--------------------------|------------|----------|
+| Coupled | 1 | Baseline | Low | Text-only |
+| P/D | 2 | 15--25% | Moderate | Text + light multimodal |
+| E/P/D | 3 | 30%+ | High | Heavy multimodal, video, document AI |
+
 ### 4.2 llm-d (Meta)
 
 Meta's open-source disaggregated serving stack. Conceptually similar to Dynamo but vendor-agnostic:
@@ -194,21 +229,66 @@ llm-d targets deployments that want disaggregation without NVIDIA-specific trans
 
 SGLang has built-in disaggregated prefill/decode since v0.4. Combined with RadixAttention (token-level prefix sharing via radix tree), SGLang is particularly effective for chat and agentic workloads with high prefix reuse. The radix tree serves as both the prefix cache index and the routing hint.
 
+**SGLang Decode Radix Cache (2025).** SGLang introduced a radix-tree data structure optimized specifically for the decode side of PD disaggregation. In a disaggregated deployment, the decode pool receives KV blocks from prefill instances and must index them for prefix reuse across incoming sequences. The decode radix cache provides O(k) lookup for k-token prefixes, compared to O(k * B_s) for linear scanning in the standard block manager. On chat workloads with high system-prompt reuse, this reduces decode-side prefix hit lookup time by 5--10x and enables more efficient KV cache compaction when blocks are shared across multiple active sequences.
+
 ### 4.4 vLLM V1 Disaggregated Mode
 
 vLLM V1 integrates with NIXL for KV transfer. Supports disaggregated prefill/decode with configurable pool sizes and prefix-aware routing. Production-ready in 2025.
+
+**vLLM bi-directional KV transfers.** Both vLLM and SGLang now support bidirectional KV movement in disaggregated mode. Previously, KV flow was unidirectional: prefill → decode. Bidirectional support enables decode instances to push KV blocks back to the prefill pool (or a shared store) when a sequence is paused (e.g., tool-calling, multi-turn conversations with long idle periods). This allows decode GPUs to free HBM for new sequences without losing the KV state, which is resumed by a later prefill or decode instance. The bidirectional path uses the same NIXL or NCCL transport as the forward path.
+
+**MooncakeStoreConnector.** vLLM integrates with Mooncake's distributed KV store via a new MooncakeStoreConnector plugin. When enabled, vLLM's KV block manager offloads cold blocks to Mooncake's tiered store (CPU RAM → local SSD → remote nodes) instead of simply evicting them. This provides Mooncake-style cluster-wide prefix caching to any vLLM deployment without requiring Dynamo. The connector is transport-agnostic: it uses RDMA when available, falling back to TCP for development. Prefix-cache hit rates on chat workloads match Mooncake's reported 80%+ when deployed across 10+ nodes.
+
+**NIXL connector.** vLLM now includes a native NIXL transport connector for disaggregated serving data movement. NIXL (NVIDIA Inference Xfer Library) abstracts the physical transport layer, selecting between NVLink P2P, NVL72 fabric, InfiniBand, and TCP at runtime based on the source and destination topology. The connector handles tensor-parallelism layout translation (resharding between pools with different TP degrees) and layer-pipelined transfer. This replaces the previous ad-hoc NCCL-based KV transfer path with a production-grade, topology-aware transport that does not require manual configuration.
 
 ### 4.5 Production Stack Comparison
 
 | Feature | NVIDIA Dynamo | llm-d | SGLang | vLLM V1 |
 |---------|--------------|-------|--------|---------|
 | Engine | TRT-LLM / vLLM | vLLM | Custom | Custom |
-| KV transport | NIXL | NCCL / Gloo | Custom | NIXL |
-| Global KV pool | Yes | Yes | RadixAttention | Per-replica APC |
-| Heterogeneous pools | Yes | Yes | Yes | Yes |
-| K8s integration | NIM operator | Custom controller | Manual | Manual |
+| KV transport | NIXL | NCCL / Gloo | Custom | NIXL + MooncakeStoreConnector |
+| Global KV pool | Yes (tiered eviction) | Yes | RadixAttention + decode radix cache | Per-replica APC + Mooncake offload |
+| Heterogeneous pools | Yes (incl. E/P/D) | Yes | Yes | Yes |
+| Bidirectional KV | Yes | Yes | Yes | Yes (2025) |
+| K8s integration | NIM operator + Grove + Gateway | Custom controller + CNCF | Manual | Manual |
 | Vendor lock-in | NVIDIA transport | None | None | NIXL optional |
 | Best for | NVIDIA fleet | Multi-vendor fleet | Chat/agentic | General-purpose |
+
+### 4.6 Attention-FFN Disaggregation (AFD)
+
+Originating from the NVIDIA-Groq acquisition (2025), Attention-FFN Disaggregation (AFD) takes disaggregation a step further than prefill/decode splitting. Instead of separating by inference phase, AFD separates **within the decode stage itself**, splitting each transformer layer into two operations serviced by different hardware:
+
+- **Attention half:** Multi-head attention + KV lookup. Memory-bandwidth-bound (reads KV cache, writes attention output). Served on GPUs with high HBM bandwidth (H200, B200).
+- **FFN half:** Feed-forward network (two large GEMMs). Compute-bound. Served on LPUs (Language Processing Units, from Groq) or high-FLOPS GPUs.
+
+The split exploits a fundamental asymmetry in transformer inference: attention reads vastly more data (the full KV cache) than it computes, while the FFN does the opposite (dense matrix multiplies on compact inputs). By assigning each half to hardware optimized for its bottleneck, AFD achieves higher per-token throughput than any single-device decode path.
+
+**Architecture.** Within each decode step:
+
+1. Attention instance reads KV cache and computes attention output. Sends activation to FFN instance.
+2. FFN instance computes feed-forward output. Sends residual back to attention instance for the next layer.
+3. Repeats for all $L$ layers.
+
+The inter-device activation transfer per layer is small ($d_{\text{model}} \times 2$ bytes for BF16): 8 KB for a 4096-dim model, 32 KB for 16384-dim. On PCIe Gen5 this takes < 1 microsecond, fully hidden by the compute time of each half.
+
+**When AFD wins.** AFD is most impactful for dense large models (70B+, especially 405B+) at long context lengths where KV cache reads dominate decode time. For small models or short contexts, the scheduling overhead and inter-device latency negate the benefit. Production deployments in 2025--2026 use AFD selectively for the largest model tiers.
+
+### 4.7 TurboQuant 2-bit KV in Disaggregated Serving
+
+TurboQuant applies 2-bit quantization to KV cache blocks, compressing each KV entry from 2 bytes (FP16) or 1 byte (FP8) to 0.25 bytes -- a raw 8x or 4x reduction respectively. However, the **net capacity increase is ~4x from FP16** (2-bit from FP16 = 8x raw compression, ~4x net after accounting for codebook overhead, alignment padding, and metadata). In disaggregated serving, this has compounding benefits:
+
+- **~4x KV cache capacity increase** on decode GPUs. A decode pool that previously served 2000 concurrent sequences can now serve ~8000 at the same HBM allocation. This directly increases the throughput per decode GPU.
+- **~4x transfer payload reduction.** KV transfer between prefill and decode pools transmits ~4x less data. On InfiniBand NDR, a 1.25 GB KV payload becomes ~312 MB, reducing transfer time from 25 ms to ~6.25 ms.
+- **Higher batch sizes without OOM.** The decode batch size limit is typically KV-cache-memory-bound. ~4x more KV space allows proportionally larger batches, improving hardware utilization toward the roofline.
+
+**Quality impact.** 2-bit KV quantization introduces measurable perplexity degradation on sensitive tasks (mathematical reasoning, code generation). The recommended practice is to use 2-bit KV for the decode pool (where throughput matters most) and FP8 or FP16 KV for the prefill pool (where accuracy of the initial prompt processing is critical). This hybrid approach preserves output quality while capturing most of the throughput benefit.
+
+| Quantization | Bytes/token (KV) | Decode capacity multiplier | Transfer reduction | Perplexity impact |
+|-------------|------------------|---------------------------|-------------------|-------------------|
+| FP16 | 2.0 | 1x | 1x | None |
+| FP8 | 1.0 | 2x | 2x | < 0.1% |
+| INT4 | 0.5 | 4x | 4x | 0.3--0.8% |
+| TurboQuant 2-bit | 0.25 | ~4x net (8x raw from FP16) | ~4x net | 1--3% (task-dependent) |
 
 ---
 
@@ -518,6 +598,13 @@ flowchart TD
 | 23 | Chunked prefill step time (Sarathi) | Equal to pure-decode step | Stall-free guarantee |
 | 24 | NVL72 aggregate BW per GPU | 1.8 TB/s | Full NVLink to any peer in rack |
 | 25 | DHT lookup latency | < 1 ms | Negligible vs prefill time |
+| 26 | Dynamo 1.0 tiered eviction, SSD → GPU promotion | 10--20 ms | 4x slower than CPU, still faster than re-prefill |
+| 27 | E/P/D TTFT improvement vs coupled (image) | 30%+ | Three-way split: encode/prefill/decode |
+| 28 | AFD inter-device activation per layer | 8--32 KB | Fits in < 1 us on PCIe Gen5 |
+| 29 | TurboQuant 2-bit KV capacity multiplier | ~4x net (8x raw from FP16, ~4x net with codebook overhead) | 2-bit: 0.25 bytes/token; enables ~4x more concurrent requests |
+| 30 | SGLang decode radix cache lookup | O(k) | vs O(k * B_s) linear scan for k-token prefix |
+| 31 | Bidirectional KV, decode → prefill reuse | Eliminates re-prefill on resume | Tool-calling and multi-turn with idle gaps |
+| 32 | MooncakeStoreConnector prefix hit rate (10+ nodes) | 80%+ | Matches native Mooncake deployment |
 
 ---
 
@@ -635,6 +722,12 @@ Failure rate: $4020 / 2.1 \times 10^9 = 1.9 \times 10^{-6}$, or 0.00019%. Well w
 
 **Orphaned KV blocks.** Failed decode replicas leave KV blocks in the global pool with no active references but no eviction trigger. Garbage collection must scan for blocks with zero references and stale timestamps. Without it, the pool slowly fills with dead entries.
 
+**E/P/D over-splitting for text-only workloads.** The three-way encode/prefill/decode split adds a second KV transfer hop (encode → prefill → decode). For text-only models, the encode pool sits idle, wasting its GPU allocation. Use E/P/D only for multimodal models with significant visual token processing; use standard P/D for text-only.
+
+**AFD scheduling overhead for small models.** Attention-FFN disaggregation within a decode step requires inter-device synchronization per layer. For models below ~70B parameters or context lengths below ~8K tokens, the compute time per layer is small enough that the synchronization overhead (even at < 1 us) becomes a measurable fraction of total step time. Reserve AFD for dense 70B+ models at long context.
+
+**TurboQuant 2-bit KV quality cliff.** The 1--3% perplexity degradation from 2-bit KV is averaged across benchmarks. On specific tasks -- mathematical chain-of-thought, code generation, precise factual recall -- the degradation can be significantly worse. Always benchmark end-task accuracy before deploying 2-bit KV in production. A hybrid approach (2-bit on decode, FP8 on prefill) is the safe default.
+
 ---
 
 ## 14. References
@@ -647,6 +740,12 @@ Failure rate: $4020 / 2.1 \times 10^9 = 1.9 \times 10^{-6}$, or 0.00019%. Well w
 6. llm-d open-source project, Meta (GitHub, 2024--2025).
 7. Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) -- RadixAttention.
 8. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023).
+9. NVIDIA Dynamo 1.0 documentation -- KV Block Manager, tiered eviction, DGDR mode (2025).
+10. NVIDIA Dynamo 1.0 multimodal E/P/D disaggregation -- GTC 2025 technical sessions.
+11. vLLM v1 bidirectional KV transfer and MooncakeStoreConnector -- vLLM project documentation, 2025.
+12. SGLang decode radix cache -- SGLang project documentation, 2025.
+13. Attention-FFN Disaggregation (AFD) -- NVIDIA-Groq acquisition integration, 2025.
+14. TurboQuant: 2-bit KV quantization for inference serving -- arXiv, 2025.
 
 ---
 

@@ -39,7 +39,7 @@ GDDR7 per chip: ~144 GB/s (32 b @ 36 Gbps). To deliver 9.8 TB/s would require **
 |---|---|---|---|---|---|
 | HBM3 | 1024 b | 6.4 Gbps | 819 GB/s | ~5.0 | Legacy training (H100 launch) |
 | HBM3e (12-Hi) | 1024 b | 9.6 Gbps | 1.23 TB/s | ~4.0 | Frontier (B200, MI355X) |
-| HBM4 (16-Hi) | 2048 b | ~10 Gbps | ~2.0 TB/s | <3.5 | Rubin, MI400 |
+| HBM4 (16-Hi) | 2048 b | ~10 Gbps | ~2.5 TB/s | <3.5 | Rubin, MI400 |
 | GDDR7 | 32 b | 36 Gbps | 144 GB/s | ~7.0 | Consumer GPU |
 | DDR5-6400 | 64 b | 6.4 Gbps | 51.2 GB/s | ~10.0 | Host CPU |
 | LPDDR5X | 64 b | 8.5 Gbps | 68 GB/s | ~5.0 | Mobile / Grace CPU |
@@ -282,7 +282,7 @@ Every HBM stack has spare TSVs. The base-die self-test at boot scans all TSVs by
 
 ## 5. The base die — increasingly a real chip
 
-Through HBM2/3, the base die was a glorified PHY-and-buffer chip on an old DRAM process. **HBM4 changes the rules** by moving the base die onto a real logic node (TSMC N5/N4). What this enables:
+Through HBM2/3, the base die was a glorified PHY-and-buffer chip on an old DRAM process. **HBM4 changes the rules** by moving the base die onto a real logic node. Confirmed: TSMC HBM4 base dies on both 12nm and 5nm nodes. SK hynix is building a dedicated $3.87B HBM4 packaging fab in Indiana to support volume production. What this enables:
 
 ### 5.1 Better PHY
 
@@ -374,7 +374,7 @@ CTE-driven thermal cycling creates microcracks in SnAg microbumps. Each cycle pr
 
 ### 8.3 Row Hammer
 
-Repeated access to one wordline ("aggressor") couples capacitively to neighboring rows ("victims"). Victim cells leak charge faster than the normal refresh cycle replenishes; eventually a bit flips. JEDEC mandates **TRR (Target Row Refresh)**: the base die monitors hot rows and refreshes neighbors preemptively. Modern HBM is essentially Row-Hammer-immune at the protocol level.
+Repeated access to one wordline ("aggressor") couples capacitively to neighboring rows ("victims"). Victim cells leak charge faster than the normal refresh cycle replenishes; eventually a bit flips. JEDEC mandates **TRR (Target Row Refresh)**: the base die monitors hot rows and refreshes neighbors preemptively. This raises the bar significantly compared to commodity DDR4, but it is not a complete defense: newer RowHammer variants such as **Double-sided RowHammer** (hammering rows on *both* sides of a victim simultaneously) and **Half-Double** (many accesses to near-aggressor rows at moderate distance) have been demonstrated to bypass TRR mitigations on DDR4/5 and LPDDR4X. HBM's wider bus and finer-grained bank-level scheduling make exploitation harder, yet the analog coupling mechanism remains. The claim that HBM is "RowHammer-immune" should be treated as a practical engineering advantage, not an absolute guarantee.
 
 ### 8.4 Signal integrity drift
 
@@ -398,7 +398,7 @@ gantt
     8/12-Hi mainstream            :2024-06, 2027-12
 
     section HBM4
-    First samples                 :2025-Q3, 2025-12
+    Sampling / early production   :2025-Q3, 2026-Q2
     Hybrid-bond ramp              :2026-Q1, 2027-Q4
     Mainstream (Rubin, MI400)     :2026-Q4, 2028-12
 
@@ -407,6 +407,8 @@ gantt
 ```
 
 Stack-height ceiling rises 8 → 12 → 16 → likely 20-Hi; per-pin frequency rises 6.4 → 9.6 → ~10 → ~12 Gbps; bus width jumps from 1 024 to 2 048 with HBM4. Energy/bit drops by ~30% per generation thanks to base-die logic-node migration.
+
+**HBM4 production status (updated May 2026):** TSMC HBM4 base dies confirmed on 12nm and 5nm nodes. SK hynix building a $3.87B HBM4 packaging fab in Indiana. HBM4 status upgraded from "projected" to **sampling / early production** — base dies are in volume, with hybrid-bond ramp underway for mainstream 2026-Q4 deployment in Rubin and MI400.
 
 Capacity per stack:
 
@@ -439,7 +441,7 @@ Full coverage in [L3 Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memo
 | Quantity | Value | Why |
 |---|---|---|
 | HBM3e per-stack BW | 1.23 TB/s | 1024 b × 9.6 Gbps / 8 |
-| HBM4 per-stack BW | ~2.0 TB/s | 2048 b × ~10 Gbps / 8 |
+| HBM4 per-stack BW | ~2.5 TB/s | 2048 b × ~10 Gbps / 8 |
 | HBM stack capacity (12-Hi/3 GB) | 36 GB | HBM3e peak |
 | HBM stack capacity (16-Hi/4 GB) | 64 GB | HBM4 launch |
 | 8-stack package BW (HBM3e) | ~9.83 TB/s | B200 / MI355X |

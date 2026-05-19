@@ -227,7 +227,83 @@ FlashAttention's trick: fuse the softmax into the matmul, avoid materializing th
 - $W = O(S^2 d)$ unchanged.
 - $Q = O(S d)$ — only Q/K/V/O moved to HBM.
 
-$I = O(S/2)$ — for $S = 2048$, $I = 1024$ FLOP/B → compute-bound everywhere. This is why FlashAttention exists: it converts an HBM-bound algorithm into an SMEM-bound one.
+$I = O(2S/3)$ — for $S = 2048$, $I \approx 1365$ FLOP/B → compute-bound everywhere. This is why FlashAttention exists: it converts an HBM-bound algorithm into an SMEM-bound one.
+
+### 3.6 Multi-chip roofline analysis
+
+The roofline model extends to multi-chip configurations, but the analysis changes because communication overhead modifies both the effective compute ceiling and the effective bandwidth.
+
+#### 3.6.1 Tensor parallelism (TP)
+
+With TP=$P$, each chip holds $1/P$ of every weight matrix and computes $1/P$ of the FLOPs. The naive expectation:
+
+- Compute per chip: $W_{\text{chip}} = W / P$.
+- Weight bytes per chip: $Q_{\text{chip}} = Q / P$ (each chip reads its own shard).
+- Arithmetic intensity per chip: $I_{\text{chip}} = W_{\text{chip}} / Q_{\text{chip}} = W / Q = I$ — **unchanged**.
+
+Per-chip AI is the same as single-chip AI. However, every layer requires an **AllReduce** of the output activation (hidden_dim $\times$ batch $\times$ seq $\times$ bytes_per_element). This communication is not captured in the single-chip roofline and acts as an overhead that reduces the effective FLOPS:
+
+$$
+\pi_{\text{eff}} = \pi \cdot \frac{t_{\text{compute}}}{t_{\text{compute}} + t_{\text{AllReduce}}}
+$$
+
+For TP on NVLink (1.8 TB/s on GB200), the AllReduce time for a hidden dimension $d$ with batch size $B$ and sequence length $S$:
+
+$$
+t_{\text{AllReduce}} \approx \frac{2 \cdot B \cdot S \cdot d \cdot \text{bytes}}{\beta_{\text{NVLink}}} \cdot \frac{P - 1}{P}
+$$
+
+The effective ridge point increases:
+
+$$
+I_{\text{ridge,eff}} = \frac{\pi_{\text{eff}}}{\beta} > \frac{\pi}{\beta}
+$$
+
+The system is effectively "more memory-bound" than the per-chip roofline suggests. For TP=8 on a B200 cluster with NVLink-5: the AllReduce overhead is ~5–10% of compute time for large GEMM (compute-bound regime, negligible impact) but ~30–50% for decode (where $t_{\text{compute}}$ is already tiny). This is why TP is efficient for prefill but costly for decode.
+
+#### 3.6.2 Pipeline parallelism (PP)
+
+With PP=$p$ stages, each stage processes independently with its own roofline. The pipeline bubble reduces utilization:
+
+$$
+\text{Utilization} = \frac{m}{m + p - 1}
+$$
+
+where $m$ is the number of microbatches. Each stage's roofline is analyzed independently — a stage with more MoE layers may be compute-bound while a stage with more attention layers may be bandwidth-bound. The **system throughput** is limited by the slowest stage (the bottleneck stage's effective throughput $\times$ pipeline utilization).
+
+Key insight: PP does not change the roofline of any individual stage. It only reduces utilization via the bubble. The remedy is to increase $m$ (more microbatches, better amortization of the bubble) and to balance stages so that each has similar $t_{\text{compute}} + t_{\text{communication}}$.
+
+#### 3.6.3 Expert parallelism (EP)
+
+EP changes the bandwidth/compute ratio depending on the active-expert fraction. For an MoE model with $E$ experts and top-$k$ routing:
+
+- Each GPU holds $E/P$ experts and receives $N \cdot k / P$ tokens (on average).
+- Compute: $k \cdot 2 d \cdot d_{\text{ff}} \cdot N / P$ per GPU.
+- All-to-all communication: $2 \cdot N \cdot d \cdot k \cdot (P-1)/P \cdot \text{bytes}$ per MoE layer.
+
+The effective AI for the compute phase is unchanged (same as single-GPU MoE). But the all-to-all adds communication overhead that, like TP's AllReduce, reduces the effective throughput:
+
+$$
+\pi_{\text{eff,EP}} = \pi \cdot \frac{t_{\text{expert compute}}}{t_{\text{expert compute}} + t_{\text{all-to-all}}}
+$$
+
+For fine-grained MoE (DeepSeek V3 style) on NVL72, the all-to-all is ~25–50 $\mu$s per layer while expert compute is ~18 $\mu$s (Section 7.2 of Modern_MoE). Communication dominates, and the effective roofline is communication-bound — a qualitatively different regime than single-chip compute-bound.
+
+#### 3.6.4 System-level ridge point
+
+The effective ridge point of a multi-chip system is **higher** (worse) than the per-chip ridge point due to communication overhead:
+
+$$
+I_{\text{ridge,cluster}} = \frac{\pi_{\text{eff}}}{\beta_{\text{eff}}} \geq I_{\text{ridge,chip}}
+$$
+
+where $\pi_{\text{eff}} < \pi$ due to communication and $\beta_{\text{eff}} \approx \beta$ (each chip still reads from its own HBM). The system is effectively more bandwidth-bound than any single chip. This has practical consequences:
+
+- **Training** (large batch, compute-bound on each chip): communication is a modest overhead (~10–20% of total time). The system-level roofline is close to per-chip.
+- **Inference decode** (batch-1, memory-bound on each chip): communication is a large fraction of total time. The system-level roofline is much worse — the overhead of AllReduce/all-to-all can exceed the compute time.
+- **Inference prefill** (large $S$, compute-bound): similar to training — communication is a modest overhead.
+
+This asymmetry is why disaggregated serving (L8) separates prefill (run on fewer, larger-GPU clusters with TP) from decode (run on many individual GPUs with EP, avoiding multi-chip communication where possible).
 
 ---
 
@@ -438,7 +514,7 @@ flowchart TD
 | Decode AI FP8 | 2 FLOP/B | doubled |
 | Decode AI FP4 | 4 FLOP/B | doubled again |
 | Prefill AI (S=4096) FP8 | ~8 192 FLOP/B | compute-bound |
-| FlashAttention AI | $O(S/2)$ | 1 024 at S=2048 |
+| FlashAttention AI | $O(2S/3)$ | 1 365 at S=2048 |
 | Tiled-GEMM SMEM ridge | ~3 FLOP/B | trivially compute-bound |
 | Continuous batching at B=32 FP8 | I = 64 FLOP/B | 32× decode tokens/s |
 | MLA KV reduction | 30× | Effective decode AI ×30 |

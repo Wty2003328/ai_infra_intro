@@ -149,6 +149,17 @@ CXL Type-3 devices (memory expanders) are relevant for AI: they allow a GPU node
 
 CXL 3.0 adds multi-level switching and fabric management, but adoption in AI training clusters remains limited because NVLink and UALink provide much higher bandwidth.
 
+### 2.2b CXL 3.1 and CXL Fabric
+
+CXL 3.0 introduced multi-level switching and peer-to-peer communication between devices. CXL 3.1 extends these capabilities with fabric-level features:
+
+- **CXL Fabric**: enables a pool of memory devices accessible by multiple hosts simultaneously. Unlike point-to-point CXL.mem, a fabric allows N hosts to share M memory devices through a switched CXL fabric topology.
+- **Relevance to AI**: disaggregated memory pools for KV cache sharing across inference replicas. A pool of CXL-attached DDR5 can serve as a shared KV cache that multiple GPU nodes read from, avoiding per-node replication. Also enables CPU-offloaded expert storage in MoE serving, where expert weights reside in CXL-attached memory and are fetched on-demand.
+- **Memory sharing**: multiple GPUs/CPUs can access the same CXL-attached memory with cache-coherence guaranteed by the CXL.cache protocol. Coherence traffic flows through the CXL fabric switches.
+- **Latency**: CXL 3.x over PCIe Gen5 yields ~150–250 ns for memory access (vs ~80 ns for local DDR5, ~300 ns for RDMA). The coherence overhead adds ~50–100 ns relative to direct-attached DDR5.
+- **Bandwidth**: CXL x16 Gen5 = 64 GB/s bidirectional, but this bandwidth is shared across all fabric participants accessing the same memory device. With 4 hosts sharing one memory expander, each host gets ~16 GB/s effective.
+- **Deployment status**: 2025–2026 early production, primarily for memory pooling in datacenter servers. Not yet a mainstream component of AI training architectures, but relevant for inference-serving memory disaggregation.
+
 ### 2.3 NVLink and NVSwitch
 
 NVLink is NVIDIA's proprietary GPU-to-GPU interconnect. NVLink-5 (Blackwell generation) specifications:
@@ -211,6 +222,8 @@ UALink 1.0 is the industry-standard alternative to NVLink, backed by the Ultra A
 | Protocol owner | NVIDIA (proprietary) | Ultra Accelerator Link Consortium (open) |
 | First silicon | B200 (2024) | MI400 (expected 2026) |
 | Switch | NVSwitch (NVIDIA) | UALink switch (Broadcom, Astera) |
+
+UALink's larger scale-up domain (1,024 vs 72) means that tensor parallelism can extend beyond a single rack without traversing the scale-out network. This is critical for AMD's Helios rack, which connects up to 1,024 MI400-class "Altair" GPUs. The **UALoE72** configuration — a 72-GPU UALink domain within a single Helios rack — has been confirmed, directly matching NVIDIA's NVL72 scale.
 
 #### Key Architectural Differences
 
@@ -284,7 +297,21 @@ InfiniBand features:
 
 An NDR switch provides $64 \times 400$ Gb/s $= 25.6$ Tb/s $= 3.2$ TB/s bidirectional switching capacity. A two-tier fat-tree of NDR switches supports $64^2 / 2 = 2{,}048$ endpoints.
 
-### 2.7 RoCE v2 (RDMA over Converged Ethernet)
+### 2.7 InfiniBand XDR Architecture
+
+XDR (Extended Data Rate) is the next InfiniBand generation, doubling NDR's per-port bandwidth:
+
+- **Data rate**: 800 Gb/s per port (100 GB/s), doubling NDR's 400 Gb/s.
+- **Signaling**: 100 Gbaud PAM4 per lane, 4 lanes per port. Compare NDR's 4 lanes at 50 Gbaud with NRZ-like PAM4 signaling. The move to 100 Gbaud PAM4 per lane is the key enabling technology.
+- **Switch**: NVIDIA Quantum-X800 switch ASIC with 144 XDR ports, providing ~115.2 Tbps aggregate bandwidth ($144 \times 800$ Gb/s). This is ~4.5× the NDR Quantum-2's 25.6 Tbps.
+- **Cable reach**:
+  - DAC (Direct Attach Copper): ~2 m (limited by insertion loss at 100 Gbaud)
+  - AOC (Active Optical Cable): ~100 m
+  - Transceiver (pluggable optics): ~2–10 km
+- **Relevance to AI**: doubles inter-node bandwidth for distributed training. For tensor parallelism across nodes, AllReduce time is communication-bound; doubling the link rate halves the AllReduce time for bandwidth-limited message sizes. This is particularly impactful for TP across nodes where the activation gradient exchange dominates the critical path.
+- **Timeline**: 2025–2026 production deployment in NVIDIA reference architectures (GB300 / NVL72+ clusters).
+
+### 2.8 RoCE v2 (RDMA over Converged Ethernet)
 
 RoCE v2 encapsulates RDMA transport in UDP/IP, allowing RDMA over standard Ethernet switches. This is cheaper than InfiniBand but requires careful configuration for losslessness:
 
@@ -514,6 +541,20 @@ The Ultra Ethernet Consortium (UEC) specification (targeting 2026 deployment) ad
 
 The key mathematical benefit of spraying: with $K$ equal-cost paths, the maximum utilization of any single path under spraying is $1/K + O(\sqrt{\log K / K})$ by Chernoff bound, vs $1$ under ECMP (one path gets the entire elephant flow).
 
+### 4.4 Recent Industry Partnerships and Initiatives (2026)
+
+**NVIDIA-Marvell NVLink Fusion ($2B partnership, March 31, 2026):** NVIDIA and Marvell announced a $2B partnership to develop custom NVLink Fusion silicon. NVLink Fusion extends NVLink technology beyond NVIDIA's own GPUs, allowing third-party accelerators (custom ASICs, NPUs) to participate in NVLink coherent domains. This opens NVL72/NVL576 topologies to heterogeneous accelerator combinations — e.g., NVIDIA GPUs + Marvell-custom AI accelerators in the same NVLink fabric.
+
+**NVIDIA Spectrum-X with MRC (May 6, 2026):** NVIDIA announced Spectrum-X Ethernet switches with MRC (Massive Radix Connectivity), targeting gigascale AI Ethernet networks. Spectrum-X with MRC provides:
+- Up to 512 ports of 800GbE per switch — 10× the radix of traditional Ethernet ToR switches
+- Purpose-built for AI training workloads with adaptive routing and congestion-aware scheduling
+- Targets clusters of 100,000+ GPUs where Ethernet economics beat InfiniBand at extreme scale
+
+**OpenAI-Microsoft "Build A Better Ethernet" Initiative (May 12, 2026):** OpenAI and Microsoft jointly announced an initiative to develop open Ethernet standards optimized for AI training. Goals include:
+- Standardized congestion control profiles for All-to-All collectives at scale
+- Open telemetry (INT) specifications for real-time network-aware training schedulers
+- Target: make Ethernet competitive with InfiniBand for training at 100k+ GPU scale, using open standards instead of proprietary fabrics
+
 ---
 
 ## 5. GPUDirect RDMA and Storage
@@ -564,6 +605,174 @@ This is the mechanism that enables disaggregated serving architectures (see [Dis
 
 ---
 
+## 5b. RDMA Programming for AI
+
+### 5b.1 What RDMA is
+
+**Remote Direct Memory Access (RDMA)** allows one machine to directly read or write memory on another machine without involving the remote CPU or operating system kernel. The key benefit: zero-copy, kernel-bypass transfers with latencies of 1-2 $\mu$s intra-rack (vs. ~50-100 $\mu$s for TCP/IP with kernel involvement).
+
+### 5b.2 RDMA APIs
+
+Two primary APIs are used in AI infrastructure:
+
+| API | Full name | Use case | Provider |
+|---|---|---|---|
+| **libibverbs / librdmacm** | InfiniBand Verbs / RDMA CM | Direct InfiniBand programming | Mellanox/NVIDIA OFED |
+| **libfabric (OFI)** | OpenFabrics Interface | Provider-agnostic RDMA | OpenFabrics Alliance |
+
+`libibverbs` provides the lowest-level access to InfiniBand hardware. `libfabric` abstracts over InfiniBand, RoCE, and other transports, making it the preferred API for portable RDMA code.
+
+### 5b.3 Core RDMA operations
+
+| Operation | Type | Description | Remote CPU involvement |
+|---|---|---|---|
+| **RDMA Read** | One-sided | Read from remote memory | None |
+| **RDMA Write** | One-sided | Write to remote memory | None |
+| **Send / Recv** | Two-sided | Message passing | Remote must post receive buffer |
+| **Atomic (CAS, FetchAdd)** | One-sided | Atomic compare-and-swap or fetch-and-add | None |
+
+One-sided operations (Read, Write, Atomic) are the key advantage of RDMA: the remote CPU is never interrupted. The remote NIC DMA's directly to/from pre-registered memory.
+
+### 5b.4 How NCCL uses RDMA
+
+NCCL (NVIDIA Collective Communications Library) uses RDMA extensively for distributed training:
+
+**AllReduce via RDMA Write (push-based):** Each rank writes its chunk of data to the next rank's pre-allocated memory buffer via RDMA Write. In Ring AllReduce, rank $i$ writes its segment to rank $(i+1) \mod N$'s memory, then rank $i+1$ reduces and forwards.
+
+**AllReduce via RDMA Read (pull-based):** Each rank reads the required data from other ranks' buffers via RDMA Read. NCCL selects between push and pull based on the operation and topology.
+
+The flow for Ring AllReduce with $N$ ranks:
+1. Each rank registers its reduction buffer via RDMA memory registration.
+2. Rank $i$ performs RDMA Write of its data chunk to rank $(i+1) \mod N$'s buffer.
+3. Rank $(i+1) \mod N$ reads the incoming data, performs local reduction, and writes the result to the next rank.
+4. This repeats for $2(N-1)$ steps (scatter-reduce + allgather).
+
+### 5b.5 Memory registration
+
+RDMA requires **pinning** (registering) memory regions before any transfer can occur. Registered memory is locked in physical RAM and cannot be swapped to disk.
+
+```c
+// Memory registration with libibverbs
+struct ibv_mr *mr = ibv_reg_mr(
+    pd,                    // protection domain
+    buffer,                // host memory pointer
+    buffer_size,           // size in bytes
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ
+);
+// mr->rkey is the remote key shared with other nodes
+// mr->lkey is the local key used for local operations
+```
+
+Overhead: approximately ~1 ms per registration for large buffers (hundreds of MB). This is a one-time cost per buffer, but it means RDMA is not suitable for ad-hoc memory regions — buffers are typically registered once at startup and reused.
+
+Limitations of memory registration:
+- Registered memory cannot be paged out (it is physically pinned).
+- There is a limit on the number of registrations per NIC (typically thousands).
+- GPUs with GPUDirect RDMA can register GPU memory directly (see Section 5.1).
+
+### 5b.6 Queue Pairs (QPs)
+
+Each RDMA connection requires a **Queue Pair (QP)**, consisting of a Send Queue and a Receive Queue. Work requests are posted to QPs, and completions are reaped from Completion Queues (CQs).
+
+NCCL creates approximately 1 QP per GPU pair for communication. On an 8-GPU node with all-to-all connectivity:
+
+$$\text{QPs per node} = 8 \times 7 = 56 \text{ (one QP per ordered GPU pair)}$$
+
+For a cluster of 256 nodes with 8 GPUs each:
+- Intra-node: NVLink (no RDMA QPs needed).
+- Inter-node: each GPU needs ~1 QP to each remote GPU it communicates with.
+
+### 5b.7 Key performance numbers
+
+| Metric | InfiniBand NDR | RoCE v2 (400GbE) |
+|---|---|---|
+| RDMA latency (intra-rack) | 1-2 $\mu$s | 2-5 $\mu$s |
+| RDMA latency (inter-rack) | 5-10 $\mu$s | 10-20 $\mu$s |
+| Bandwidth per link | ~50 GB/s (400 Gb/s NDR) | ~50 GB/s (400 Gb/s) |
+| Effective bandwidth (after protocol overhead) | ~45 GB/s | ~40 GB/s |
+
+In AI training, the critical metric is **AllReduce latency for typical tensor sizes**. For a 1 GB AllReduce across 64 GPUs on NDR: theoretical minimum is ~20 $\mu$s (limited by bandwidth and ring steps); in practice, NCCL achieves ~50-100 $\mu$s including software overhead.
+
+### 5b.8 GPUDirect RDMA
+
+GPUDirect RDMA (covered in Section 5.1 from the hardware perspective) enables GPU memory to be registered directly for RDMA operations:
+
+```c
+// Register GPU memory for RDMA (via GPUDirect)
+cudaMalloc(&d_buf, size);
+// Get the buffer's BAR address for RDMA registration
+unsigned long long bar_addr = get_gpu_bar_addr(d_buf);
+struct ibv_mr *mr = ibv_reg_mr(pd, (void*)bar_addr, size, access_flags);
+```
+
+Without GPUDirect RDMA, inter-node GPU communication follows:
+$$\text{GPU HBM} \xrightarrow{\text{PCIe}} \text{Host RAM} \xrightarrow{\text{RDMA}} \text{Host RAM (remote)} \xrightarrow{\text{PCIe}} \text{GPU HBM (remote)}$$
+
+With GPUDirect RDMA:
+$$\text{GPU HBM} \xrightarrow{\text{PCIe P2P + RDMA}} \text{GPU HBM (remote)}$$
+
+Benefits: reduces latency by ~30-50% and avoids the CPU memcpy overhead. The host CPU is completely uninvolved in the data path, freeing it for other work.
+
+---
+
+## 5c. SHARP In-Network AllReduce
+
+### 5c.1 What SHARP is
+
+**SHARP (Scalable Hierarchical Aggregation and Reduction Protocol)** is NVIDIA's technology for offloading AllReduce computation to InfiniBand switches. Instead of endpoints (GPUs) performing the reduction, the switch hardware performs reduction operations (sum, max, min) on data as it passes through the network.
+
+### 5c.2 How it works
+
+In a standard AllReduce, each rank sends its data to other ranks, and the reduction happens at the endpoints. With SHARP, data flows through the switch fabric, and the switch ASIC performs the reduction:
+
+1. Multiple ranks send their data chunks to the switch.
+2. The switch's hardware reduction engine computes the reduction (e.g., element-wise sum) on the incoming data.
+3. The switch forwards only the reduced result, not the raw inputs.
+
+The data volume reduction is dramatic: for an $N$-rank AllReduce, SHARP reduces the data that traverses the network by a factor of $N$. Instead of $N$ copies of the data flowing to each endpoint, only the reduced result is forwarded.
+
+```
+Without SHARP (Ring AllReduce, N ranks):
+  Each rank sends (N-1)/N of the data volume around the ring.
+  Total data transferred: 2 * (N-1)/N * D * N = 2(N-1)D
+
+With SHARP:
+  Each rank sends D once to the switch.
+  Switch reduces and returns D once to each rank.
+  Total data transferred: 2 * D * N (but switch does the reduction in-network)
+```
+
+### 5c.3 Performance
+
+| Message size | AllReduce speedup with SHARP |
+|---|---|
+| Large messages (>1 MB) | ~2x |
+| Small messages (<64 KB) | ~30-50% |
+| Medium messages | ~1.5-1.8x |
+
+SHARP benefits large messages most because the reduction computation in the switch is amortized over more data. Small messages see less benefit because the fixed overhead of SHARP setup and synchronization dominates.
+
+### 5c.4 Limitations
+
+1. **Limited reduction operations**: SHARP only supports sum, max, and min reductions. Arbitrary operations (e.g., custom reduce functions) cannot be offloaded.
+2. **Hardware requirement**: requires SHARP-capable switches (NVIDIA Quantum-XR, Quantum-2, or later). Standard Ethernet switches do not support SHARP.
+3. **Precision**: the switch performs reductions in a fixed precision (typically FP32 or FP16). Mixed-precision or FP8 reductions may not be supported.
+4. **Topology constraints**: SHARP works best with a single switch or a shallow hierarchy. Deep fat-tree topologies require multi-level SHARP, which adds complexity.
+
+### 5c.5 Use in AI training
+
+NCCL can use SHARP transparently when SHARP-capable switches are detected. The configuration is automatic:
+
+```bash
+# Enable SHARP in NCCL (usually auto-detected)
+export NCCL_SHARP_DISABLE=0    # Enable SHARP (default on capable hardware)
+export NCCL_SHARP_GROUP_SIZE=4 # Number of ranks per SHARP group
+```
+
+In production AI training clusters (e.g., NVIDIA DGX SuperPOD), SHARP is typically enabled for AllReduce operations in tensor parallelism, where message sizes are large and the 2x speedup translates directly to faster training throughput. For MoE models with small, irregular All-to-All messages, SHARP provides less benefit and is often disabled.
+
+---
+
 ## 6. End-to-end Cause / Effect
 
 ```mermaid
@@ -587,6 +796,15 @@ flowchart TD
 
     R["GPUDirect RDMA"] --> S["NIC → HBM direct, 1 PCIe hop"]
     S --> T["2× throughput for parameter loading"]
+
+    U["NVLink Fusion (NVIDIA-Marvell $2B)"] --> V["Third-party ASICs in NVLink domain"]
+    V --> W["Hogeneous NVL72/NVL576 fabrics"]
+
+    X["Spectrum-X MRC (512 × 800GbE)"] --> Y["Gigascale Ethernet for AI"]
+    Y --> Z["100k+ GPU clusters on open Ethernet"]
+
+    AA["OpenAI-Microsoft 'Build A Better Ethernet'"] --> BB["Open congestion control + telemetry for AI"]
+    BB --> CC["Ethernet competitive with IB at extreme scale"]
 
 ---
 

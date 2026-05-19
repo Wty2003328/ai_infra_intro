@@ -12,7 +12,7 @@ Attention is the single most important operation in modern LLMs. Every token gen
 
 $$\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d}}\right)V$$
 
-But the *instantiation* of that equation has evolved dramatically. Multi-head attention (MHA) gives each head independent key-value pairs. Multi-query attention (MQA) shares a single KV pair across all heads. Grouped-query attention (GQA) interpolates between the two. Multi-head latent attention (MLA, DeepSeek-V2/V3) compresses KV into a low-rank latent vector, achieving compression ratios of 30-1000x over MHA.
+But the *instantiation* of that equation has evolved dramatically. Multi-head attention (MHA) gives each head independent key-value pairs. Multi-query attention (MQA) shares a single KV pair across all heads. Grouped-query attention (GQA) interpolates between the two. Multi-head latent attention (MLA, DeepSeek-V2/V3) compresses KV into a low-rank latent vector, achieving per-layer compression ratios of ~64x over MHA (comparing the compressed latent vs uncompressed per-layer KV). The end-to-end ratio including RoPE overhead is ~8.5x; see [Frontier_Models_2025_2026](Frontier_Models_2025_2026.md) for that comparison basis.
 
 These choices have direct hardware consequences. The KV cache size during decode determines how many concurrent requests a GPU can serve. The attention variant determines whether decode is memory-bound (MHA, large KV) or compute-bound (MLA, small KV). The online softmax algorithm enables tiled attention kernels that avoid materializing the $N^2$ matrix.
 
@@ -246,6 +246,8 @@ The $8\times$ savings comes directly from the group ratio. In general, GQA with 
 ### 5.1 Motivation
 
 GQA reduces KV cache by reducing the *number* of heads. MLA takes a fundamentally different approach: it compresses the *content* of each KV pair into a low-dimensional latent vector using a learned low-rank projection. The compression ratio is determined by the latent dimension $r$, which is independent of $H$ and $d_h$.
+
+> **MLA vs. MQA distinction.** Both MLA and MQA (Section 3) store a single compressed representation per token, but the mechanisms are fundamentally different. MQA shares a *single K/V head sequence* of dimension $d_h$ across all $H$ query heads — every query head attends to the same K/V vectors directly. MLA stores a *single latent vector* $\mathbf{c}_{KV} \in \mathbb{R}^r$ and then *up-projects* it via separate $W_{UK}^h, W_{UV}^h$ matrices to reconstruct distinct K and V for each of the $H$ query heads. The key difference: MQA's single KV head has only $d_h$ dimensions to serve all query heads (information bottleneck), while MLA's latent reconstructs all $H$ heads via learned up-projections (the bottleneck is compressible, not destructive). This is why MLA achieves higher quality than MQA at comparable KV cache sizes.
 
 ### 5.2 Architecture
 
@@ -563,7 +565,7 @@ After all tiles: $O_i = \mathbf{o}_i^{(T)} / \ell_i^{(T)}$.
 | DeepSeek-V3 | MLA | 61 | 128 | 128 | $r=512$ | 61 KB |
 | Hypothetical MHA | MHA | 61 | 128 | 128 | — | 3,909 KB |
 
-DeepSeek-V3's MLA achieves **64x** KV cache reduction versus a hypothetical MHA with the same dimensions.
+DeepSeek-V3's MLA achieves **64x** KV cache reduction versus a hypothetical MHA with the same dimensions. Note: the 61 KB figure above counts only the compressed latent ($d_c = 512$) per layer. The full KV per token also includes the decoupled RoPE key projection ($d_R = 64$ per layer), which adds ~9 KB across 61 layers, bringing the total to ~70 KB per token. The 64x ratio compares per-layer latent-only sizes; the end-to-end ratio including RoPE is ~8.5x.
 
 ---
 
@@ -618,8 +620,8 @@ flowchart TD
 | 5 | Variance of unscaled dot product | $d_h \sigma^4$ | Entries ~ $\mathcal{N}(0,1)$ |
 | 6 | MHA KV per token (Llama-2 70B) | 2.5 MB | 80 layers, 64 heads, $d_h$=128 |
 | 7 | GQA KV per token (Llama-3 70B) | 320 KB | 80 layers, 8 KV heads |
-| 8 | MLA KV per token (DeepSeek-V3) | 61 KB | 61 layers, $r$=512 |
-| 9 | MLA compression vs MHA | 64x | DeepSeek-V3 dimensions |
+| 8 | MLA KV per token (DeepSeek-V3) | 61 KB | 61 layers, $r$=512 (excludes decoupled RoPE key; full KV including RoPE is ~70 KB) |
+| 9 | MLA compression vs MHA | 64x | DeepSeek-V3 dimensions (per-layer latent KV vs per-layer full KV; total-KV ratio including RoPE overhead is ~8.5x, see below) |
 | 10 | GQA typical group ratio | $H/G$ = 8 | Llama-3: 64 query / 8 KV |
 | 11 | Online softmax state | $d_h + 2$ values | Per query row in SRAM |
 | 12 | Rescale factor range | $(0, 1]$ | $e^{m_{old} - m_{new}} \leq 1$ |

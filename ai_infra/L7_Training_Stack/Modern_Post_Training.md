@@ -399,7 +399,7 @@ DeepSeek-R1 uses GRPO with the following configuration:
 | Parameter | Value |
 |---|---|
 | Base model | DeepSeek-V3-671B (37B active) |
-| Group size $G$ | 16 |
+| Group size $G$ | 64 (per DeepSeek-R1 technical report, which uses $K=64$) |
 | Clip ratio $\epsilon$ | 0.2 |
 | KL penalty $\beta$ | 0.001 (very light) |
 | Reward type | Rule-based (math correctness, code pass/fall) |
@@ -411,7 +411,71 @@ The key finding: GRPO on verifiable rewards alone produces the "aha moment" — 
 
 ---
 
-## 9. Comparison of all methods
+## 9. GRPO in production frameworks and new loss functions (2025–2026)
+
+### 9.1 GRPO in production frameworks
+
+GRPO has moved beyond research prototypes into production-grade training frameworks:
+
+**Megatron Core GRPO (0.16–0.17).** NVIDIA's Megatron-Core now ships with production-grade GRPO support:
+
+| Feature | Description |
+|---|---|
+| **Importance sampling** | Correctly weights samples from old policies during GRPO updates using the probability ratio $\rho_i(\theta) = \pi_\theta(y_i \mid x) / \pi_{\theta_{\text{old}}}(y_i \mid x)$. This is critical for multi-step GRPO where the policy drifts between rollout and update. |
+| **Sequence packing** | Packs multiple short RL trajectories into a single training example, maximizing GPU utilization. Typical packing efficiency: 85–95% of token positions are used (vs. 30–50% without packing for variable-length rollouts). |
+| **Distributed rollout** | Rollout (inference) and training (gradient update) are decoupled across separate GPU groups, following the OpenRLHF/vLLM pattern but integrated natively with Megatron-Core's TP/PP infrastructure. |
+| **Functional tests** | Comprehensive test suite covering convergence on toy problems, gradient correctness via finite differences, and distributed correctness across TP/PP/DP configurations. |
+
+**OpenRLHF and veRL GRPO.** Both frameworks have added GRPO as a first-class training mode alongside PPO. Key features:
+- Integrated vLLM rollout engine for high-throughput generation (50K+ tok/s for 70B models).
+- Support for verifiable reward functions (math correctness, code pass/fail, format compliance).
+- Multi-node training with FSDP/ZeRO-3 for the policy model and vLLM TP for rollouts.
+
+### 9.2 Liger Kernel GRPO loss (v0.7.0)
+
+Liger Kernel (a collection of Triton-based fused kernels for LLM training) added a GRPO loss implementation in v0.7.0:
+
+- **Triton implementation:** The GRPO loss (group advantage normalization, clipped surrogate objective, KL penalty) is implemented as a single fused Triton kernel, avoiding multiple GPU kernel launches and intermediate memory allocations.
+- **Memory efficiency:** Fused computation eliminates the need to materialize the full advantage tensor or the per-token probability ratios in GPU memory. Peak memory is reduced by ~40% compared to a naive PyTorch implementation.
+- **Integration:** Drop-in replacement for the GRPO loss in TRL, OpenRLHF, and custom training loops. Compatible with FSDP, DeepSpeed, and Megatron-Core.
+
+### 9.3 CISPO and SAPO loss types
+
+Liger Kernel v0.7.0 also introduced two new preference optimization loss functions:
+
+**CISPO (Clipped Importance Sampling Preference Optimization):**
+- Extends DPO with importance sampling corrections for off-policy data. When the training data was collected from a different policy than the current reference, standard DPO's implicit reward is biased.
+- CISPO clips the importance weight $\pi_\theta(y \mid x) / \pi_{\text{data}}(y \mid x)$ to a range $[1 - \epsilon_{\text{IS}}, 1 + \epsilon_{\text{IS}}]$, analogous to PPO's clipping but applied to the data-policy correction.
+- Enables training on mixed-quality preference data (e.g., combining human annotations with AI-generated preferences) without the bias from distribution shift.
+
+**SAPO (Self-Adaptive Preference Optimization):**
+- Adapts the DPO margin $\beta$ per-example based on the confidence of the preference signal. Examples where the preferred response is only marginally better get a smaller $\beta$ (softer optimization); examples with clear preference get larger $\beta$.
+- The adaptation is based on the implicit reward margin: $\beta_{\text{adapt}} = \beta_{\text{base}} \cdot \sigma(|\hat{r}(y_w) - \hat{r}(y_l)|)$, where $\sigma$ is a monotonic scaling function.
+- Reduces overfitting on noisy preference data while maintaining strong signal from clear preferences.
+
+### 9.4 Synthetic data for reasoning model distillation at scale
+
+The distillation paradigm (Section 11) has been dramatically scaled up in 2025–2026:
+
+**Production-scale pipelines.** Leading reasoning model training now uses synthetic data pipelines that generate 10M–100M verified reasoning traces from strong teacher models. This goes beyond the simple SFT-on-CoT approach:
+
+| Stage | Description | Scale |
+|---|---|---|
+| **Problem generation** | Teacher model generates novel problems across math, code, science domains | 50M+ problems |
+| **Solution generation** | Reasoning teacher (e.g., R1-671B) produces long CoT solutions | Avg 4K tokens/solution |
+| **Verification** | Rule-based verifiers (symbolic math, code execution, proof checkers) | 60–80% pass rate |
+| **Quality filtering** | Remove incorrect, trivial, or duplicated solutions | 50% of verified solutions survive |
+| **Curriculum design** | Order problems by difficulty, mixing domains to prevent forgetting | Multi-stage training |
+| **Iterative refinement** | After initial distillation, run GRPO on the student to refine reasoning | Additional 5–10K RL steps |
+
+**Key results from scaled distillation:**
+- Distillation + GRPO on a 32B model from R1-671B teacher achieves MATH-500 > 89%, comparable to models 10x its size.
+- The cost of distillation (SFT on synthetic data) is ~$500–$2,000 for a 32B model, versus $50,000+ for training a 671B teacher from scratch.
+- Synthetic data quality is the bottleneck: verified, diverse, and non-trivial reasoning traces are more valuable than raw quantity. 1M high-quality traces outperform 10M low-quality ones.
+
+---
+
+## 10. Comparison of all methods
 
 ```mermaid
 flowchart TD
@@ -438,7 +502,7 @@ flowchart TD
     ORPO --> |"Fastest pipeline"| SINGLE["Single-pass<br/>alignment"]
 ```
 
-### 9.1 Method comparison table
+### 10.1 Method comparison table
 
 | Method | Models | Data Format | Online/Offline | Reward Source | Key Innovation | Typical Use |
 |---|---|---|---|---|---|---|
@@ -449,8 +513,10 @@ flowchart TD
 | SimPO | 1 | Pairwise prefs | Offline | Length-norm log-prob | No reference model | Memory-constrained |
 | ORPO | 1 | Pairwise prefs | Offline | Odds ratio | Unified SFT + alignment | Single-pass training |
 | GRPO | 2 | Prompts only | Online | Verifiable or RM | Group advantage, no critic | Reasoning RL |
+| CISPO | 2 | Pairwise prefs (mixed) | Offline | Implicit (IS-corrected) | Clipped importance sampling for off-policy data | Mixed-quality preference data |
+| SAPO | 2 | Pairwise prefs | Offline | Implicit (adaptive) | Per-example margin adaptation | Noisy preference data |
 
-### 9.2 Performance comparison (AlpacaEval 2.0, 70B models)
+### 10.2 Performance comparison (AlpacaEval 2.0, 70B models)
 
 | Method | Win Rate | Avg. Length | Training GPU-hours | Preference Data |
 |---|---|---|---|---|
@@ -467,9 +533,9 @@ Note: GRPO targets reasoning tasks where AlpacaEval is not the right benchmark. 
 
 ---
 
-## 10. Online RL infrastructure
+## 11. Online RL infrastructure
 
-### 10.1 Why infrastructure matters
+### 11.1 Why infrastructure matters
 
 Online RL methods (PPO, GRPO) require generating samples from the current policy every training step. For a 70B model, generating $B = 2048$ responses of length $T = 512$ at each step requires significant inference throughput. The training loop alternates between:
 
@@ -479,7 +545,7 @@ Online RL methods (PPO, GRPO) require generating samples from the current policy
 
 The rollout phase is typically the bottleneck, as it requires the full model for autoregressive generation but does not use gradients.
 
-### 10.2 Framework comparison
+### 11.2 Framework comparison
 
 | Framework | Developer | PPO | GRPO | DPO | vLLM Rollouts | FSDP/ZeRO | Multi-node | Active (2026) |
 |---|---|---|---|---|---|---|---|---|
@@ -488,7 +554,7 @@ The rollout phase is typically the bottleneck, as it requires the full model for
 | veRL | Volcano Engine | Yes | Yes | Yes | Integrated | Ray-based | Yes | Yes |
 | NeMo-Aligner | NVIDIA | Yes | Yes | Yes | via TensorRT-LLM | via Megatron | Yes | Yes |
 
-### 10.3 TRL (Transformer Reinforcement Learning)
+### 11.3 TRL (Transformer Reinforcement Learning)
 
 TRL integrates with HuggingFace Transformers. The PPO trainer manages the four-model setup:
 
@@ -496,7 +562,7 @@ TRL integrates with HuggingFace Transformers. The PPO trainer manages the four-m
 - Rollouts use `model.generate()` — simple but slow compared to vLLM.
 - Best for: research, prototyping, models up to ~30B parameters.
 
-### 10.4 OpenRLHF
+### 11.4 OpenRLHF
 
 OpenRLHF decouples rollout and training across separate GPU groups:
 
@@ -517,15 +583,15 @@ flowchart TD
 
 Rollout GPUs run vLLM for fast batch generation. Training GPUs run DeepSpeed ZeRO-3 for the model updates. Weight synchronization between rollout and training GPUs occurs every $K$ steps (typically $K = 1$–$4$). This separation allows independent scaling of inference and training resources.
 
-### 10.5 veRL (Volcano Engine Reinforcement Learning)
+### 11.5 veRL (Volcano Engine Reinforcement Learning)
 
 veRL (by ByteDance/Volcano) uses Ray for orchestration and supports Megatron-style tensor parallelism for both rollout and training. Key innovation: the **weight-reserved rollout** keeps the inference engine warm and patches in updated weights via in-place updates, avoiding the overhead of reloading the full model every step.
 
-### 10.6 NeMo-Aligner
+### 11.6 NeMo-Aligner
 
 NVIDIA's NeMo-Aligner integrates with Megatron-LM and TensorRT-LLM for maximum throughput on NVIDIA GPUs. Supports FP8 rollouts and FP8 training for the PPO loop. Highest throughput but most hardware-specific.
 
-### 10.7 Throughput comparison (70B PPO, 64×H100)
+### 11.7 Throughput comparison (70B PPO, 64×H100)
 
 | Framework | Rollout throughput | Training throughput | Total tokens/sec |
 |---|---|---|---|
@@ -536,9 +602,9 @@ NVIDIA's NeMo-Aligner integrates with Megatron-LM and TensorRT-LLM for maximum t
 
 ---
 
-## 11. Distillation from reasoning teachers
+## 12. Distillation from reasoning teachers
 
-### 11.1 The distillation paradigm
+### 12.1 The distillation paradigm
 
 Reasoning models (DeepSeek-R1, o3) produce long chain-of-thought traces. These traces contain valuable reasoning patterns that can be transferred to smaller student models via distillation:
 
@@ -548,7 +614,7 @@ $$
 
 The teacher is a large reasoning model (e.g., DeepSeek-R1-671B). The student is a smaller model (e.g., Qwen-2.5-32B). The KL term matches the student's token-level distribution to the teacher's; the SFT term ensures the student can still produce the correct final answer.
 
-### 11.2 Distillation data pipeline
+### 12.2 Distillation data pipeline
 
 ```mermaid
 flowchart TD
@@ -560,7 +626,7 @@ flowchart TD
     STUDENT --> |"Standard SFT<br/>on CoT data"| ALIGNED["Reasoning student"]
 ```
 
-### 11.3 Why distillation works for reasoning
+### 12.3 Why distillation works for reasoning
 
 The teacher's CoT traces contain problem-solving strategies that the student could not discover through SFT on answer-only data. By training on the full reasoning trace, the student learns:
 
@@ -571,7 +637,7 @@ The teacher's CoT traces contain problem-solving strategies that the student cou
 
 These behaviors are difficult to specify as rules but are naturally present in RL-trained teachers' outputs.
 
-### 11.4 Performance of distilled models
+### 12.4 Performance of distilled models
 
 | Student | Teacher | MATH-500 | AIME 2025 | LiveCodeBench | Training Cost |
 |---|---|---|---|---|---|
@@ -584,7 +650,7 @@ Distillation followed by GRPO (distill-then-RL) produces the strongest small mod
 
 ---
 
-## 12. Worked problems
+## 13. Worked problems
 
 **Q1.** *A 70B policy model is trained with PPO using BF16 precision. The reward model is 7B. Compute the total GPU memory required across all four models, and determine how many H100 (80 GB) GPUs are needed.*
 
@@ -652,7 +718,7 @@ The critical difference is **exploration**: GRPO's on-policy sampling explores t
 
 ---
 
-## 13. References
+## 14. References
 
 - Ouyang et al., *Training language models to follow instructions with human feedback*, NeurIPS 2022.
 - Schulman et al., *Proximal Policy Optimization Algorithms*, arXiv 1707.06347, 2017.
@@ -666,6 +732,15 @@ The critical difference is **exploration**: GRPO's on-policy sampling explores t
 - OpenRLHF Team, *OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework*, GitHub, 2024–2026.
 - ByteDance, *veRL: Volcano Engine Reinforcement Learning for LLM*, GitHub, 2025.
 - NVIDIA, *NeMo-Aligner: Scalable Alignment of LLMs*, GitHub, 2024–2026.
+
+**GRPO infrastructure and new losses**
+- Liger Kernel Team, *Liger Kernel: Triton Kernels for LLM Training*, GitHub, 2024–2026.
+- Liger Kernel v0.7.0 Release Notes: GRPO loss, CISPO, SAPO, 2025–2026.
+- NVIDIA, *Megatron-Core GRPO: Importance Sampling and Sequence Packing*, 2025.
+
+**Synthetic data for reasoning**
+- DeepSeek-AI, *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*, arXiv 2501.12948, 2025 (synthetic data pipeline discussion).
+- Meta, *Llama 3.3 Post-Training Report*, 2025 (distillation from reasoning teachers at scale).
 
 ---
 

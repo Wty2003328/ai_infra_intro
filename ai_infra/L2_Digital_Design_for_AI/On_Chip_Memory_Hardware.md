@@ -34,7 +34,7 @@ $$
 B_{\text{SM}} \;=\; 6\,750 \cdot 9\,\text{B} \cdot 1.6\times 10^9\,\text{Hz} \;\approx\; 97\ \text{TB/s}
 $$
 
-Multiply by ~144 SMs in a B300 die: ~14 PB/s of *internal* operand traffic per die. HBM tops out at ~10 TB/s. The ratio of internal-to-external bandwidth demand is **~1 400×** — the entire purpose of L2 memory hierarchy is to bridge that ratio.
+Multiply by ~128 SMs per die (B200 confirmed; B300 SM count is estimated and may differ): ~12.5 PB/s of *internal* operand traffic per die. HBM tops out at ~10 TB/s. The ratio of internal-to-external bandwidth demand is **~1 200×** — the entire purpose of L2 memory hierarchy is to bridge that ratio.
 
 ### 1.2 The hierarchy with bandwidth budgets
 
@@ -42,9 +42,9 @@ Multiply by ~144 SMs in a B300 die: ~14 PB/s of *internal* operand traffic per d
 flowchart TD
     HBM[HBM3e / HBM4<br/>~10 TB/s/package · 300–500 cycle latency<br/>capacity ~96–512 GB]:::offchip
     L2[L2 cache (distributed slices)<br/>~10 TB/s · 30–80 cycle latency<br/>~50 MB chip-wide]:::l2
-    SMEM[SMEM / LDS<br/>~30 TB/s/SM · 8–20 cycle latency<br/>~256 KB/SM · 32 banks]:::smem
+    SMEM[SMEM / LDS<br/>~6.5 TB/s/SM · 8–20 cycle latency<br/>~256 KB/SM · 32 banks · 4 B/bank/cycle]:::smem
     TMEM[TMEM (Blackwell+)<br/>~50–80 TB/s/SM · 2–4 cycle latency<br/>~256 KB/SM · ultra-wide read ports]:::tmem
-    RF[Register file<br/>~100 TB/s/SM · 1 cycle latency<br/>~256 KB/SM · 32 banks via operand collector]:::rf
+    RF[Register file<br/>~30 TB/s/SM · 1 cycle latency<br/>~256 KB/SM · 32 banks via operand collector<br/>wider per-bank ports than SMEM]:::rf
     MAC[Tensor-core MAC array<br/>operand demand ~97 TB/s/SM at FP4]:::mac
 
     HBM --> L2 --> SMEM
@@ -395,7 +395,51 @@ Modern GPUs use **relaxed memory consistency** — writes from one SM are not im
 
 ---
 
-## 7. SerDes and PHYs (preview to L4)
+## 7. Emerging On-Chip Memory Technologies
+
+As SRAM scaling plateaus at N3/N2 (Section 2.5), alternative on-chip memory technologies may provide capacity relief, especially for weight caching and KV cache. None of these have replaced SRAM in production AI accelerators yet, but they are relevant for understanding where the technology may go.
+
+### 7.1 eDRAM (embedded DRAM)
+
+- Embedded DRAM on the logic die, using a capacitor-based storage cell (1T1C) rather than SRAM's 6T cross-coupled inverters.
+- **~4x denser than SRAM** (fewer transistors per bit) but **~2-3x slower** (capacitor refresh and charge/discharge latency).
+- Used by IBM Power processors and some Intel products for large on-chip caches.
+- Not currently in NVIDIA/AMD AI chips, but relevant as SRAM scaling stalls — an eDRAM L3 cache on an AI accelerator could provide a mid-tier between SRAM and HBM, trading latency for density.
+
+### 7.2 MRAM (Magnetoresistive RAM)
+
+- Non-volatile memory using magnetic tunnel junctions (MTJs) to store bits via spin orientation.
+- **~3x denser than SRAM** but **~10x slower write latency** (spin-torque switching time).
+- Potential use cases in AI accelerators: on-chip persistent storage for configuration registers, boot firmware, or weight snapshots that survive power cycling.
+- Not suitable for high-bandwidth operand traffic due to write latency, but could replace SRAM for infrequently-written metadata.
+
+### 7.3 ReRAM / RRAM (Resistive RAM)
+
+- Non-volatile memory based on resistance change in a metal-oxide film (filament formation/rupture).
+- Very high density potential (simple 2-terminal cell structure), potentially 10x denser than SRAM.
+- Still research-stage for production use; challenges include device variation, limited endurance (~10^6-10^8 write cycles vs SRAM's unlimited), and write energy.
+- Relevant for **in-memory computing** (analog matrix-vector multiplication directly in the memory array), which could bypass the von Neumann bottleneck entirely for inference workloads.
+
+### 7.4 PCM (Phase Change Memory)
+
+- Non-volatile memory using chalcogenide glass phase transitions (amorphous vs crystalline) to store bits.
+- Intel Optane technology (now discontinued for consumer products) was based on PCM-like 3D XPoint.
+- Higher density than SRAM, but limited write endurance (~10^8-10^12 cycles) and higher write energy than DRAM.
+- Potential for on-chip weight storage in inference-only accelerators where writes are infrequent.
+
+### 7.5 Why they matter for AI
+
+As SRAM scaling plateaus at N3/N2, the gap between on-chip memory capacity and AI working-set size grows each generation. A 70B-parameter model at FP8 = 70 GB, but total on-chip SRAM across 128 SMs is only ~32 MB (256 KB × 128). Alternative on-chip memories could provide:
+
+- **Weight caching relief**: eDRAM could act as a mid-tier cache between SRAM and HBM, holding frequently-accessed weight fragments closer to compute.
+- **KV cache expansion**: for long-context inference, MRAM or eDRAM could expand on-chip KV cache capacity, reducing HBM bandwidth pressure.
+- **In-memory computing**: ReRAM/PCM-based analog compute could eliminate the data-movement bottleneck entirely for small, fixed-point inference workloads.
+
+None of these technologies is a drop-in SRAM replacement; each requires architectural changes to the memory hierarchy and dataflow. But as SRAM cost-per-bit diverges from logic cost-per-bit, the economic incentive to adopt alternatives grows.
+
+---
+
+## 8. SerDes and PHYs (preview to L4)
 
 L2 owns the PHY blocks that drive off-chip. Brief touch:
 
@@ -407,7 +451,7 @@ Full coverage at [L4 — Networking & Interconnects](../L4_Systems_and_Interconn
 
 ---
 
-## 8. Where memory hierarchy meets the algorithm: tile sizing math
+## 9. Where memory hierarchy meets the algorithm: tile sizing math
 
 A FlashAttention-style kernel tiles the $Q \cdot K^T$ matrix into blocks small enough to fit in SMEM/TMEM. The tile size $B_r \times B_c$ is bounded by:
 
@@ -426,7 +470,7 @@ If $B_r = B_c = B$: $512 B + 4 B^2 \le 256\,000$ → $B \le 220$. Choose $B = 12
 
 ---
 
-## 9. End-to-end cause / effect
+## 10. End-to-end cause / effect
 
 ```mermaid
 flowchart TD
@@ -452,7 +496,7 @@ flowchart TD
 
 ---
 
-## 10. Numbers to memorize
+## 11. Numbers to memorize
 
 | Quantity | Value | Why |
 |---|---|---|
@@ -475,18 +519,18 @@ flowchart TD
 | L2 hit rate (LLM decode) | 5–15% | Working set ≫ L2 |
 | L2 hit rate (training fwd+bwd) | 60–80% | Activation reuse window |
 | HBM access latency | 300–500 cycles | The wall |
-| SMEM access latency | 8–20 cycles | One bank-bounce |
+| SMEM access latency | 20–30 cycles | One bank-bounce (Hopper) |
 | RF access latency | 1 cycle | Operand-collected |
 | FlashAttention tile dim on Hopper | 128 | TMEM size dictates |
 | RF cell area scaling vs ports | O((P+W)²) | Why >2R/1W is rare |
 
 ---
 
-## 11. Worked interview problems
+## 12. Worked interview problems
 
-**Q1.** *A B200 SM at FP8 needs ~50 TB/s of operand bandwidth. SMEM provides 30 TB/s. Why doesn't the SM stall?*
+**Q1.** *A B200 SM at FP8 needs ~50 TB/s of operand bandwidth. SMEM provides only ~6.5 TB/s. Why doesn't the SM stall?*
 
-Two reasons. (a) Not every cycle is a wgmma — about 60–70% of cycles execute tensor ops; the rest are scheduling, address calc, etc. Effective demand is ~32 TB/s, which fits. (b) Register-file reuse: each operand fetched into TMEM/RF is reused across multiple wgmma instructions in the same tile. Effective SMEM→RF traffic is much lower than the per-FMA gross figure. With FP4 (B300), neither hides the gap and TMEM becomes mandatory.
+Two reasons. (a) Not every cycle is a wgmma — about 60–70% of cycles execute tensor ops; the rest are scheduling, address calc, etc. Effective demand is lower than the raw peak. (b) Register-file reuse: each operand fetched into RF is reused across multiple wgmma instructions in the same tile. The RF (with wider per-bank ports and the operand collector) supplies the high-bandwidth path (~30 TB/s), while SMEM only stages data into RF/TMEM at tile boundaries — its ~6.5 TB/s is sufficient for inter-tile prefetch. With FP4 (B300), even this two-tier scheme falls short and TMEM becomes mandatory.
 
 **Q2.** *You're allocating a 64×64 tile in SMEM as `__shared__ float A[64][64]` and 32 threads in a warp transpose-load column-major (each thread reads `A[k][threadIdx.x]` for k∈[0,63]). What's the bank conflict?*
 
@@ -506,7 +550,7 @@ The full working set doesn't fit, but *transient* working sets do: FlashAttentio
 
 ---
 
-## 12. References
+## 13. References
 
 **Foundational**
 - Weste & Harris, *CMOS VLSI Design*, 4th ed. — SNM derivation, β-ratios.

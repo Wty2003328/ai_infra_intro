@@ -475,7 +475,69 @@ Each kernel launch incurs ~5–10 $\mu$s of driver overhead and requires writing
 
 ---
 
-## 6. End-to-end cause and effect
+## 6. Multi-Token Prediction and MoE Training Optimizations (2025–2026)
+
+### 6.1 Multi-Token Prediction (MTP)
+
+Standard language model training predicts one future token per position. Multi-Token Prediction (MTP) predicts $n$ future tokens simultaneously, improving the training signal density per forward pass.
+
+**Mechanism.** At each position $t$, the model produces not only the logits for token $t+1$ but also for $t+2, \ldots, t+n$. This is implemented via $n$ output heads that share the transformer backbone but have separate linear projections. The loss becomes:
+
+$$
+\mathcal{L}_{\text{MTP}} = \sum_{i=1}^{n} \lambda_i \cdot \mathcal{L}_{\text{CE}}(y_{t+i}, \hat{y}_{t+i})
+$$
+
+where $\lambda_i$ is a weighting term (typically $\lambda_i = 1/i$ or uniform). The additional heads add negligible parameter count ($n \times d \times V$ where $V$ is vocab size, versus $L \times 12d^2$ for the transformer body).
+
+**Benefits:**
+- **Denser training signal.** Each forward pass produces $n$ gradient signals per position instead of 1, improving sample efficiency by 10–20% (measured in tokens-to-convergence).
+- **Better representation learning.** Predicting further into the future forces the model to learn more robust intermediate representations, which improves downstream performance on reasoning tasks.
+- **Supported in Megatron Core 0.15+.** Production-grade implementation with the loss weights and head architectures used in Meta's original MTP paper.
+
+**Cost:** The forward pass is ~5–10% slower due to the additional output projections and loss computation. The backward pass overhead is similar. Net MFU impact is minimal because the output projections are small relative to the transformer backbone.
+
+### 6.2 LatentMoE
+
+Standard MoE routes tokens to experts in the full hidden dimension $d$. For models with large $d$ (8192+) and many experts (256+), the per-expert computation is expensive even when each expert receives few tokens. LatentMoE projects the input to a lower-dimensional latent space before routing and expert computation:
+
+$$
+\text{LatentMoE}(x) = W_{\text{out}} \cdot \text{Expert}_i(W_{\text{in}} \cdot x)
+$$
+
+where $W_{\text{in}} \in \mathbb{R}^{d_{\text{latent}} \times d}$ projects down, $d_{\text{latent}} \ll d$ (e.g., $d_{\text{latent}} = d/4$), and $W_{\text{out}} \in \mathbb{R}^{d \times d_{\text{latent}}}$ projects back up. The routing decision is made on the latent representation.
+
+**Benefits:**
+- Expert FLOPs are reduced by $(d_{\text{latent}} / d)^2$ (the matmul cost scales quadratically with dimension). For $d_{\text{latent}} = d/4$: 16x reduction in expert FLOPs.
+- The projection matrices $W_{\text{in}}$ and $W_{\text{out}}$ add $2 \cdot d \cdot d_{\text{latent}}$ parameters per MoE layer — negligible compared to the expert parameters saved.
+- Supported in Megatron Core 0.17+.
+
+### 6.3 NVFP4 quantization for MoE training
+
+NVIDIA's NVFP4 (4-bit floating-point) format, originally designed for inference on Blackwell GPUs, has been applied to MoE weight storage during training:
+
+- **Weight storage only:** Expert weights are stored in FP4 (1 bit sign, 2 bit exponent, 1 bit mantissa) with block-wise scaling factors. All compute remains in BF16 or FP8; weights are dequantized before the GEMM.
+- **Memory reduction:** Expert parameter storage is halved relative to FP8 and quartered relative to BF16. For a 256-expert MoE model, this saves hundreds of GB of GPU memory.
+- **Quality impact:** Negligible (< 0.1% perplexity degradation) when combined with appropriate block sizes (16–32 elements per scaling block) and mixed-precision accumulation during the dequantize-GEMM step.
+- **Supported in Megatron Core 0.17+.**
+
+### 6.4 Synthetic data pipelines at scale
+
+A major trend in 2025–2026 training is using LLM-generated reasoning traces as training data for smaller models. This is distinct from distillation (which matches token-level distributions) — synthetic data pipelines generate novel problem-solution pairs:
+
+**Pipeline architecture:**
+1. **Prompt generation:** A strong model (e.g., GPT-4-class or DeepSeek-R1) generates diverse problem statements in math, code, and science.
+2. **Solution generation:** The same model (or a specialized reasoning model) produces detailed chain-of-thought solutions.
+3. **Verification:** Rule-based verifiers check correctness (math: symbolic verification; code: execution tests; logic: proof checkers).
+4. **Quality filtering:** Remove solutions with errors, inconsistencies, or trivially short reasoning chains.
+5. **Deduplication:** Remove near-duplicate problems and solutions to prevent memorization.
+
+**Scale:** Production pipelines generate 10M–100M verified reasoning traces. These are mixed with traditional pretraining data (web text, code) at ratios of 5–20% synthetic content. Models trained on this mixed data show significant improvements on reasoning benchmarks (MATH, AIME, LiveCodeBench) even without RL fine-tuning.
+
+**Key insight:** The value of synthetic data is not in the final answers (which are often extractable from existing datasets) but in the *reasoning traces* — the step-by-step problem-solving process that teaches the student model how to think.
+
+---
+
+## 7. End-to-end cause and effect
 
 ```mermaid
 flowchart TD
@@ -512,7 +574,7 @@ flowchart TD
 
 ---
 
-## 7. Numbers to memorize
+## 8. Numbers to memorize
 
 | # | Quantity | Value | Why it matters |
 |---|---|---|---|
@@ -539,7 +601,7 @@ flowchart TD
 
 ---
 
-## 8. Worked problems
+## 9. Worked problems
 
 **Q1. Derive the maximum safe loss scale for FP16 training, given gradient tensor $g$ with $\max(|g|) = 0.05$.**
 
@@ -623,7 +685,7 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 
 ---
 
-## 9. Comprehensive comparison tables
+## 10. Comprehensive comparison tables
 
 ### 9.1 Precision formats for training
 
@@ -660,7 +722,7 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 
 ---
 
-## 10. References
+## 11. References
 
 **Mixed-precision training**
 - Micikevicius et al., *Mixed Precision Training*, ICLR 2018.
@@ -687,6 +749,12 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 - NVIDIA Transformer Engine v1/v2 documentation and release notes.
 - NVIDIA CUTLASS and cuBLASLt documentation for FP8 wgmma.
 - Micikevicius et al., *FP8 Formats for Deep Learning*, arXiv 2209.05433.
+
+**Multi-Token Prediction and MoE optimizations**
+- Gloeckle, F. et al., *Better & Faster Large Language Models via Multi-token Prediction*, ICML 2024.
+- NVIDIA, *Megatron-Core 0.15–0.17: MTP, LatentMoE, NVFP4*, 2025.
+- NVIDIA, *NVFP4 Format Specification*, 2025.
+- DeepSeek-AI, *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*, arXiv 2501.12948, 2025 (synthetic reasoning data discussion).
 
 ---
 

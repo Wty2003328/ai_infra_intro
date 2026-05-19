@@ -153,7 +153,7 @@ $$
 \text{KV\_bytes/token} \;=\; 2 \cdot n_{\text{layers}} \cdot n_{\text{kv\_heads}} \cdot d_{\text{head}} \cdot b
 $$
 
-For 70B FP8 ($n = 80$, $n_{\text{kv}} = 8$, $d_{\text{head}} = 128$): $\approx 160\,\text{KB/token}$. At TP=8 with 640 GB HBM (90% util): ~3.5M tokens fit. Batch=128 at 2K context each needs 256M tokens. This gap is why PagedAttention, KV compression, and disaggregation are mandatory.
+For 70B FP8 ($n = 80$, $n_{\text{kv}} = 8$, $d_{\text{head}} = 128$): $\approx 160\,\text{KB/token}$. At TP=8 with 640 GB HBM (90% util): ~3.5M tokens fit. Batch=128 at 2K context each needs 256K tokens. This gap is why PagedAttention, KV compression, and disaggregation are mandatory.
 
 ### 2.5 Autoscaling
 
@@ -474,9 +474,164 @@ SOC 2 Type II (audit logs, access controls, encryption). GDPR (EU residency, del
 
 ---
 
-## 11. Observability and Configuration
+## 11. LLM / AI Gateway Patterns
 
-### 11.1 Metric hierarchy
+### 11.1 Definition
+
+An LLM / AI Gateway is a dedicated proxy layer between applications and LLM providers or inference backends. It decouples application logic from model-specific API details, providing a unified control plane for routing, cost management, observability, and resilience across all LLM interactions.
+
+### 11.2 Core functions
+
+| Function | Description |
+|---|---|
+| Unified API | Single OpenAI-compatible (or custom) API surface across all providers (OpenAI, Anthropic, Google, Azure, self-hosted). Applications call one endpoint; the gateway translates to each provider's format. |
+| Rate limiting | Per-team and per-app token-rate and request-rate limits. Prevents a single consumer from monopolizing inference capacity or exceeding budget. |
+| Prompt routing | Classify incoming prompts and route to the cheapest model that satisfies quality requirements. Simple queries go to small/cheap models; complex reasoning goes to frontier models. |
+| Automatic retries | Exponential backoff with jitter on transient provider failures (rate-limit 429s, timeouts, 500s). Configurable retry budgets per request. |
+| Fallback chains | Ordered list of providers/models for each route. If primary fails (error, latency SLO breach), traffic shifts to fallback automatically. |
+| Observability hooks | Structured logging of latency (TTFT, TPOT), cost per request, error rate per model/provider, token usage. Exported to Prometheus, OTel, or custom dashboards. |
+| Cost tracking and budgeting | Per-team, per-app, per-model cost accumulation with budget caps and alerts. Enables chargeback and spend governance. |
+
+### 11.3 Semantic caching
+
+Exact-string caching (as in prefix caching) misses semantically equivalent rephrasings. Semantic caching addresses this:
+
+1. Embed the prompt using a small embedding model (e.g., text-embedding-3-small).
+2. Hash the embedding and check a vector store (FAISS, Qdrant, or in-memory ANN index) for nearby embeddings within a similarity threshold (typically cosine similarity > 0.92--0.95).
+3. On a cache hit, return the cached response directly -- no LLM call.
+4. On a miss, call the LLM, store the prompt embedding and response in the cache.
+
+Production hit rates of 30--50% are achievable for FAQ-style workloads, customer support, and knowledge-base queries where users ask the same question in varied phrasing. Each cache hit eliminates both cost (no LLM tokens consumed) and latency (no inference wait).
+
+Cache invalidation strategies: TTL-based expiry (short for factual content, longer for stable knowledge), LRU eviction by cache size, and semantic drift detection (re-embed and compare if cached response age exceeds a threshold).
+
+### 11.4 Model cascading
+
+Model cascading routes requests to the smallest model first and escalates only when needed:
+
+1. Send the prompt to a small, cheap model (e.g., 7B).
+2. If the model's confidence score (from logprob analysis, self-assessment, or a separate classifier) is above a threshold, return the response.
+3. If confidence is below the threshold, escalate to a larger model (e.g., 70B), optionally passing the small model's output as a hint.
+4. If still insufficient, escalate to a frontier model.
+
+Typical cascade: 7B -> 70B -> frontier. For workloads with a mix of easy and hard queries (e.g., customer support where 80% are simple FAQs), cascading reduces average cost by 3--10x compared to always using the largest model.
+
+The confidence threshold is tuned per workload: too low and quality suffers (bad answers accepted from the small model), too high and cost savings evaporate (too many escalations). Production deployments typically set the threshold at the 85th--95th percentile of the small model's confidence distribution on a held-out eval set.
+
+### 11.5 Implementation options
+
+| Implementation | Type | Key features |
+|---|---|---|
+| Portkey | Open-source gateway | 1,600+ model support via unified API, semantic caching, retry/fallback, guardrails, sub-1ms p99 overhead. Deploy as sidecar or standalone service. |
+| LiteLLM | Open-source proxy | OpenAI-compatible unified API for 100+ providers, load balancing, fallbacks, spend tracking. Python-based; integrates with existing inference servers. |
+| AWS Bedrock Gateway | Managed service | Native integration with AWS IAM, CloudWatch, and multi-provider routing. No infrastructure to manage. |
+| Custom (Envoy/Nginx + logic) | Build-your-own | Maximum flexibility; requires implementing routing, caching, and fallback logic. Suitable when existing gateways lack domain-specific features. |
+
+Typical deployment: sidecar container co-located with the application, or a shared gateway service in the inference tier.
+
+### 11.6 Architecture
+
+```
+Client Request
+     |
+     v
+[ Gateway ]  -- rate limiting, auth, cost tracking
+     |
+     v
+[ Router ]  -- model selection (routing rules, cascade logic)
+     |
+     v
+[ Load Balancer ]  -- replica selection (locality-aware, least-loaded)
+     |
+     v
+[ Inference Backend ]  -- vLLM, TensorRT-LLM, TGI, or provider API
+     |
+     v
+[ Response ]
+     |
+     v
+[ Guardrail Check ]  -- output moderation, PII detection, schema validation
+     |
+     v
+Response to Client
+```
+
+The router consults the semantic cache before model selection. The load balancer is the same locality-aware component described in Section 8. The guardrail check runs in parallel with response streaming for latency-sensitive paths.
+
+### 11.7 Production considerations
+
+- **Single point of failure.** The gateway sits on every request path. HA deployment is mandatory: multiple replicas behind a load balancer, with health checks and automatic failover. Gateway state (rate-limit counters, cache) must be replicated or stored externally (Redis for counters, vector DB for semantic cache).
+- **Streaming responses.** LLM responses are typically streamed (SSE or WebSocket). The gateway must proxy streaming data without buffering the entire output -- otherwise TTFT increases and memory usage grows unbounded. Implementation: chunked transfer encoding with backpressure.
+- **Token-aware rate limiting.** Request-level rate limiting (e.g., 100 req/min) is insufficient because a single request with a 128K-token prompt consumes far more resources than a 100-token prompt. Rate limiting must be token-aware: track tokens/min per tenant, not just requests/min. This requires either prompt-length estimation (from tokenization) or token counting at the gateway level.
+- **Cold-start latency.** If the gateway itself needs to load a model or establish a connection to a provider, the first request may be slow. Mitigate with connection pooling, warm-up probes, and pre-established sessions.
+
+---
+
+## 12. Agentic Inference Architecture
+
+### 12.1 Definition
+
+Agentic inference refers to infrastructure for serving LLM agentic workloads where each "request" is a multi-turn agent loop: think -> tool call -> observe -> think again. Unlike traditional request-response serving (one prompt in, one completion out), an agentic request may involve 5--50+ sequential LLM calls, interleaved with tool executions, over seconds to minutes.
+
+### 12.2 Key differences from request-response serving
+
+| Dimension | Request-response serving | Agentic inference |
+|---|---|---|
+| Session duration | Milliseconds to seconds | Seconds to minutes |
+| LLM calls per request | 1 | 5--50+ (planning, tool selection, output parsing, verification) |
+| KV cache lifetime | Evictable after response | Must persist across turns within a session |
+| GPU utilization pattern | Continuous (always decoding or prefilling) | Bursty: GPU active during LLM calls, idle during tool execution |
+| Context growth | Fixed at request time | Grows monotonically as agent accumulates observations |
+| Output structure | Free-form text or single JSON | Structured function calls + reasoning traces |
+
+The KV cache requirement is critical: between agent turns (while a tool executes), the KV cache for that session must not be evicted, or the next turn pays the full prefill cost again. This breaks the assumption of traditional continuous batching that KV blocks can be reclaimed as soon as a sequence completes.
+
+### 12.3 Scheduling implications
+
+Traditional continuous batching assumes short, independent requests. Agent sessions need different scheduling policies:
+
+- **Session-aware scheduling.** The scheduler knows which sequences belong to the same agent session and keeps their KV cache warm. This may mean reserving KV blocks for paused agents even when other requests could use them.
+- **GPU sharing during tool pauses.** While an agent waits for a tool result (which may take milliseconds for a calculator or seconds for a web search), its KV cache occupies memory but the GPU is idle. The scheduler should serve other requests during these pauses. However, the agent's KV cache must be preserved (either in HBM or swapped to host memory).
+- **Priority queuing.** Agents paused on tool execution have lower scheduling priority than actively decoding agents or fresh single-turn requests. This prevents idle agents from occupying GPU memory that could serve active work.
+- **Disaggregated KV storage.** During tool pauses, the agent's KV cache can be offloaded from GPU HBM to host RAM or SSD (as described in Section 9.2). When the agent resumes, the KV cache is reloaded. The swap latency (~1--10 ms for RAM, ~10--100 ms for NVMe) is acceptable given tool execution times.
+
+### 12.4 Context management
+
+Agent context grows monotonically as the agent accumulates tool outputs, reasoning traces, and observations. Unmanaged, a 10-turn agent session can easily exceed 50K tokens, straining both memory and attention quality.
+
+Techniques:
+
+- **Context compression between turns.** After receiving a tool output, compress it before appending to the agent's context. A smaller model (or the agent itself) can summarize verbose tool outputs. Typical compression: 5--10x reduction for structured data (JSON API responses, web page contents).
+- **Sliding window with retrieval.** Keep only the most recent N tokens in the active context. Older context is stored in a vector store and retrieved via RAG when relevant. Trades full-history awareness for memory efficiency.
+- **Disaggregated KV storage.** Keep the full KV cache but store older layers on CPU/SSD during tool pauses. Only the most recent layers (which are most likely to be attended) remain in HBM. The Mooncake-style tiered KV pool (Section 9.2) applies directly.
+
+### 12.5 Structured output
+
+Agents require reliable structured output (JSON function calls, tool-use schemas, argument parsing). This is implemented via **constrained decoding**: grammar masking in the sampler that restricts the vocabulary at each position to only tokens valid under the target schema.
+
+Implementation approaches:
+
+- **JSON grammar masking.** Construct a CFG or regex for the expected JSON schema. At each decode step, compute the set of valid next tokens and mask the logit distribution to zero out invalid tokens. This guarantees syntactically valid output.
+- **Tool-call formatting.** For models with native tool-call support (function calling), the framework applies a grammar specific to the tool-call format. The model generates structured tool invocations instead of free-form text.
+
+Overhead: constrained decoding adds ~5--15% overhead on decode throughput due to the grammar masking computation per step. This is acceptable given that structured output eliminates the need for brittle regex-based parsing of free-form responses.
+
+### 12.6 NVIDIA Dynamo agentic inference hints
+
+NVIDIA Dynamo (the inference framework succeeding TensorRT-LLM and Triton) includes explicit optimizations for agentic workloads:
+
+- **Session affinity.** Requests from the same agent session are routed to the same inference replica, keeping the KV cache local and avoiding cross-node transfers.
+- **KV cache persistence.** Dynamo supports pinning KV cache blocks to specific sessions, preventing eviction during tool execution pauses. The pinned blocks are marked as "reserved" and excluded from the normal eviction policy.
+- **Tool-call streaming.** When an agent emits a tool call, Dynamo can stream the structured output incrementally, allowing tool execution to begin before the full call is generated (e.g., start an HTTP request as soon as the URL parameter is complete).
+- **Disaggregated agent scheduling.** Dynamo's scheduler is aware of agent session states (active decoding, tool-waiting, tool-executing) and adjusts batch composition accordingly, prioritizing active agents and sharing GPU among waiting agents.
+
+These optimizations are early but indicate the direction: inference frameworks are evolving from single-request optimization to session-aware, agent-optimized serving.
+
+---
+
+## 13. Observability and Configuration
+
+### 13.1 Metric hierarchy
 
 ```mermaid
 flowchart TB
@@ -500,7 +655,7 @@ flowchart TB
     BIZ -->|report| EXEC[Executive dashboard]
 ```
 
-### 11.2 Alerting
+### 13.2 Alerting
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
@@ -511,7 +666,7 @@ flowchart TB
 | Error rate > 1% | 5xx per model 5 min | P1 | Page; circuit break |
 | Cache hit < 30% | hourly avg | P3 | Investigate churn |
 
-### 11.3 Engine configuration
+### 13.3 Engine configuration
 
 | Parameter | Default | Guidance |
 |---|---|---|
@@ -526,7 +681,7 @@ flowchart TB
 
 ---
 
-## 12. Common Interview Questions
+## 14. Common Interview Questions
 
 **Q: Design an inference platform for 100K RPS serving 70B.**
 
@@ -550,7 +705,7 @@ A: (1) Edge rate limiting: per-tenant tokens/min cap, 429 on excess. (2) Router:
 
 ---
 
-## 13. Further Reading
+## 15. Further Reading
 
 - **Production systems**: vLLM deployment guide, NVIDIA NIM docs, KServe case studies.
 - **Disaggregated serving**: Mooncake (2024), Splitwise (ISCA 2024), DistServe (OSDI 2024), Sarathi-Serve (OSDI 2024).

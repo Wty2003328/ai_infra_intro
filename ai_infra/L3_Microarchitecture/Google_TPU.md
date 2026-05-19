@@ -27,8 +27,11 @@ The result: the only non-NVIDIA hardware that hosts frontier-model training at >
 | TPU v5e | "Efficient" | 2023 | 16 GB HBM2 | 197 INT8 TFLOPS | 2D Torus (no OCS) | 256 chips |
 | TPU v6e | Trillium | 2024 | 32 GB HBM3 | ~918 BF16 TFLOPS | 2D Torus | 256 chips |
 | TPU v7 | Ironwood | 2025/26 | 192 GB HBM3e (7.37 TB/s) | 4 614 FP8 TFLOPS | 3D Torus + OCS | 9 216 chips |
+| TPU v8 | – (announced) | ~2027 | TBD | TBD | TBD | TBD |
 
 Ironwood's 9 216-chip pod is the largest single coherent-fabric AI computer in production as of 2026.
+
+**TPU v8 (announced ~April 24, 2026):** Google announced TPU v8 with the tagline "makes GenAI systems much better, not just bigger." Detailed specs are pending disclosure. Marked as announced; awaiting detailed architectural disclosures.
 
 ---
 
@@ -195,6 +198,53 @@ This works because XLA can cleanly map sharding onto the 3D torus: data parallel
 
 For an Ironwood pod, a typical sharding: `(data=8, model=4, tensor=8)` × 4 replicas → 1 024 chips per "slice", room for 9 slices in the 9 216-chip pod.
 
+### 6.1 JAX `shard_map` — explicit per-block sharding
+
+`jax.shard_map` is the successor to `pjit` for explicit sharding control in JAX. Unlike `pjit`, which requires abstract mesh specifications where the user declares sharding constraints and the compiler infers per-block behavior, `shard_map` gives **per-block control** over how tensors are partitioned across devices.
+
+**API:** the `@jax.shard_map(mesh, in_specs, out_specs)` decorator wraps a function and specifies exactly how each input and output tensor is split across the named mesh axes:
+
+```python
+from jax.sharding import Mesh, PartitionSpec as P
+import jax.numpy as jnp
+
+mesh = Mesh(jax.devices(), axis_names=('data', 'model'))
+
+@jax.shard_map(
+    mesh,
+    in_specs=P('data', 'model'),
+    out_specs=P('data', 'model')
+)
+def weight_sharded_matmul(x, w):
+    # x and w are local shards — operate on the per-device block directly
+    return jnp.dot(x, w)
+```
+
+**Key advantages for TPU:**
+
+- **Direct ICI topology mapping.** Because the user specifies the per-block partitioning, `shard_map` maps directly onto the ICI physical topology. This avoids unnecessary cross-chip communication that `pjit` may introduce when the compiler's abstract sharding decisions don't align with the torus geometry.
+- **XLA hint preservation.** `shard_map` hints are preserved through the XLA compilation pipeline rather than being abstracted away. The compiler uses them directly for optimal TPU scheduling — the per-block layout is a first-class compilation input, not an inferred property.
+- **Composability.** Multiple `shard_map` calls can be nested with different mesh axes, enabling hybrid parallelism strategies (e.g., TP+DP) without a single monolithic sharding specification.
+
+**Example: TP+DP hybrid parallelism on a 2D mesh.** Consider sharding a weight matrix across a 2D mesh of TPU chips where the `tensor` axis shards the weight columns (tensor parallelism) and the `data` axis replicates across data batches (data parallelism):
+
+```python
+mesh = Mesh(devices_2d, axis_names=('data', 'tensor'))
+
+@jax.shard_map(
+    mesh,
+    in_specs=P('data', 'tensor'),   # activation: batch shard × TP shard
+    out_specs=P('data', None)        # output: allreduce over 'tensor' axis
+)
+def tp_dp_layer(x_shard, w_shard):
+    local_out = jax.numpy.dot(x_shard, w_shard)
+    return jax.lax.all_reduce(local_out, 'sum', 'tensor')
+```
+
+Each TPU chip computes a partial matmul on its local weight shard, then an AllReduce along the `tensor` mesh axis produces the full output. The `data` axis is independent — no cross-chip communication needed.
+
+**Status:** available in JAX 0.4.20+ (released 2024). Recommended for all new code over `pjit`. Google's internal TPU workloads have migrated to `shard_map` as the primary sharding API; `pjit` remains supported for backward compatibility.
+
 ---
 
 ## 7. Memory hierarchy
@@ -206,7 +256,7 @@ For an Ironwood pod, a typical sharding: `(data=8, model=4, tensor=8)` × 4 repl
 | CMEM (compile-time managed) | a few MB | ~5 TB/s | varies |
 | HBM | 32–192 GB | 1.6–7.4 TB/s | ~300 cycles |
 
-Note: TPUs have **larger VMEM** (~96 MB on v5p) than GPU SMEM (~256 KB/SM × 144 SMs ≈ 36 MB). This is because the systolic-array dataflow is more bandwidth-efficient out of memory; VMEM acts as the operand-staging buffer for all 4 MXUs collectively.
+Note: TPUs have **larger VMEM** (~96 MB on v5p) than GPU SMEM (~256 KB/SM × 128 SMs ≈ 32 MB). This is because the systolic-array dataflow is more bandwidth-efficient out of memory; VMEM acts as the operand-staging buffer for all 4 MXUs collectively.
 
 ---
 

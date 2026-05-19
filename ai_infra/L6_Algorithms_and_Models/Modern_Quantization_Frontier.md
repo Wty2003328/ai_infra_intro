@@ -26,13 +26,7 @@ $$
 
 $S$ = 1 sign bit, $E$ = 4 exponent bits, $M$ = 3 mantissa bits. Bias = $2^{4-1} - 1 = 7$. The implicit leading 1 gives 4 effective mantissa bits.
 
-**Dynamic range derivation.** The maximum representable finite value occurs when $E = 14$ (the all-ones exponent $E = 15$ is reserved for Inf/NaN in E4M3) and $M = 111_2$:
-
-$$
-V_{\max} = (1.111_2) \cdot 2^{14 - 7} = 1.875 \cdot 2^7 = 240
-$$
-
-Wait — NVIDIA's published E4M3 extends to $E = 15$ for finite values (no Inf/NaN encoding in the standard, unlike IEEE):
+**Dynamic range derivation.** NVIDIA's E4M3 extends to $E = 15$ for finite values (no Inf/NaN encoding in the standard, unlike IEEE). The maximum representable value occurs when $E = 15$ and $M = 111_2$:
 
 $$
 V_{\max} = (1.111_2) \cdot 2^{15 - 7} = 1.875 \cdot 2^8 = 448
@@ -297,7 +291,7 @@ $$
 D_{m \times n} = \sum_{k=1}^{K/d_k} A_{m \times d_k}^{\text{FP8}} \cdot B_{d_k \times n}^{\text{FP8}} \;\;\text{(accum FP32)}
 $$
 
-where $d_k = 16$ for FP8 (vs $d_k = 32$ for FP16 — the same 128-bit physical operand bus carries twice as many FP8 elements). Throughput: 1979 TFLOPS on H100 SXM, exactly 2$\times$ the 989 TFLOPS FP16/BF16.
+where $d_k = 16$ for FP8 (vs $d_k = 32$ for FP16 — the same 128-bit physical operand bus carries twice as many FP8 elements). Throughput: 1979 TFLOPS on H100 SXM, exactly 2$\times$ the 990 TFLOPS FP16/BF16.
 
 ### 6.5 FP4 GEMM on Blackwell
 
@@ -332,7 +326,7 @@ Throughput: B200 dense FP4 = 4500 TFLOPS (sparse FP4 = 9000 TFLOPS with 2:4 stru
 
 | Format | H100 dense TFLOPS | B200 dense TFLOPS | B200 sparse TFLOPS | Notes |
 |---|---|---|---|---|
-| FP16/BF16 | 989 | 2\,250 | 4\,500 | Baseline |
+| FP16/BF16 | 990 | 2\,250 | 4\,500 | Baseline |
 | FP8 E4M3/E5M2 | 1\,979 | 4\,500 | 9\,000 | 2$\times$ FP16 |
 | FP6 E3M2 | N/A | ~3\,500 | ~7\,000 | Lower priority path |
 | FP4 / MXFP4 / NVFP4 | N/A (SW only) | 4\,500 | 9\,000 | 2$\times$ FP8, native on Blackwell |
@@ -358,7 +352,208 @@ Key takeaway: W4A4 with SpinQuant + AWQ is competitive with GPTQ INT4 weight-onl
 
 ---
 
-## 8. End-to-end cause and effect
+## 8. Quantization for MoE Models
+
+### 8.1 Why MoE quantization is a distinct problem
+
+Mixture-of-Experts (MoE) models (see [Frontier_Models_2025_2026](Frontier_Models_2025_2026.md)) contain 2--10x more *total* parameters than a dense model of equivalent *active* compute, because only a subset of experts (typically 2--8 out of 64--256) are activated per token. The inactive experts still occupy memory. For a model like DeepSeek-V3:
+
+- 256 routed experts, each with ~0.5B parameters = ~128B total expert parameters.
+- Only 8 experts active per token = ~4B active expert parameters per forward pass.
+- The inactive 124B parameters are pure memory overhead.
+
+This makes quantization even more critical for MoE than for dense models: the memory-to-compute ratio is inherently higher, and reducing the footprint of inactive experts directly translates to more experts fitting in GPU HBM (or fewer GPUs required).
+
+### 8.2 Expert-specific outlier patterns
+
+A key finding from MoE quantization research: **different experts develop very different activation distributions** during training. This happens because each expert specializes in particular token patterns (code, math, reasoning, different languages, etc.), and the activation statistics reflect that specialization.
+
+| Expert specialization | Typical activation range | Outlier fraction |
+|---|---|---|
+| Code / structured data | Narrow, near-Gaussian | 0.05% |
+| Natural language reasoning | Medium, moderate tails | 0.1% |
+| Mathematical / symbolic | Wide, heavy tails | 0.5--1% |
+| Rare-token handling | Very wide, extreme outliers | 1--2% |
+
+A single global calibration that treats all experts identically will over-quantize outlier-heavy experts and waste precision on narrow experts. **Per-expert calibration** (computing separate scale factors for each expert's weight matrices) is essential.
+
+### 8.3 Expert weight quantization strategies
+
+**W4A16 (weight-only INT4).** The most common MoE quantization strategy. Expert weights are static and known at calibration time, making GPTQ and AWQ directly applicable:
+
+- GPTQ with per-group ($G = 128$) calibration per expert yields ~0.2 perplexity delta vs FP16, matching dense-model quality.
+- AWQ with activation-aware scaling per expert is faster to calibrate (important when calibrating 256 experts) with comparable quality.
+- For DeepSeek-V3: 128B expert params at W4A16 = ~64 GB for expert weights alone, fitting comfortably on 8 x H100 (80 GB each) with room for shared attention layers and KV cache.
+
+**W8A8 (full INT8).** Expert weights and activations both at INT8, using SmoothQuant-style activation smoothing per expert. This enables full INT8 tensor-core utilization for expert computations but requires per-expert calibration of the smoothing factors.
+
+**Per-expert vs. shared calibration.** Shared attention layers (self-attention, shared MLP) use standard dense-model calibration. Only the routed experts require per-expert calibration. This is a practical advantage: most MoE models have far fewer shared parameters than expert parameters, so the per-expert calibration overhead is proportionally smaller than it seems.
+
+### 8.4 Dynamic expert loading and CPU offloading
+
+Quantized experts are physically smaller, which enables **CPU-offloading strategies** that are impractical at FP16:
+
+| Expert size (0.5B params) | FP16 bytes | W4A16 bytes | Load time at PCIe Gen5 (~64 GB/s) |
+|---|---|---|---|
+| Per expert | 1.0 GB | 0.25 GB | 15.6 ms vs 3.9 ms |
+
+The load time is proportional to bytes transferred:
+
+$$
+t_{\mathrm{load}} = \frac{\text{size}}{\beta_{\mathrm{PCIe}}}
+$$
+
+The 4x reduction in expert size means 4x faster loading from CPU RAM or NVMe. This enables strategies where only the most-frequently-used experts are kept in GPU HBM, while the tail of the expert distribution resides in CPU memory and is loaded on-demand. With W4A16, the loading latency is short enough that it can be hidden behind the computation of other experts in the same layer.
+
+### 8.5 DeepSeek-V3: a concrete example
+
+DeepSeek-V3 uses 256 routed experts with ~0.5B parameters each (plus shared attention layers totaling ~5B active parameters):
+
+| Component | Parameters | FP16 size | W4A16 size |
+|---|---|---|---|
+| Routed experts (total) | 128B | 256 GB | 64 GB |
+| Shared layers (attention + shared MLP) | ~5B | 10 GB | 2.5 GB |
+| **Total** | ~133B | ~266 GB | ~66.5 GB |
+
+On 8 x H100 (640 GB total HBM): FP16 fits with ~374 GB free for KV cache and activations. W4A16 fits with ~573 GB free — a 53% increase in available memory for batch size and KV cache.
+
+At W4A16, the 64 GB of expert weights can be distributed as 8 GB per GPU (each GPU holds ~32 experts), with the shared layers replicated across all GPUs. This is a natural mapping that avoids the inter-GPU communication overhead of expert parallelism for most tokens.
+
+### 8.6 Token routing precision
+
+The gating function (typically a linear layer + softmax or Top-K selection) determines which experts each token is routed to. This function **must run at higher precision** (FP16 or BF16):
+
+- The gating decision is discrete: token $t$ goes to expert $e_1$ or $e_2$, not a weighted average. Small perturbations in the gating logits can flip the Top-K selection, routing a token to a completely different expert.
+- A mis-routed token receives computation from the wrong expert, producing an output that is unrelated to what the model was trained to produce. Unlike weight quantization error (which is continuous and bounded), routing errors are **catastrophic and discrete**.
+- The routing error compounds through the network: a mis-routed token at layer $l$ produces a corrupted residual that affects routing decisions at all subsequent layers.
+
+**Practical guideline.** Keep the gating linear layer in FP16/BF16. The cost is negligible (the gating layer is tiny — typically $d_{\mathrm{model}} \times n_{\mathrm{experts}}$, which is 7168 x 256 = 1.8M parameters for DeepSeek-V3, or <4 MB in FP16). The accuracy benefit is outsized.
+
+---
+
+## 9. 1-Bit LLMs / BitNet: Ternary Weights at the Extreme
+
+### 9.1 BitNet b1.58: ternary quantization
+
+BitNet represents the extreme end of the quantization spectrum: weights constrained to just three values $\{-1,\, 0,\, +1\}$. Despite sounding like 1-bit quantization, the information content per weight is $\log_2 3 \approx 1.58$ bits, giving rise to the "1.58-bit" designation.
+
+**Why ternary instead of binary?** Pure binary $\{-1, +1\}$ eliminates the zero, removing the model's ability to "turn off" a connection. The zero weight acts as built-in sparsity: roughly 40--50% of weights in a trained BitNet model are zero, meaning nearly half the multiplications are skipped entirely. This is a structural advantage over binary quantization.
+
+**The weight--activation split.** BitNet quantizes *weights* to ternary but keeps *activations* at higher precision (FP16 or INT8 during early work; later versions explore lower-bit activations). The matmul becomes:
+
+$$
+Y = X^{\text{FP16}} \cdot W^{\{-1, 0, +1\}} = \sum_{j: w_j \neq 0} \text{sign}(w_j) \cdot X_{:,j}
+$$
+
+With ternary weights, multiplication reduces to addition, subtraction, or skip --- no multiplier hardware needed. The operation is purely additive, which is the key to BitNet's efficiency claims.
+
+### 9.2 bitnet.cpp: Microsoft's inference framework
+
+Microsoft released **bitnet.cpp** (2024--2025), an official CPU inference framework for 1-bit LLMs, built on top of llama.cpp and incorporating T-MAC's lookup-table methodology. The framework implements specialized CPU kernels that exploit the ternary weight structure:
+
+**Kernel variants:**
+
+| Kernel | Technique | Target ISA |
+|--------|-----------|------------|
+| **I2\_S** | Sub-byte lookup table for ternary packing | x86 (AVX-512, VNNI), ARM (SVE, NEON) |
+| **TL1** | Ternary lookup, 1-bit optimized | x86 AVX-512 VNNI |
+| **TL2** | Ternary lookup, 2-bit extended | ARM SVE |
+
+The T-MAC methodology precomputes lookup tables that map packed groups of ternary weights to partial sums. Since each weight is $\{-1, 0, +1\}$, a group of $K$ weights has $3^K$ possible patterns. The lookup table stores the dot product for each pattern, and inference reduces to table lookups and additions --- completely eliminating multiplications.
+
+### 9.3 Performance and energy
+
+Reported benchmarks for bitnet.cpp across CPU architectures:
+
+| Metric | ARM (Apple M2 Ultra) | x86 (Intel Sapphire Rapids) |
+|--------|----------------------|-----------------------------|
+| Speedup vs FP16 baseline | $1.37\times$--$5.07\times$ | $2.37\times$--$6.17\times$ |
+| Energy reduction vs FP16 | 55%--82% | 55%--82% |
+| Throughput (100B model, single CPU) | 5--7 tok/s | 5--7 tok/s |
+
+The headline result: a **100B-parameter BitNet model can run on a single CPU at 5--7 tokens/second**, which is within human reading speed (~5 tok/s). This is remarkable because a 100B-parameter FP16 model requires multiple GPUs just to fit in memory; BitNet's ternary weights compress the model to a fraction of the size.
+
+**GPU kernels** were released in May 2025, extending bitnet.cpp to GPU execution. The GPU kernels apply the same T-MAC lookup-table approach, adapted for GPU shared memory and warp-level parallelism.
+
+### 9.4 Reference and supported models
+
+**BitNet-b1.58-2B-4T:** The canonical reference model with 2.4B parameters trained on 4 trillion tokens. This serves as the standard benchmark for 1-bit LLM quality.
+
+**Supported model families (as of 2025):**
+- **Falcon3 family** (1B, 3B, 7B, 10B): bit-quantized variants of the Falcon3 models.
+- **Falcon-E family:** Efficiency-focused variant designed for 1-bit quantization from the ground up.
+
+### 9.5 Quality--efficiency tradeoff
+
+BitNet makes an explicit trade: model quality for extreme throughput and efficiency gains.
+
+| Property | BitNet 1.58-bit | FP16 | W4A16 (INT4 GPTQ) |
+|----------|----------------|------|-------------------|
+| Bits per weight | 2 (ternary, packed) | 16 | 4 |
+| Model size (70B equivalent) | ~17.5 GB (70B × 2 bits; note: 1.58 bits is information-theoretic entropy, not physical storage) | ~140 GB | ~35 GB |
+| Perplexity gap vs FP16 | +5--15% on benchmarks | baseline | +1--3% |
+| Hardware requirement | Single CPU | Multi-GPU | 1--2 GPUs |
+| Multiplication-free | Yes | No | No |
+
+The quality gap is significant: BitNet models underperform FP16 and INT4-quantized models on most benchmarks. The value proposition is not "same quality, cheaper" but rather "acceptable quality at radically lower cost," enabling deployment on edge devices, CPUs, and environments where GPU access is unavailable or uneconomical.
+
+### 9.6 Implications
+
+BitNet's extreme quantization opens several deployment scenarios that are impractical with conventional formats:
+
+1. **Edge and IoT inference:** Running 10B+ parameter models on devices with no GPU.
+2. **CPU-only datacenters:** Avoiding GPU procurement entirely for latency-tolerant workloads.
+3. **On-device personal AI:** Full LLM capability on laptops and phones without dedicated AI accelerators.
+4. **Extreme throughput serving:** When quality requirements are modest (e.g., summarization, classification) but throughput and cost-per-token must be minimized.
+
+The fundamental limit is quality: BitNet is not yet competitive with FP8 or FP4 quantization for tasks requiring high accuracy. It excels in scenarios where "good enough" quality at massive efficiency gains is the right tradeoff.
+
+---
+
+## 10. Emerging Quantization Formats and KV-Cache Compression
+
+### 10.1 TurboQuant 2-bit KV cache
+
+vLLM introduced **TurboQuant 2-bit KV cache compression**, applying aggressive 2-bit quantization to the key-value cache entries that dominate memory usage during long-context inference. The approach achieves **4x capacity** over FP16 KV cache, meaning a serving deployment can handle 4x longer contexts or 4x more concurrent sequences within the same GPU memory budget.
+
+The key insight is that KV cache tensors have different statistical properties than model weights: they are activation-like (dynamic, per-request) but accessed sequentially during decode. TurboQuant exploits the sequential access pattern to maintain per-block scaling factors that track the evolving distribution of key/value vectors across sequence positions.
+
+**Practical impact.** For a model with 128K context length, FP16 KV cache may consume 30--50 GB per request. At 2-bit, this drops to 7.5--12.5 GB, making long-context serving economically viable on fewer GPUs.
+
+### 10.2 NVFP4 KV cache
+
+NVFP4 (Section 3.3) is already established for weight quantization. Applying it to **KV cache entries** extends the 4.5-bit effective format to the memory-intensive key and value tensors stored during inference:
+
+- Uses the same $K = 16$ block structure with E4M3 FP8 shared scales.
+- KV cache entries are quantized per-token (each new token's K/V vectors are compressed immediately after computation).
+- Dequantization happens on-the-fly during attention, fused into the attention kernel to avoid extra memory round-trips.
+
+NVFP4 KV cache provides ~3.5x compression over FP16 with better numerical fidelity than 2-bit alternatives, at the cost of higher per-element storage than TurboQuant 2-bit.
+
+### 10.3 Online MXFP8 quantization
+
+Traditional quantization requires an **offline calibration step**: run representative data through the model, collect activation statistics, compute per-tensor or per-block scales, then deploy. This adds engineering complexity and deployment latency.
+
+**Online MXFP8 quantization** removes this requirement by quantizing during model loading without offline calibration:
+
+1. Weight scales are computed directly from the weight tensor at load time (no data needed --- weights are known).
+2. Activation scales use MX-style per-block scaling with the E8M0 shared exponent, computed on-the-fly from the current activation tile.
+3. No separate calibration dataset or profiling run is required.
+
+The tradeoff is slight accuracy degradation vs. offline-calibrated MXFP8 (which can use activation-aware methods like AWQ to optimize scales), but the deployment simplicity is compelling for rapid iteration and autoscaling scenarios where spinning up quantized model replicas must be fast.
+
+### 10.4 Arcquant / 2FP4
+
+**Arcquant** and **2FP4** are newer quantization formats targeting the space between FP4 and INT4:
+
+- **2FP4** uses two FP4 values to represent a single higher-precision element, effectively doubling the representable values from 13 to a much larger set through a two-component decomposition. The format pairs a coarse-scale FP4 value with a residual FP4 correction, similar in spirit to vector quantization with a two-level codebook.
+- **Arcquant** applies arc-aware scaling that adapts quantization parameters to the curvature of the loss landscape around each weight group, providing more principled scale selection than max-absolute-value calibration.
+
+Both formats are in early-stage deployment (2025) and target the W4A4 regime where every fraction of a bit matters for maintaining model quality at 4-bit precision.
+
+---
+
+## 11. End-to-end cause and effect
 
 ```mermaid
 flowchart TD
@@ -387,7 +582,7 @@ flowchart TD
 
 ---
 
-## 9. Numbers to memorize
+## 12. Numbers to memorize
 
 | # | Quantity | Value | Why it matters |
 |---|---|---|---|
@@ -414,7 +609,7 @@ flowchart TD
 
 ---
 
-## 10. Worked problems
+## 13. Worked problems
 
 **Q1. Derive the FP8 E4M3 dynamic range from first principles.**
 
@@ -450,7 +645,7 @@ From [FP_Unit_Design](../L2_Digital_Design_for_AI/FP_Unit_Design.md), the FP4/FP
 
 Combined: $1.5 \times (2/1.5) = 2.0\times$ exactly.
 
-Cross-check: B200 FP4 / H100 FP8 $= 4500 / 1979 = 2.27\times$. The excess $0.27\times$ comes from B200 having more SMs and higher clock, not from the FP4/FP8 ratio per SM.
+Cross-check: B200 FP4 / H100 FP8 $= 4500 / 1979 = 2.27\times$. The excess $0.27\times$ comes from B200 having 128 SMs (vs 132 on H100) at higher clock plus dual-die architecture, not from the FP4/FP8 ratio per SM.
 
 **Q4. You are calibrating a 70B model for W4A4 MXFP4 inference. After calibration with 256 samples, MMLU drops 2.1pp vs BF16. What interventions would you try, in order?**
 
@@ -467,7 +662,7 @@ Delayed scaling uses $S_t = f(A_{t-1})$. In training, consecutive batches have s
 
 ---
 
-## 11. References
+## 14. References
 
 **Standards and specifications**
 - OCP Microscaling Formats (MX) Specification v1.0, 2023.
@@ -495,6 +690,16 @@ Delayed scaling uses $S_t = f(A_{t-1})$. In training, consecutive batches have s
 - NVIDIA Transformer Engine v2 documentation.
 - NVIDIA TensorRT Model Optimizer (MODEL_OPT) documentation.
 - Neural Magic llmcompressor documentation.
+
+**1-bit / BitNet**
+- Wang et al., *BitNet: Scaling 1-bit Transformers for Large Language Models*, arXiv 2310.11453.
+- Microsoft bitnet.cpp repository, 2024--2025.
+- Ma et al., *The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits*, arXiv 2402.17764.
+
+**KV-cache and emerging formats**
+- vLLM TurboQuant documentation, 2025.
+- NVIDIA NVFP4 KV cache specification, 2025.
+- Online MXFP8 quantization --- NVIDIA Transformer Engine v2 release notes.
 
 ---
 

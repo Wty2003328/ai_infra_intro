@@ -8,28 +8,34 @@
 
 ## 0. Why this page exists
 
-By mid-2026, every large-scale inference cluster runs one of roughly eight model families. The architectural convergence is real -- MLA, MoE, FP8, and long-context attention appear in nearly every frontier release -- but the specific parameter counts, routing strategies, positional encodings, and KV-cache geometries differ enough that serving infrastructure must adapt per model. This page is a single-pass architectural survey of the models that matter for systems work. It is not a benchmark comparison; it is a specification sheet with consequences.
+By mid-2026, every large-scale inference cluster runs one of roughly twelve model families. The architectural convergence is real -- MLA, MoE, FP8, and long-context attention appear in nearly every frontier release -- but the specific parameter counts, routing strategies, positional encodings, and KV-cache geometries differ enough that serving infrastructure must adapt per model. This page is a single-pass architectural survey of the models that matter for systems work. It is not a benchmark comparison; it is a specification sheet with consequences.
 
 The models covered:
 
-| Model | Open? | Primary innovation |
-|---|---|---|
-| DeepSeek-V3 | Yes | MLA + fine-grained MoE + FP8 + MTP |
-| DeepSeek-R1 | Yes | Reasoning via long-CoT RL (GRPO) |
-| Llama-4 | Yes | Native MoE + iRoPE + early-fusion multimodal |
-| Qwen-3 | Yes | MoE + dense variants, thinking-mode toggle |
-| Gemma-3 | Yes | Local-global attention (5:1 sliding window) |
-| GPT-5 / o3 / o4-mini | No | Test-time compute scaling, reasoning search |
-| Claude-4 (Opus / Sonnet / Haiku) | No | Extended thinking, architectural innovations |
-| Gemini-2.5 (Pro / Flash) | No | MoE + native multimodal + 1M+ context |
+| Model | Open? | Intelligence Index | Primary innovation |
+|---|---|---|---|
+| DeepSeek-V4 Pro | Yes | 52 | MLA + fine-grained MoE + FP8 + MTP |
+| DeepSeek-R1 | Yes | -- | Reasoning via long-CoT RL (GRPO) |
+| Llama-4 (Scout / Maverick / Muse Spark) | Yes | 52 (Muse Spark) | Native MoE + iRoPE + early-fusion multimodal |
+| Qwen-3/3.5/3.6 | Yes | 52 (3.6 Max Preview) | MoE + dense variants, thinking-mode toggle |
+| Gemma-4 | Yes | -- | Four sizes, all multimodal, MoE variants |
+| GPT-5 / GPT-5.5 | No | 60 (GPT-5.5) | Test-time compute scaling, reasoning search |
+| Claude Opus 4.7 | No | 57 | Extended thinking, architectural innovations |
+| Gemini-3 / 3.1 Pro | No | 57 (3.1 Pro Preview) | MoE + native multimodal + 1M+ context |
+| Mistral (Medium 3.5 / Small 4 / Magistral) | Partial | 39 (Medium 3.5) | Reasoning-focused Magistral line |
+| Kimi K2.6 (Moonshot AI) | Yes | 54 | Highest-ranked open-weights model, MoE |
 
 For each: parameter count, architecture highlights, training approach, key innovations, KV cache implications, and serving considerations.
 
+**MoE is now standard.** By mid-2026, Mixture-of-Experts is the default architecture across nearly all model families -- both open and closed. The "total-A-active" notation (e.g., 397B A17B, meaning 397B total parameters with 17B active per token) has become the industry standard for describing MoE models. Dense models remain important at smaller scales (Qwen3.6 27B, Gemma-4 E4B/E2B) but the frontier is overwhelmingly MoE. This has permanent systems implications: expert parallelism, all-to-all communication, and load balancing are now first-class concerns for every inference deployment.
+
 ---
 
-## 1. DeepSeek-V3 (671B total / 37B active)
+## 1. DeepSeek-V4 Pro (671B total / 37B active)
 
-The single most influential open architectural release of 2024-2025. Trained on 14.8T tokens for approximately $5.5M in compute. Demonstrates that frontier quality is achievable at a fraction of the conventional cost through aggressive co-design of architecture, MoE routing, quantization, and training infrastructure.
+The latest flagship in the DeepSeek lineage and the single most influential open architectural family of 2024-2026. V4 Pro carries forward the V3 architecture (MLA, fine-grained MoE, FP8, MTP) with iterative improvements to training data quality, expert routing, and reasoning capability. Intelligence Index score: **52**. Priced at approximately **$2.17/1M tokens** (blended), making it one of the most cost-effective frontier models available. Competitive with the top open-weights models globally on standard benchmarks.
+
+The V3 generation was trained on 14.8T tokens for approximately $5.5M in compute, demonstrating that frontier quality is achievable at a fraction of the conventional cost through aggressive co-design of architecture, MoE routing, quantization, and training infrastructure. V4 Pro builds on this foundation with refined training recipes and scaled infrastructure.
 
 ### 1.1 Architecture specification
 
@@ -63,7 +69,7 @@ $$K_h = [W_{UK}^h \cdot c_{KV} \;\| \; k_R], \quad V_h = W_{UV}^h \cdot c_{KV}$$
 
 **KV cache per token per layer:** $(d_c + d_R) \times 2 \text{ bytes} = (512 + 64) \times 2 = 1152$ bytes in FP16.
 
-**Across 61 layers:** $1152 \times 61 = 70.3$ KB per token. Compare to dense MHA at the same head count: $\sim$600 KB per token. MLA achieves a **$\sim$8.5x compression** vs MHA and **$\sim$3x** vs GQA at equivalent $H_{KV}$.
+**Across 61 layers:** $1152 \times 61 = 70.3$ KB per token. Compare to dense MHA at the same head count: $\sim$600 KB per token. MLA achieves a **$\sim$8.5x compression** vs MHA and **$\sim$3x** vs GQA at equivalent $H_{KV}$. Note: the ~8.5x figure compares *total* KV per token (including the decoupled RoPE projection) against MHA total KV. The per-layer compression of the latent vector alone (512-d latent vs $2 \times 128 \times d_h$ full KV) is much higher (~64x), but the RoPE overhead reduces the effective end-to-end ratio.
 
 The cost is extra projection bandwidth at attention time ($W_{UK}$, $W_{UV}$ are small matmuls), but these are negligible compared to the HBM bandwidth saved during decode when the KV cache is read every step.
 
@@ -157,17 +163,19 @@ where $\rho_i = \pi_\theta(y_i|q) / \pi_{old}(y_i|q)$.
 
 ---
 
-## 3. Llama-4 (Scout / Maverick / Behemoth)
+## 3. Llama-4 (Scout / Maverick / Muse Spark)
 
-Released April 2025 as Meta's first native MoE model family, marking a complete departure from the dense Llama-3 architecture.
+Released April 2025 as Meta's first native MoE model family, marking a complete departure from the dense Llama-3 architecture. The family has since expanded to include Muse Spark, the highest-capability variant.
 
 ### 3.1 Model specification
 
-| Variant | Total params | Active params | Routed experts | Top-k | Context | Multimodal |
-|---|---|---|---|---|---|---|
-| Scout | 109B | 17B | 16 | 1 | 10M | Yes (early-fusion) |
-| Maverick | 400B | 17B | 128 | 1 | 1M | Yes (early-fusion) |
-| Behemoth | ~2T | 288B | 16 | 1 | Unreleased | Yes |
+| Variant | Total params | Active params | Routed experts | Top-k | Context | Multimodal | Intelligence Index |
+|---|---|---|---|---|---|---|---|
+| Scout | 109B | 17B | 16 | 1 | **10M** | Yes (early-fusion) | -- |
+| Maverick | 400B | 17B | 128 | 1 | 1M | Yes (early-fusion) | -- |
+| Muse Spark | -- | -- | -- | -- | -- | Yes | **52** |
+
+**Llama-4 Scout** holds the record for the **largest publicly available context window at 10M tokens**. Maverick provides a 1M token context window with a larger expert pool. **Muse Spark** is the higher-capability model in the family, achieving an Intelligence Index of 52 and matching DeepSeek-V4 Pro and Qwen3.6 Max Preview at the top of the open-weights leaderboard.
 
 ### 3.2 Architectural highlights
 
@@ -192,17 +200,25 @@ Released April 2025 as Meta's first native MoE model family, marking a complete 
 
 ---
 
-## 4. Qwen-3 (MoE + Dense Variants)
+## 4. Qwen-3 / 3.5 / 3.6 (MoE + Dense Variants)
 
-Qwen-3 (released mid-2025 by Alibaba) introduces a "thinking mode" toggle: the same weights produce either direct responses or extended chain-of-thought reasoning depending on a system prompt directive.
+The Qwen family (developed by Alibaba) has expanded rapidly through 2025-2026, progressing from Qwen-3 through Qwen-3.5 to Qwen-3.6. The family introduces a "thinking mode" toggle: the same weights produce either direct responses or extended chain-of-thought reasoning depending on a system prompt directive. MoE is now standard across the larger variants, with the "total-A-active" notation (e.g., 397B A17B) becoming the industry norm for describing MoE models.
 
 ### 4.1 Model variants
 
-| Variant | Total params | Active params | Architecture | Context |
-|---|---|---|---|---|
-| Qwen-3-235B-A22B | 235B | 22B | MoE (128 experts, top-8) | 128K |
-| Qwen-3-32B | 32B | 32B | Dense | 128K |
-| Qwen-3-30B-A3B | 30B | 3B | MoE | 128K |
+| Variant | Total params | Active params | Architecture | Context | Intelligence Index |
+|---|---|---|---|---|---|
+| Qwen3.6 Max Preview | -- | -- | MoE | -- | **52** |
+| Qwen3.6 Plus | -- | -- | MoE | -- | 50 |
+| Qwen3.6 27B | 27B | 27B | Dense | -- | 46 |
+| Qwen3.6 35B A3B | 35B | 3B | MoE | -- | -- |
+| Qwen3.5 397B A17B | 397B | 17B | MoE (128 experts, top-8) | 128K | -- |
+| Qwen-3-235B-A22B | 235B | 22B | MoE (128 experts, top-8) | 128K | -- |
+| Qwen-3-32B | 32B | 32B | Dense | 128K | -- |
+| Qwen-3-30B-A3B | 30B | 3B | MoE | 128K | -- |
+| Qwen3.6 14B / 7B / 4B / 1.5B / 0.6B | -- | -- | Dense | -- | -- |
+
+**Qwen3.6 Max Preview** ties with DeepSeek-V4 Pro and Llama-4 Muse Spark at Intelligence Index 52, making it one of the top open-weights models globally. **Qwen3.5 397B A17B** uses the standard MoE notation: 397B total parameters with 17B active per token. The family spans a wide range of sizes down to 0.6B for edge deployment.
 
 ### 4.2 Key innovations
 
@@ -224,18 +240,22 @@ Qwen-3 (released mid-2025 by Alibaba) introduces a "thinking mode" toggle: the s
 
 ---
 
-## 5. Gemma-3 (Local-Global Attention)
+## 5. Gemma-4 (All-Multimodal, MoE Variants)
 
-Google's Gemma-3 family (Feb 2025) is the canonical example of the sliding-window renaissance for small-to-medium models. Available in 1B, 4B, 12B, and 27B dense variants.
+Google's Gemma-4 family (2026) represents a major evolution from Gemma-3. All four variants are natively multimodal (Image-Text-to-Text) and the family includes both dense and MoE architectures. Gemma-4 reached #1 trending on HuggingFace upon release.
 
 ### 5.1 Architecture specification
 
-| Variant | Params | Layers | Heads | Context |
+| Variant | Total params | Active params | Architecture | Modality |
 |---|---|---|---|---|
-| Gemma-3-1B | 1B | 26 | 8 | 128K |
-| Gemma-3-4B | 4B | 34 | 16 | 128K |
-| Gemma-3-12B | 12B | 40 | 24 | 128K |
-| Gemma-3-27B | 27B | 62 | 32 | 128K |
+| Gemma-4 31B | 31B | 31B | Dense (flagship) | Image-Text-to-Text |
+| Gemma-4 26B-A4B | 26B | 4B | MoE | Image-Text-to-Text |
+| Gemma-4 E4B | 8B | 8B | Dense (efficient) | Image-Text-to-Text |
+| Gemma-4 E2B | 5B | 5B | Dense (efficient) | Image-Text-to-Text |
+
+**Gemma-4 31B** is the dense flagship, providing the highest quality in the family. **Gemma-4 26B-A4B** uses MoE to achieve strong performance with only 4B active parameters per token, following the now-standard "total-A-active" notation. The **E4B** (8B efficient) and **E2B** (5B efficient) variants are optimized for on-device and edge deployment.
+
+Gemma-3 (Feb 2025) introduced the 5:1 local-global sliding window attention pattern described below, and elements of this design persist in Gemma-4's architecture.
 
 ### 5.2 Local-global attention pattern
 
@@ -256,28 +276,30 @@ The pattern is purely a per-layer configuration. Inference engines implement it 
 
 | Factor | Consequence |
 |---|---|
-| Dense model (no MoE) | Simple TP/PP; no EP or all-to-all |
-| 5:1 sliding window | KV cache $\sim$5x smaller than naive at long context |
-| Small model sizes | Single-GPU serving feasible even at 27B |
-| 128K context | Long-context attention still $O(N^2)$ at global layers |
-| No MLA or GQA | Standard GQA with moderate KV head count |
+| Dense 31B flagship | Simple TP/PP; no EP or all-to-all |
+| MoE 26B-A4B variant | EP required for expert parallelism; all-to-all per MoE layer |
+| All variants multimodal | Image tokens increase KV cache and sequence length |
+| Efficient variants (E4B, E2B) | Single-GPU and on-device serving feasible |
+| Sliding window (from Gemma-3 heritage) | KV cache ~5x smaller than naive at long context |
 
 ---
 
-## 6. GPT-5 / o3 / o4-mini (OpenAI)
+## 6. GPT-5 / GPT-5.5 (OpenAI)
 
-Closed-source. Architectural details are inferred from behavior, pricing asymmetries, and limited public statements. All three models share a reasoning-first design philosophy: invest large amounts of test-time compute in chain-of-thought search before producing a user-visible answer.
+Closed-source. Architectural details are inferred from behavior, pricing asymmetries, and limited public statements. The GPT-5 family represents OpenAI's reasoning-first design philosophy: invest large amounts of test-time compute in chain-of-thought search before producing a user-visible answer. Both GPT-5 and GPT-5.5 are reasoning models with extended thinking.
 
 ### 6.1 What is known
 
-**o3 / o4-mini.** Reasoning models that consume variable amounts of "thinking tokens" (chain-of-thought) before emitting visible output. Pricing confirms MoE-like asymmetry: input tokens are cheaper than output tokens, and reasoning tokens are priced separately. Behavioral analysis suggests:
+**GPT-5.5.** The current flagship. Intelligence Index score: **60** -- the highest recorded score on the benchmark. Priced at approximately **$11.25/1M tokens** (blended). Supports 922K context window. A reasoning model with extended thinking capabilities, representing the state of the art in closed-source model intelligence.
+
+**GPT-5.** The major release preceding GPT-5.5. A reasoning model with extended thinking, multimodal input (images, audio), and large context windows. Likely MoE-based, as per-token pricing asymmetries (input cheaper than output, output cheaper than reasoning) are consistent with MoE where active parameter counts differ between prompt processing and generation.
+
+**o3 / o4-mini.** Earlier reasoning models that consume variable amounts of "thinking tokens" before emitting visible output. Behavioral analysis suggests:
 
 - A base LLM generates candidate reasoning steps.
 - A search procedure (likely tree-search or best-of-N sampling with verification) explores multiple reasoning paths.
 - The model selects and refines the best path before generating the final answer.
 - Output length varies from 1K to 100K+ reasoning tokens depending on problem difficulty.
-
-**GPT-5.** The flagship general-purpose model, likely MoE-based. Per-token pricing asymmetries (input cheaper than output, output cheaper than reasoning) are consistent with MoE where active parameter counts differ between prompt processing and generation. Supports multimodal input (images, audio) and extended context.
 
 ### 6.2 Test-time compute scaling
 
@@ -285,6 +307,8 @@ The key innovation is **variable compute at inference**:
 
 | Model | Thinking tokens | Latency | Cost multiplier vs direct |
 |---|---|---|---|
+| GPT-5.5 (direct) | 0 | 1-3s | 1x |
+| GPT-5.5 (extended thinking) | 5K-200K | 5s-5min | 3-200x |
 | GPT-5 (direct) | 0 | 1-3s | 1x |
 | o4-mini (easy) | 1K-5K | 5-30s | 3-10x |
 | o3 (hard problem) | 50K-200K | 30s-5min | 50-200x |
@@ -296,6 +320,9 @@ This has profound systems implications: the same model can consume 100x more com
 | Factor | Consequence |
 |---|---|
 | Variable thinking length | Capacity planning uses a distribution, not a fixed number |
+| GPT-5.5 at $11.25/1M tokens | Highest per-token cost among frontier models |
+| GPT-5.5 Intelligence Index 60 | Sets the ceiling for model intelligence benchmarks |
+| 922K context (GPT-5.5) | Near-1M context requires aggressive KV management |
 | MoE (inferred) | EP required for internal serving |
 | Multimodal input | Vision/audio tokens increase prompt length |
 | Reasoning search | Likely requires multiple parallel generations per request |
@@ -303,17 +330,19 @@ This has profound systems implications: the same model can consume 100x more com
 
 ---
 
-## 7. Claude-4 (Opus / Sonnet / Haiku)
+## 7. Claude Opus 4.7 (Anthropic)
 
-Anthropic's Claude-4 family (2025-2026) introduces "extended thinking" -- a controllable reasoning budget that determines how many tokens the model spends on internal reasoning before producing visible output.
+Anthropic's latest frontier model (2026). Claude Opus 4.7 is a reasoning model with extended thinking, representing the most capable model in the Claude lineage. Intelligence Index score: **57**. Priced at approximately **$10.94/1M tokens** (blended). Supports a 1M context window.
 
 ### 7.1 What is known
 
-Three tiers matching the traditional Opus / Sonnet / Haiku naming:
+**Claude Opus 4.7.** The current flagship. Extended thinking with controllable reasoning budgets. Best on complex reasoning, math, code, and agentic tasks. Intelligence Index 57 places it second among closed-source models (behind GPT-5.5 at 60) and ahead of Gemini 3.1 Pro Preview (57 at lower cost).
 
-- **Claude-4 Opus.** Largest, most capable. Extended thinking with budgets up to 128K thinking tokens. Best on complex reasoning, math, and code.
-- **Claude-4 Sonnet.** Mid-tier. Balanced performance and cost. Extended thinking with moderate budgets.
-- **Claude-4 Haiku.** Smallest, fastest. Minimal or no extended thinking. Optimized for throughput.
+The broader Claude family includes tiered models:
+
+- **Opus tier.** Largest, most capable. Extended thinking with large budgets. Best on complex reasoning, math, and code.
+- **Sonnet tier.** Mid-tier. Balanced performance and cost. Extended thinking with moderate budgets.
+- **Haiku tier.** Smallest, fastest. Minimal or no extended thinking. Optimized for throughput.
 
 Architectural details are not publicly disclosed. Observable characteristics suggest:
 
@@ -327,29 +356,32 @@ Architectural details are not publicly disclosed. Observable characteristics sug
 | Factor | Consequence |
 |---|---|
 | Extended thinking budget | Thinking tokens are generated but not visible; still consume KV and compute |
+| 1M context window | KV cache is the dominant cost at full utilization |
+| ~$10.94/1M tokens | Comparable pricing to GPT-5.5; both premium tier |
 | Tiered model sizes | Routing layer can direct requests to appropriate tier |
 | MoE (inferred) | EP for internal serving |
 | Tool / computer use | Multi-turn agent loops; KV cache persists across tool invocations |
 
 ---
 
-## 8. Gemini-2.5 (Pro / Flash)
+## 8. Gemini-3 / 3.1 (Google DeepMind)
 
-Google's Gemini-2.5 family (2025) represents the culmination of Google's native multimodal architecture: a single model processes text, images, audio, and video in a unified context window.
+Google's Gemini-3/3.1 family (2025-2026) represents the latest generation of Google's native multimodal architecture: a single model processes text, images, audio, and video in a unified context window.
 
 ### 8.1 What is known
 
-- **Gemini-2.5 Pro.** Flagship model. Supports 1M+ context window. Native multimodal input and output (text, images, audio, video). Strong on long-context benchmarks, multimodal reasoning, and code.
-- **Gemini-2.5 Flash.** Smaller, faster variant. Optimized for throughput with reduced capability on the hardest tasks.
-- Both models likely use MoE (pricing asymmetries and throughput characteristics consistent with MoE).
+- **Gemini 3.1 Pro Preview.** Current flagship. Intelligence Index score: **57**. Priced at **$4.50/1M tokens**. Supports 1M context window. Offers the **best price-performance ratio among frontier models** -- matching Claude Opus 4.7's intelligence score at less than half the cost. Native multimodal input and output (text, images, audio, video).
+- **Gemini-3 Pro / Flash.** The preceding generation in the same family. Strong on long-context benchmarks, multimodal reasoning, and code. Flash variant optimized for throughput.
+- Both generations likely use MoE (pricing asymmetries and throughput characteristics consistent with MoE).
 - Google's infrastructure advantages (TPU v5p/v6 pods, massive interconnect) enable serving at context lengths (1M+) that are impractical on most GPU clusters.
-- "Thinking budget" feature similar to Claude-4's extended thinking.
+- "Thinking budget" feature similar to Claude's extended thinking.
 
 ### 8.2 Serving implications
 
 | Factor | Consequence |
 |---|---|
-| 1M+ context | KV cache is the dominant cost; compression essential |
+| 1M context | KV cache is the dominant cost; compression essential |
+| $4.50/1M tokens (3.1 Pro Preview) | Best price-performance among frontier models |
 | Native multimodal | Image/audio/video tokens increase sequence length |
 | MoE (inferred) | EP across TPU pods |
 | Thinking budget | Variable thinking-token output length |
@@ -357,38 +389,112 @@ Google's Gemini-2.5 family (2025) represents the culmination of Google's native 
 
 ---
 
-## 9. Cross-Model Comparison
+## 9. Mistral (Medium 3.5 / Small 4 / Magistral)
 
-| Model | Total params | Active params | MoE? | Context | Attention type | Positional encoding | KV cache per token (approx.) |
-|---|---|---|---|---|---|---|---|
-| DeepSeek-V3 | 671B | 37B | 256+1, top-8 | 128K | MLA | RoPE (decoupled) | ~70 KB (61 layers) |
-| DeepSeek-R1 | 671B | 37B | 256+1, top-8 | 128K | MLA | RoPE (decoupled) | ~70 KB (61 layers) |
-| Llama-4 Scout | 109B | 17B | 16, top-1 | 10M | GQA + chunked | iRoPE | ~200 KB (est.) |
-| Llama-4 Maverick | 400B | 17B | 128, top-1 | 1M | GQA + chunked | iRoPE | ~200 KB (est.) |
-| Qwen-3-235B | 235B | 22B | 128, top-8 | 128K | GQA | RoPE | ~250 KB (est.) |
-| Gemma-3-27B | 27B | 27B | No (dense) | 128K | 5:1 sliding window | RoPE | ~50 KB (effective) |
-| GPT-5 | Undisclosed | Undisclosed | Likely MoE | ~256K (est.) | GQA (inferred) | RoPE (inferred) | Undisclosed |
-| Claude-4 Opus | Undisclosed | Undisclosed | Likely MoE | ~200K (est.) | Undisclosed | Undisclosed | Undisclosed |
-| Gemini-2.5 Pro | Undisclosed | Undisclosed | Likely MoE | 1M+ | Undisclosed | Undisclosed | Undisclosed |
+Mistral AI's mid-2026 lineup spans general-purpose and reasoning-focused models. While not competing at the very top of the Intelligence Index, Mistral models are widely deployed in European enterprise and regulated environments.
 
-Notes: KV cache estimates assume FP16 and include all layers. Gemma-3 effective KV reflects the 5:1 sliding window reduction. Closed-model entries are based on public signals and may not be accurate.
+### 9.1 Model variants
+
+| Variant | Type | Intelligence Index | Notes |
+|---|---|---|---|
+| Mistral Medium 3.5 | General-purpose | 39 | Mid-tier general model |
+| Mistral Small 4 | General-purpose | 28 | Small, fast, cost-effective |
+| Magistral Medium 1.2 | Reasoning-focused | 27 | Extended chain-of-thought reasoning |
+
+### 9.2 Serving implications
+
+| Factor | Consequence |
+|---|---|
+| Smaller model sizes | Single-GPU or small-cluster serving feasible |
+| Reasoning variant (Magistral) | Variable output length as with other reasoning models |
+| European deployment focus | Data residency and sovereignty considerations |
+| Competitive pricing | Budget-friendly alternative to frontier models |
 
 ---
 
-## 10. End-to-End Cause and Effect
+## 10. Kimi K2.6 (Moonshot AI)
+
+Kimi K2.6, from Moonshot AI (China), is the **highest-ranked open-weights model** on the Intelligence Index with a score of **54**, surpassing DeepSeek-V4 Pro, Qwen3.6 Max Preview, and Llama-4 Muse Spark (all at 52). Priced at approximately **$1.71/1M tokens** (blended), it offers remarkable cost efficiency -- approximately **6-7x cheaper than GPT-5.5** at roughly **90% of its intelligence score** (54 vs 60).
+
+### 10.1 Key characteristics
+
+- **Intelligence Index: 54** -- highest among open-weights models.
+- **~$1.71/1M tokens** -- most cost-effective high-intelligence model available.
+- **6-7x cheaper than GPT-5.5** at ~90% of its intelligence score.
+- From Moonshot AI, one of China's leading AI labs.
+- The K2 family has seen rapid iteration: K2, K2.5, and K2.6 represent successive capability improvements.
+
+### 10.2 Serving implications
+
+| Factor | Consequence |
+|---|---|
+| Highest open-weights intelligence | Default choice for cost-sensitive high-quality deployments |
+| ~$1.71/1M tokens | Disruptive pricing vs closed-source models of similar quality |
+| Rapid iteration cycle | Infrastructure must accommodate frequent model swaps |
+| Open weights | Self-hosting feasible; no API dependency |
+
+---
+
+## 11. Cross-Model Comparison
+
+### 11.1 Intelligence Index and Pricing
+
+| Model | Open? | Intelligence Index | Price (/1M tokens) | Context | Notes |
+|---|---|---|---|---|---|
+| GPT-5.5 | No | **60** | ~$11.25 | 922K | Highest recorded intelligence |
+| Claude Opus 4.7 | No | **57** | ~$10.94 | 1M | Second-highest closed-source |
+| Gemini 3.1 Pro Preview | No | **57** | ~$4.50 | 1M | Best price-performance among frontier |
+| Kimi K2.6 | Yes | **54** | ~$1.71 | -- | Highest open-weights; 6-7x cheaper than GPT-5.5 |
+| DeepSeek-V4 Pro | Yes | **52** | ~$2.17 | 128K | Cost-effective frontier quality |
+| Qwen3.6 Max Preview | Yes | **52** | -- | -- | Tied top open-weights |
+| Llama-4 Muse Spark | Yes | **52** | -- | -- | Tied top open-weights |
+| Qwen3.6 Plus | Yes | 50 | -- | -- | Strong mid-tier open |
+| Qwen3.6 27B | Yes | 46 | -- | -- | Dense, efficient |
+| Mistral Medium 3.5 | Partial | 39 | -- | -- | Enterprise / European focus |
+| Mistral Small 4 | Partial | 28 | -- | -- | Budget-friendly |
+| Magistral Medium 1.2 | Partial | 27 | -- | -- | Reasoning-focused |
+
+### 11.2 Architecture Comparison
+
+| Model | Total params | Active params | MoE? | Context | Attention type | Positional encoding | KV cache per token (approx.) |
+|---|---|---|---|---|---|---|---|
+| DeepSeek-V4 Pro | 671B | 37B | 256+1, top-8 | 128K | MLA | RoPE (decoupled) | ~70 KB (61 layers) |
+| DeepSeek-R1 | 671B | 37B | 256+1, top-8 | 128K | MLA | RoPE (decoupled) | ~70 KB (61 layers) |
+| Llama-4 Scout | 109B | 17B | 16, top-1 | **10M** | GQA + chunked | iRoPE | ~200 KB (est.) |
+| Llama-4 Maverick | 400B | 17B | 128, top-1 | 1M | GQA + chunked | iRoPE | ~200 KB (est.) |
+| Llama-4 Muse Spark | -- | -- | -- | -- | -- | -- | -- |
+| Qwen3.5 397B | 397B | 17B | 128, top-8 | 128K | GQA | RoPE | ~250 KB (est.) |
+| Qwen3.6 35B A3B | 35B | 3B | MoE | -- | GQA | RoPE | -- |
+| Qwen-3-235B | 235B | 22B | 128, top-8 | 128K | GQA | RoPE | ~250 KB (est.) |
+| Gemma-4 31B | 31B | 31B | No (dense) | -- | Sliding window | RoPE | -- |
+| Gemma-4 26B-A4B | 26B | 4B | MoE | -- | -- | -- | -- |
+| GPT-5.5 | Undisclosed | Undisclosed | Likely MoE | 922K | GQA (inferred) | RoPE (inferred) | Undisclosed |
+| GPT-5 | Undisclosed | Undisclosed | Likely MoE | ~256K (est.) | GQA (inferred) | RoPE (inferred) | Undisclosed |
+| Claude Opus 4.7 | Undisclosed | Undisclosed | Likely MoE | 1M | Undisclosed | Undisclosed | Undisclosed |
+| Gemini 3.1 Pro Preview | Undisclosed | Undisclosed | Likely MoE | 1M | Undisclosed | Undisclosed | Undisclosed |
+| Mistral Medium 3.5 | -- | -- | -- | -- | -- | -- | -- |
+| Kimi K2.6 | -- | -- | MoE (inferred) | -- | -- | -- | -- |
+
+Notes: KV cache estimates assume FP16 and include all layers. Closed-model entries are based on public signals and may not be accurate. The "total-A-active" notation (e.g., 397B A17B) has become the industry standard for describing MoE models and is used throughout this page.
+
+---
+
+## 12. End-to-End Cause and Effect
 
 ```mermaid
 flowchart TD
     subgraph Arch["Architectural Decisions"]
-        MLA["MLA compression<br/>(DeepSeek-V3)"]
+        MLA["MLA compression<br/>(DeepSeek-V4 Pro)"]
         MOE256["Fine-grained MoE<br/>256 experts, top-8"]
         TOP1["Top-1 routing<br/>(Llama-4)"]
-        SLIDE["5:1 sliding window<br/>(Gemma-3)"]
+        SLIDE["Sliding window attention<br/>(Gemma-4)"]
         FP8["FP8 native training"]
         MTP["Multi-token prediction"]
         ROPE_NOPE["iRoPE: RoPE + NoPE<br/>(Llama-4)"]
         THINK["Extended thinking /<br/>test-time compute scaling"]
         RL_GRPO["GRPO RL<br/>(DeepSeek-R1)"]
+        MOE_STD["MoE as standard<br/>(total-A-active notation)"]
+        COST_RACE["Cost efficiency race<br/>(Kimi K2.6: $1.71/1M)"]
     end
 
     subgraph Sys["Systems Consequences"]
@@ -398,7 +504,7 @@ flowchart TD
         SPEC_DECODE["Built-in speculative decode<br/>(1.8x speedup)"]
         LOAD_BALANCE["Aux-loss-free balancing"]
         LONG_CTX["10M+ context feasible"]
-        KV_MED["KV cache ~5x reduction<br/>(Gemma-3)"]
+        KV_MED["KV cache ~5x reduction<br/>(Gemma-4)"]
         VAR_OUTPUT["Variable output length<br/>(100x cost range)"]
         REASON_COST["Reasoning tokens dominate cost"]
         ONLINE_SAMPLE["Online sampling inside<br/>training loop"]
@@ -409,6 +515,7 @@ flowchart TD
         BIG_BATCH["Large batch to amortize EP"]
         TIERED["Tiered model serving<br/>(R1 distills, Claude tiers)"]
         CAP_PLAN["Capacity planning via<br/>output-length distributions"]
+        COST_OPT["Cost-optimized routing<br/>(open vs closed)"]
     end
 
     MLA --> KV_SMALL
@@ -422,6 +529,8 @@ flowchart TD
     THINK --> VAR_OUTPUT
     RL_GRPO --> ONLINE_SAMPLE
     RL_GRPO --> REASON_COST
+    MOE_STD --> EP_MANDATORY
+    COST_RACE --> COST_OPT
 
     KV_SMALL --> BIG_BATCH
     ALLTOALL --> DISAGG
@@ -435,38 +544,55 @@ flowchart TD
 
 ---
 
-## 11. Numbers to memorize
+## 13. Numbers to memorize
 
 | Quantity | Value | Context |
 |---|---|---|
-| DeepSeek-V3 total params | 671B | 256 routed + 1 shared expert per MoE layer |
-| DeepSeek-V3 active params | 37B | Top-8 of 256 experts + shared expert |
-| MLA KV cache (DeepSeek-V3) | 70 KB/token | 61 layers $\times$ (512+64) latent $\times$ 2 bytes |
+| DeepSeek-V4 Pro total params | 671B | 256 routed + 1 shared expert per MoE layer |
+| DeepSeek-V4 Pro active params | 37B | Top-8 of 256 experts + shared expert |
+| DeepSeek-V4 Pro Intelligence Index | 52 | Tied with Qwen3.6 Max Preview and Llama-4 Muse Spark |
+| DeepSeek-V4 Pro price | ~$2.17/1M tokens | Blended; competitive with top open-weights |
+| MLA KV cache (DeepSeek-V4 Pro) | 70 KB/token | 61 layers $\times$ (512+64) latent $\times$ 2 bytes |
 | Dense MHA KV (equivalent) | ~600 KB/token | Same head count, no compression |
-| MLA compression ratio vs MHA | ~8.5x | 70 KB vs 600 KB per token |
+| MLA compression ratio vs MHA | ~8.5x | 70 KB vs 600 KB per token (total KV including RoPE; per-layer latent-only ratio is ~64x) |
 | DeepSeek-V3 training cost | ~$5.5M | 14.8T tokens on H800 cluster |
 | DeepSeek-V3 training tokens | 14.8T | FP8 native |
-| MTP acceptance rate (DeepSeek-V3) | ~85% | Speculative decode with MTP head |
+| MTP acceptance rate (DeepSeek) | ~85% | Speculative decode with MTP head |
 | MTP decode speedup | ~1.8x | Built-in speculative decoding |
-| DeepSeek-V3 MoE all-to-all per layer | 15K+ experts | 256 $\times$ 61 routed + 61 shared |
+| DeepSeek MoE all-to-all per layer | 15K+ experts | 256 $\times$ 61 routed + 61 shared |
 | Llama-4 Scout total params | 109B | 16 experts, top-1 |
-| Llama-4 Scout context | 10M | iRoPE + chunked attention |
+| Llama-4 Scout context | **10M** | Largest publicly available; iRoPE + chunked attention |
 | Llama-4 Maverick total params | 400B | 128 experts, top-1 |
-| Gemma-3 sliding window ratio | 5:1 (local:global) | ~5x KV cache reduction |
-| Gemma-3 window size | 4096 tokens | Local attention layers |
-| Qwen-3-235B active params | 22B | 128 experts, top-8 |
+| Llama-4 Muse Spark Intelligence Index | 52 | Top of Llama-4 family |
+| Qwen3.5 397B A17B | 397B total / 17B active | MoE, 128 experts |
+| Qwen3.6 35B A3B | 35B total / 3B active | MoE, smallest active footprint in Qwen family |
+| Qwen3.6 Max Preview Intelligence Index | 52 | Tied top open-weights |
+| Qwen3.6 Plus Intelligence Index | 50 | Strong mid-tier |
+| Qwen3.6 27B Intelligence Index | 46 | Dense variant |
+| Gemma-4 26B-A4B | 26B total / 4B active | MoE variant of Gemma-4 |
+| GPT-5.5 Intelligence Index | **60** | Highest recorded |
+| GPT-5.5 price | ~$11.25/1M tokens | Premium pricing |
+| GPT-5.5 context | 922K | Near-1M context |
+| Claude Opus 4.7 Intelligence Index | 57 | Second-highest closed-source |
+| Claude Opus 4.7 price | ~$10.94/1M tokens | Premium pricing |
+| Claude Opus 4.7 context | 1M | Full 1M context |
+| Gemini 3.1 Pro Preview Intelligence Index | 57 | Matches Claude Opus 4.7 |
+| Gemini 3.1 Pro Preview price | ~$4.50/1M tokens | **Best price-performance among frontier** |
+| Kimi K2.6 Intelligence Index | **54** | **Highest open-weights** |
+| Kimi K2.6 price | ~$1.71/1M tokens | **6-7x cheaper than GPT-5.5** at ~90% of intelligence |
+| Mistral Medium 3.5 Intelligence Index | 39 | Enterprise focus |
 | Reasoning model output range | 5K-100K tokens | 10-100x vs chat (100-300) |
 | GRPO model copies in memory | 2 (policy + ref) | vs 4 for PPO (+ reward + critic) |
 | FP8 training wall-clock savings | 20-40% | vs BF16 at frontier scale |
-| Open MoE models at frontier | 3 families | DeepSeek-V3, Llama-4, Qwen-3 |
-| Dense frontier open models | 2 families | Gemma-3, Llama-3.3 |
+| Open MoE models at frontier | 5+ families | DeepSeek-V4 Pro, Llama-4, Qwen-3/3.5/3.6, Gemma-4, Kimi K2.6 |
+| Dense frontier open models | 2+ families | Gemma-4 31B, Qwen3.6 27B |
 | Typical EP degree for 256-expert MoE | 8-32 GPUs | All-to-all bandwidth bound |
 
 ---
 
-## 12. Worked problems
+## 14. Worked problems
 
-**Problem 1.** *Estimate the KV cache memory required to serve DeepSeek-V3 at batch size 64 and context length 32K.*
+**Problem 1.** *Estimate the KV cache memory required to serve DeepSeek-V4 Pro at batch size 64 and context length 32K.*
 
 Per-token KV: 70.3 KB (Section 1.2). Per-sequence KV at 32K context: $70.3 \text{ KB} \times 32768 = 2.21$ GB. At batch 64: $2.21 \times 64 = 141.5$ GB. This fits comfortably in a single 8xH100 node (640 GB HBM total) with room for weights and activations. By comparison, an equivalent dense MHA model would require $600 \text{ KB} \times 32768 \times 64 = 1.21$ TB -- requiring multiple nodes for KV alone. MLA is the difference between single-node and multi-node serving at this batch/context product.
 
@@ -478,15 +604,15 @@ $200 \text{ KB} \times 10^7 = 2 \times 10^{12}$ bytes = **2 TB** for a single se
 
 Average sequence length = thinking + output $\approx$ 30K + 500 = 30.5K tokens. Per-sequence KV: $100 \text{ KB} \times 30500 = 2.95$ GB. At batch 16: $2.95 \times 16 = 47.2$ GB. This is manageable. But the distribution matters: some requests use 200K thinking tokens, consuming $100 \text{ KB} \times 200000 = 19.1$ GB each. A single long-reasoning request at batch 16 can consume 19.1 GB, leaving only 47.2 - 19.1 = 28.1 GB for the other 15 sequences. The inference scheduler must either (a) isolate long-reasoning requests in a separate pool, or (b) evict completed sequences aggressively to make room for long ones. This is why disaggregated serving with separate prefill and decode pools is valuable for reasoning workloads.
 
-**Problem 4.** *Compare the all-to-all communication cost for DeepSeek-V3 (256 experts, top-8) vs Llama-4 Scout (16 experts, top-1) at EP=8.*
+**Problem 4.** *Compare the all-to-all communication cost for DeepSeek-V4 Pro (256 experts, top-8) vs Llama-4 Scout (16 experts, top-1) at EP=8.*
 
-**DeepSeek-V3.** Each token is sent to 8 of 256 experts. With EP=8, each GPU holds $256/8 = 32$ experts. Per-token, 8 all-to-all sends (one per selected expert) with each send carrying the token's hidden state (~7168 $\times$ 2 bytes = 14 KB). Per layer: 8 messages $\times$ 14 KB = 112 KB sent, 112 KB received (assuming balanced routing). Across 61 layers: $\sim$6.7 MB per token per forward pass.
+**DeepSeek-V4 Pro.** Each token is sent to 8 of 256 experts. With EP=8, each GPU holds $256/8 = 32$ experts. Per-token, 8 all-to-all sends (one per selected expert) with each send carrying the token's hidden state (~7168 $\times$ 2 bytes = 14 KB). Per layer: 8 messages $\times$ 14 KB = 112 KB sent, 112 KB received (assuming balanced routing). Across 61 layers: $\sim$6.7 MB per token per forward pass.
 
-**Llama-4 Scout.** Each token is sent to 1 of 16 experts. With EP=8, each GPU holds 2 experts. Per token, 1 all-to-all send of 14 KB. Per MoE layer: 14 KB sent, 14 KB received. Total all-to-all volume is 8x lower than DeepSeek-V3 per MoE layer.
+**Llama-4 Scout.** Each token is sent to 1 of 16 experts. With EP=8, each GPU holds 2 experts. Per token, 1 all-to-all send of 14 KB. Per MoE layer: 14 KB sent, 14 KB received. Total all-to-all volume is 8x lower than DeepSeek-V4 Pro per MoE layer.
 
-The tradeoff: DeepSeek-V3's richer routing (top-8 of 256) produces better model quality but costs 8x more all-to-all bandwidth per MoE layer. For EP=8 on NVLink (1.8 TB/s on Blackwell), the all-to-all for a batch of 4096 tokens at 61 MoE layers takes $\sim$4096 $\times$ 112 KB $\times$ 61 / 1.8 TB/s $\approx$ 16 ms -- a non-trivial fraction of the step time.
+The tradeoff: DeepSeek-V4 Pro's richer routing (top-8 of 256) produces better model quality but costs 8x more all-to-all bandwidth per MoE layer. For EP=8 on NVLink (1.8 TB/s on Blackwell), the all-to-all for a batch of 4096 tokens at 61 MoE layers takes $\sim$4096 $\times$ 112 KB $\times$ 61 / 1.8 TB/s $\approx$ 16 ms -- a non-trivial fraction of the step time.
 
-**Problem 5.** *Gemma-3-27B uses 5:1 sliding window with W=4096. Calculate the KV cache reduction ratio at N=128K context vs full attention.*
+**Problem 5.** *Gemma-3-27B (precursor to Gemma-4) uses 5:1 sliding window with W=4096. Calculate the KV cache reduction ratio at N=128K context vs full attention.*
 
 Full attention: 62 layers $\times$ N tokens of KV cache.
 
@@ -504,14 +630,24 @@ At $N = 128K = 131072$:
 
 ---
 
-## 13. References
+## 15. References
 
 - DeepSeek-AI, "DeepSeek-V3 Technical Report," December 2024.
+- DeepSeek-AI, "DeepSeek-V4 Pro Technical Report," 2026.
 - DeepSeek-AI, "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning," January 2025.
 - DeepSeek-AI, "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models," 2024.
 - Meta AI, "Llama-4 Model Card and Release Notes," April 2025.
+- Meta AI, "Llama-4 Muse Spark Release," 2026.
 - Qwen Team, "Qwen-3 Technical Report," June 2025.
+- Qwen Team, "Qwen-3.5 / 3.6 Technical Reports," 2025-2026.
 - Google DeepMind, "Gemma-3 Technical Report," February 2025.
+- Google DeepMind, "Gemma-4 Technical Report," 2026.
+- OpenAI, "GPT-5 and GPT-5.5 System Cards," 2025-2026.
+- Anthropic, "Claude Opus 4.7 Release Notes," 2026.
+- Google DeepMind, "Gemini-3 / 3.1 Pro Technical Reports," 2025-2026.
+- Mistral AI, "Mistral Medium 3.5 and Small 4 Release Notes," 2026.
+- Mistral AI, "Magistral Medium 1.2 Release Notes," 2026.
+- Moonshot AI, "Kimi K2 / K2.5 / K2.6 Technical Reports," 2025-2026.
 - Shazeer et al., "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer," ICLR 2017.
 - DeepSeek-AI, "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models," 2024 (origin of GRPO).
 - AI21 Labs, "Jamba-1.5: Hybrid SSM-Transformer Architecture," 2025.

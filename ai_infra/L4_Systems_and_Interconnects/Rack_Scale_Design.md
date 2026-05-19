@@ -236,7 +236,61 @@ flowchart TB
 - Mass: ~3,000 kg fully loaded
 - Network uplinks: 9 × NDR400 (3.6 Tb/s per NVSwitch × 9 = 32.4 Tb/s total scale-out BW)
 
-### 3.2 NVIDIA NVL576
+### 3.2 NVIDIA NVL36x2 — Split-Rack Alternative
+
+NVL36x2 is an alternative deployment configuration that splits the 72-GPU NVLink domain into two independent 36-GPU half-racks. It targets customers whose facilities cannot support a full 120 kW single-rack deployment.
+
+**Architecture:**
+
+- Each half-rack contains 36 GPUs, 18 Grace CPUs, and its own NVSwitch tray (9 NVSwitch ASICs per half).
+- The two halves are connected via extended NVLink cables routed through the NVSwitch ASICs, maintaining a single 72-GPU NVLink domain.
+- Each half-rack draws ~60–70 kW — within reach of facilities provisioned for 40–80 kW/rack.
+
+**Tradeoffs vs. full NVL72:**
+
+| Property | NVL72 (full rack) | NVL36x2 (split rack) |
+|---|---|---|
+| GPUs | 72 in one cabinet | 72 across two cabinets |
+| NVSwitch location | Single spine (9 ASICs) | Two spines (9 + 9 ASICs) |
+| Intra-half NVLink latency | ~1× baseline | ~1× baseline |
+| Cross-half NVLink latency | N/A (all local) | ~2× intra-half (extended cables) |
+| Per-rack TDP | ~120–140 kW | ~60–70 kW per half |
+| Cooling per rack | D2C liquid (45 GPM) | D2C liquid (~22 GPM per half) |
+| Floor loading | ~3,000 kg / ~4,167 kg/m² | ~1,500 kg per half — more manageable |
+| Mechanical flexibility | Requires reinforced floor, 120 kW feed | Two standard 60 kW positions |
+
+**Key implications:**
+
+- **Cross-half latency**: traffic that crosses from one half to the other experiences roughly 2× the within-half latency due to longer cable runs and an additional hop through the NVSwitch fabric. For tensor-parallel workloads where every GPU communicates every step, full NVL72 remains preferred.
+- **Power and cooling flexibility**: each half-rack requires only ~60 kW, making deployment feasible in facilities provisioned for 40–80 kW/rack — a much larger addressable market than the 120 kW tier.
+- **Mechanical**: each half-rack weighs ~1,500 kg, reducing floor-loading requirements from >4,000 kg/m² to ~2,000 kg/m² — within standard reinforced concrete ratings without custom pedestals.
+
+**When to choose NVL36x2 over NVL72:**
+
+- The facility cannot provision a 120 kW power feed or reinforced floor for a single cabinet.
+- The workload uses tensor parallelism ≤ 36 (e.g., TP=8 with pipeline parallelism across halves), minimizing cross-half traffic.
+- Deployment agility matters more than peak TP performance.
+
+**When to stay with full NVL72:**
+
+- Maximum tensor-parallel performance is required (TP > 36, or all-reduce patterns that span all 72 GPUs).
+- The facility can support 120+ kW per rack and reinforced floor loading.
+- Lowest-latency all-reduce is a hard requirement.
+
+### 3.3 Groq 3 LPX (NVIDIA Acquisition)
+
+Groq (acquired by NVIDIA) produces the Groq 3 LPX rack-scale inference system:
+
+- **256 LPU (Language Processing Unit) chips** per rack
+- **315 PFLOPS** aggregate compute
+- **128 GB SRAM** (on-chip, no external HBM)
+- **40 PB/s internal bandwidth** — all-to-all chip-to-chip fabric
+- **Architecture**: deterministic, SRAM-only inference — no HBM, no DRAM. All weights loaded into on-chip SRAM.
+- **Target workload**: ultra-low-latency inference (batch-1, single-digit ms TTFT)
+
+The Groq approach eliminates the memory wall by putting all model weights in on-chip SRAM. This limits per-rack model capacity to ~128 GB (enough for ~70B FP8 or ~140B FP4), but achieves near-theoretical utilization because there is no memory bandwidth bottleneck.
+
+### 3.4 NVIDIA NVL576
 
 NVL576 extends NVL72 to 576 GPUs by connecting 8 NVL72 racks via NVLink Network (extended NVLink over active optical cables):
 
@@ -246,18 +300,21 @@ NVL576 extends NVL72 to 576 GPUs by connecting 8 NVL72 racks via NVLink Network 
 - Total inter-rack BW: $576 \times 400 / 2 = 115.2$ TB/s bidirectional
 - Note: this is NOT non-blocking — each GPU only has 8 inter-rack links out of 18 total
 
-### 3.3 AMD Helios (UALink Rack)
+### 3.5 AMD Helios (UALink Rack)
 
-AMD's Helios rack architecture uses UALink 1.0 to connect MI355X GPUs:
+AMD's Helios rack architecture uses UALink 1.0 to connect MI400-class "Altair" GPUs (MI450, MI430X, MI455X):
 
-- **Scale-up domain**: up to 1,024 MI355X GPUs via UALink
+- **Confirmed rack configurations**: 64, 72, or 128 GPUs per rack
+- **UALoE72 configuration**: confirmed 72-GPU UALink domain matching NVL72 scale
+- **Scale-up domain**: up to 1,024 GPUs via UALink
 - **Per-GPU UALink BW**: 800 GB/s (4 links × 200 GB/s)
 - **Topology**: fat-tree of UALink switches within the rack/pod
 - **CPU**: AMD EPYC Turin
-- **TDP**: estimated 100–120 kW per rack
+- **TDP**: estimated 100–120 kW per rack (72-GPU config), up to ~200 kW (128-GPU config)
+- **Supply chain**: ZT Systems ($4.9B AMD acquisition) for rack engineering; Sanmina as NPI partner
 - **Key differentiator**: the 1,024-accelerator scale-up domain means tensor parallelism can extend across racks within the UALink fabric, without going through the Ethernet/IB scale-out network
 
-### 3.4 Google TPU v7 Pod
+### 3.6 Google TPU v7 Pod
 
 Google's TPU v7 (expected 2026) scales to ~8,960 chips per pod:
 
@@ -270,7 +327,7 @@ Google's TPU v7 (expected 2026) scales to ~8,960 chips per pod:
 
 The OCS is the key innovation: by physically reconfiguring optical paths, Google can remap the torus topology on the fly to match the communication pattern of the current training job.
 
-### 3.5 Cerebras CS-3 + MemoryX + SwarmX
+### 3.7 Cerebras CS-3 + MemoryX + SwarmX
 
 Cerebras takes a fundamentally different approach: one wafer-scale engine (WSE-3) per system:
 
@@ -283,19 +340,141 @@ Cerebras takes a fundamentally different approach: one wafer-scale engine (WSE-3
 
 The Cerebras approach eliminates the traditional memory wall by placing all parameters in on-chip SRAM during compute, streaming weights from MemoryX as needed.
 
-### 3.6 Comparison Table
+### 3.8 Comparison Table
 
-| Property | NVL72 | NVL576 | Helios | TPU v7 Pod | CS-3 |
-|---|---|---|---|---|---|
-| Accelerators | 72 B300 | 576 B300 | 1,024 MI355X | ~8,960 TPU v7 | 1 WSE-3 |
-| FP4/FP8 Compute | 324 PFLOP/s | 2,592 PFLOP/s | ~2,048 PFLOP/s (FP8) | ~1,800 PFLOP/s (BF16) | 125 PFLOP/s (FP16) |
-| Total HBM/SRAM | 13.5 TB | 108 TB | ~192 TB | ~179 TB | 44 GB SRAM |
-| Scale-up BW | 129.6 TB/s | 115.2+ TB/s | ~819 TB/s | ~14.3 TB/s (ICI) | 21 PB/s (on-die) |
-| Scale-up topology | Clos (NVSwitch) | Extended Clos | Fat-tree (UALink) | 3D torus + OCS | Wafer-scale mesh |
-| TDP | ~120 kW | ~960 kW | ~100 kW/rack | ~3,600 kW/pod | ~15 kW/unit |
-| Cooling | D2C liquid | D2C liquid | D2C liquid | D2C + air hybrid | Air (per unit) |
-| Mass | ~3,000 kg | ~24,000 kg | ~2,500 kg/rack | Custom | ~50 kg/unit |
-| Inter-rack link | NDR400 per NVSwitch | NVLink Network | UALink + Ethernet | ICI + OCS | SwarmX Ethernet |
+| Property | NVL72 | NVL576 (Blackwell) | NVL576 (Rubin R100) | Helios | TPU v7 Pod | CS-3 | Groq 3 LPX |
+|---|---|---|---|---|---|---|---|
+| Accelerators | 72 B300 | 576 B300 | 576 R100 | 64/72/128 MI455X | ~8,960 TPU v7 | 1 WSE-3 | 256 LPU chips |
+| FP4/FP8 Compute | 324 PFLOP/s | 2,592 PFLOP/s | 4,320 PFLOP/s | ~2,048 PFLOP/s (FP8) | ~1,800 PFLOP/s (BF16) | 125 PFLOP/s (FP16) | 315 PFLOP/s |
+| Total HBM/SRAM | 13.5 TB | 108 TB | 162 TB (HBM4) | ~31 TB (72-GPU) | ~179 TB | 44 GB SRAM | 128 GB SRAM |
+| Scale-up BW | 129.6 TB/s | 115.2+ TB/s | ~1,036+ TB/s (NVLink-6) | ~819 TB/s | ~14.3 TB/s (ICI) | 21 PB/s (on-die) | 40 PB/s |
+| Scale-up topology | Clos (NVSwitch) | Extended Clos | Extended Clos (NVLink-6) | Fat-tree (UALink) | 3D torus + OCS | Wafer-scale mesh | All-to-all chip fabric |
+| TDP | ~120 kW | ~960 kW | ~864 kW (108 kW/rack) | ~100 kW/rack (72-GPU) | ~3,600 kW/pod | ~15 kW/unit | ~30 kW |
+| Cooling | D2C liquid | D2C liquid | D2C liquid | D2C liquid | D2C + air hybrid | Air (per unit) | Air |
+| Mass | ~3,000 kg | ~24,000 kg | ~24,000 kg | ~2,500 kg/rack | Custom | ~50 kg/unit | ~500 kg |
+| Inter-rack link | NDR400 per NVSwitch | NVLink Network | NVLink-6 (active optical) | UALink + Ethernet | ICI + OCS | SwarmX Ethernet | Ethernet |
+
+### 3.9 Rubin / Rubin Ultra Rack Architectures
+
+NVIDIA's Rubin generation (announced at GTC March 2026 as part of the **Vera Rubin** platform — Vera CPU + Rubin GPU) extends the NVL rack architecture with new GPU silicon, HBM4 memory, and NVLink-6 interconnect, enabling much larger single-NVLink domains.
+
+#### NVIDIA Rubin R100 GPU
+
+The Rubin R100 is the next-generation GPU succeeding the Blackwell B200/B300:
+
+| Property | Value | Notes |
+|---|---|---|
+| Process node | TSMC 3NP (N3P) | 2nd-gen 3 nm with improved density |
+| Die configuration | Dual-die (similar to Blackwell) | Two reticle-limit dies on package |
+| HBM | 288 GB HBM4 | 8 stacks, ~2 TB/s per stack |
+| NVLink | NVLink-6 (projected) | ~400 GB/s per link, 18 links per GPU |
+| FP4 compute | ~7.5 PFLOP/s (projected) | ~1.7× Blackwell B300 |
+| TDP | ~1,500 W (projected) | 25% increase over B300's 1,200 W |
+
+The jump from HBM3e to HBM4 brings higher per-stack bandwidth (~2 TB/s vs ~1.6 TB/s on HBM3e) and higher density (36 GB per stack vs 24 GB), enabling 288 GB total HBM — enough to hold a 175B-parameter model in FP16 on a single GPU.
+
+#### NVL576: 576-GPU NVLink Domain (announced for Vera Rubin at GTC 2026)
+
+The Rubin-generation NVL576 creates the largest single NVLink domain to date by connecting 576 R100 GPUs:
+
+```mermaid
+flowchart TB
+    subgraph NVL576["NVL576 (576 Rubin R100 GPUs)"]
+        direction LR
+        R0["Rack 0: 72 × R100"]:::rack
+        R1["Rack 1: 72 × R100"]:::rack
+        R2["Rack 2: 72 × R100"]:::rack
+        R3["Rack 3: 72 × R100"]:::rack
+        R4["Rack 4: 72 × R100"]:::rack
+        R5["Rack 5: 72 × R100"]:::rack
+        R6["Rack 6: 72 × R100"]:::rack
+        R7["Rack 7: 72 × R100"]:::rack
+    end
+    R0 <-->|"NVLink-6 (active optical)"| R1
+    R1 <-->|"NVLink-6 (active optical)"| R2
+    R2 <-->|"NVLink-6 (active optical)"| R3
+    R3 <-->|"NVLink-6 (active optical)"| R4
+    R4 <-->|"NVLink-6 (active optical)"| R5
+    R5 <-->|"NVLink-6 (active optical)"| R6
+    R6 <-->|"NVLink-6 (active optical)"| R7
+    classDef rack fill:#fde68a,stroke:#b45309,color:#000
+```
+
+**Key specs**:
+- 576 GPUs in a single NVLink domain via NVLink-6
+- Aggregate HBM4: $576 \times 288 = 165{,}888$ GB $\approx 162$ TB
+- Aggregate FP4 compute: $576 \times 7.5 = 4{,}320$ PFLOP/s
+- NVLink-6 intra-rack: NVSwitch spine with copper backplane (same as NVL72)
+- NVLink-6 inter-rack: active optical cables connecting NVSwitch trays across 8 racks
+- Total TDP: $576 \times 1{,}500 = 864$ kW across 8 racks (~108 kW per rack)
+- Cooling: D2C liquid, ~40 GPM per rack
+
+The NVL576's 576-GPU domain enables **tensor parallelism up to TP=576** without leaving the NVLink fabric. More critically for MoE models, it enables **expert parallelism across 576 GPUs** with NVLink-bandwidth all-to-all communication — avoiding the network bottleneck that plagues MoE training on smaller domains (see below).
+
+#### NVL36x2: Dual-Rack Configuration
+
+An alternative to the full NVL576 is the NVL36x2, which splits each 72-GPU domain into two 36-GPU halves connected via NVSwitch:
+
+```
+Rack A: 36 GPUs + 4-5 NVSwitches  ←→ NVLink inter-rack ←→  Rack B: 36 GPUs + 4-5 NVSwitches
+```
+
+**Why NVL36x2 exists**:
+- Reduced NVSwitch count per half-domain (4–5 vs 9 in NVL72) lowers cost
+- Shorter copper backplane runs within each 36-GPU half (relaxes signal integrity constraints)
+- Suitable for workloads that don't need the full 72-GPU NVLink domain — e.g., TP=36 inference serving, or EP=36 MoE models
+- Two NVL36x2 halves can serve different models or different inference workloads independently
+
+**Tradeoff vs NVL72**: the NVL36x2 has lower intra-domain bandwidth (each 36-GPU half has half the NVLink bandwidth of a full 72-GPU domain) and a bottleneck at the inter-rack NVLink links. For communication-heavy workloads (large TP, all-to-all), the NVL72 or NVL576 is preferred.
+
+#### Rubin Ultra (Projected 2027)
+
+The Rubin Ultra is the follow-on to Rubin, expected in 2027:
+
+| Property | Value | Notes |
+|---|---|---|
+| Process node | TSMC 3NP / A16 | Potential backside power delivery |
+| Die configuration | Quad-die (4 reticle-limit dies) | 2× Rubin's dual-die |
+| HBM | ~512 GB HBM4 | 12 or 16 stacks (projected) |
+| FP4 compute | ~15 PFLOP/s (projected) | ~2× Rubin R100 |
+| TDP | ~1,800 W (projected) | Approaching practical D2C liquid cooling limit |
+| Expected rack config | NVL576 class or larger | Potential 1,152-GPU domain |
+
+At 1,800 W TDP, Rubin Ultra pushes direct-to-chip liquid cooling to its practical limit. Two-phase evaporative cooling (Section 2.3) becomes increasingly attractive at this power level. The quad-die design essentially puts two Rubin-class GPUs in one package, with die-to-die interconnect (NVLink-C2C or successor) providing transparent memory access across all four dies.
+
+#### NVL72 (Blackwell) vs NVL576 (Rubin) Comparison
+
+| Property | NVL72 (Blackwell B300) | NVL576 (Rubin R100) | Factor |
+|---|---|---|---|
+| Domain size | 72 GPUs | 576 GPUs | 8× |
+| GPU HBM | 192 GB HBM3e | 288 GB HBM4 | 1.5× |
+| Aggregate HBM | 13.5 TB | 162 TB | 12× (8× GPUs × 1.5× per GPU) |
+| FP4 compute per GPU | 4.5 PFLOP/s | 7.5 PFLOP/s | 1.7× |
+| Aggregate FP4 compute | 324 PFLOP/s | 4,320 PFLOP/s | 13.3× |
+| GPU TDP | 1,200 W | 1,500 W | 1.25× |
+| Rack TDP (GPU only) | ~86 kW | ~108 kW | 1.26× |
+| Total system TDP | ~120–140 kW | ~108 kW per rack × 8 = ~864 kW | ~6–7× |
+| NVLink BW (intra-rack) | 129.6 TB/s | 129.6 TB/s per rack | 1× per rack |
+| Scale-up topology | Single-rack Clos | 8-rack extended Clos | 8-rack domain |
+| Cooling per rack | D2C liquid, ~45 GPM | D2C liquid, ~40 GPM | Similar |
+| Max TP degree | 72 | 576 | 8× |
+
+#### Why NVL576 Matters for Expert Parallelism
+
+Mixture-of-Experts (MoE) models like DeepSeek-V3 (671B, 256 experts) and Mixtral require an **all-to-all communication** step every forward pass: each token must send its activations to the correct expert GPUs and receive the results back. This all-to-all is the primary communication bottleneck in MoE training and inference.
+
+On an NVL72 (72 GPUs), an MoE model with 256 experts and EP=72 has:
+- 72 GPUs hosting ~3–4 experts each
+- All-to-all across 72 GPUs over NVLink (129.6 TB/s)
+- All-to-all latency: ~1–5 ms per layer (NVLink-speed)
+
+On an NVL576 (576 GPUs), the same model with EP=576 can:
+- Host each expert on ~2 GPUs (256 experts / 576 GPUs ≈ 0.44 experts per GPU, meaning most GPUs host 0 or 1 expert)
+- All-to-all across 576 GPUs over NVLink-6
+- Avoid falling off the NVLink bandwidth cliff: inter-rack NVLink-6 maintains high bandwidth (unlike scale-out InfiniBand/Ethernet which is 10–50× slower)
+- Enable much larger MoE models: a 1,024-expert model with EP=576 places ~1–2 experts per GPU, fitting comfortably
+
+The key insight: **NVL576 expands the high-bandwidth domain to cover the typical EP degree of large MoE models**, keeping all-to-all on NVLink rather than falling back to scale-out networking. This can improve MoE training throughput by 2–5× compared to multi-rack EP over InfiniBand, where all-to-all latency dominates.
 
 ---
 
@@ -349,6 +528,11 @@ flowchart TD
     Q["36 NDR uplinks per rack"] --> R["3,600 cables per 100-rack cluster"]
     R --> S["Cable management = major planning exercise"]
 
+    T["Rubin R100: 288 GB HBM4, ~1,500 W"] --> U["NVL576: 576-GPU NVLink domain"]
+    U --> V["162 TB aggregate HBM, 4,320 PFLOP/s FP4"]
+    V --> W["EP up to 576 GPUs for MoE all-to-all on NVLink"]
+    W --> X["2-5× MoE throughput vs multi-rack EP over InfiniBand"]
+
 ---
 
 ## 6. Numbers to memorize
@@ -368,7 +552,12 @@ flowchart TD
 | Two-phase h_fg (water) | 2,260 kJ/kg | 540× more than sensible heat (C_p·ΔT = 41.8 kJ/kg) |
 | NVL72 mass | ~3,000 kg | Floor loading ~4,167 kg/m² — needs reinforcement |
 | NVL72 scale-out links | 36 NDR400 cables | 9 NVSwitches × 4 uplinks each |
-| Helios UALink domain | 1,024 MI355X | 14× larger scale-up than NVL72 |
+| Helios UALink domain | 64/72/128 GPUs per rack | UALoE72 confirmed; 1,024 max domain |
+| Groq 3 LPX rack | 256 LPU chips, 315 PFLOPS | 128 GB SRAM, 40 PB/s internal BW |
+| Rubin R100 HBM4 | 288 GB | 1.5× B300; holds 175B FP16 on one GPU |
+| NVL576 (Rubin) aggregate HBM | 162 TB | 12× NVL72; enables EP up to 576 GPUs |
+| NVL576 (Rubin) aggregate compute | 4,320 PFLOP/s (FP4) | 13.3× NVL72 |
+| Rubin Ultra TDP (projected) | ~1,800 W | Approaches D2C liquid cooling practical limit |
 | TPU v7 pod size | ~8,960 chips | 3D torus + OCS |
 | Cerebras WSE-3 on-die BW | 21 PB/s | Inverts the roofline; compute-bound on almost everything |
 | Dry cooler capacity | ~500 kW per unit | 24 units for 12 MW cluster (100 NVL72s) |

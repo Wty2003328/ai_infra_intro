@@ -101,6 +101,29 @@ spec:
 
 After allocation, the container sees exactly the assigned GPUs. Running `nvidia-smi` inside the container shows only those devices. This is **exclusive allocation** — no other pod on the same node can use those GPUs until the owning pod terminates.
 
+### 1.4 NVIDIA K8s Device Plugin v0.17--0.19 (2025--2026)
+
+The v0.17--0.19 release series brings substantial changes for Blackwell architecture support and multi-device injection:
+
+**Blackwell architecture labels.** The device plugin and GPU Feature Discovery (GFD) now expose detailed Blackwell-specific labels. Nodes with B200/B300 GPUs receive labels including GPU product identifier, HBM3e capacity (192 GB or 288 GB), FP4/FP8 compute capability flags, and NVLink generation (NVLink 5). This enables the scheduler to distinguish Blackwell from Hopper nodes for heterogeneous pool placement in disaggregated serving.
+
+**CDI (Container Device Interface) support.** CDI is becoming the standard mechanism for injecting devices into containers in Kubernetes, replacing the older device plugin `Allocate()` gRPC approach for multi-device scenarios. In the CDI model:
+
+1. The device plugin generates CDI specification files (JSON) describing available devices.
+2. The container runtime (containerd v2.0+, CRI-O v1.30+) reads CDI specs and injects devices directly into the container's OCI spec.
+3. Pods request devices using CDI names: `nvidia.com/gpu=GPU-abcdef01-...`.
+
+CDI solves several problems with the legacy device plugin approach:
+- **Multi-device scenarios.** A pod requesting 8 GPUs, RDMA HCAs, and IMEX channels requires coordinated injection across multiple device types. CDI provides a unified mechanism; the legacy approach requires each plugin to independently modify the container spec, which can conflict.
+- **Reproducibility.** CDI specs are declarative and inspectable. The exact device configuration for any container can be reconstructed from the CDI files, simplifying debugging.
+- **Runtime-level enforcement.** Device isolation is enforced by the container runtime, not the device plugin. This is more robust than environment-variable-based approaches (`CUDA_VISIBLE_DEVICES`), which can be overridden or misconfigured.
+
+CDI is now the recommended injection mode for production clusters. The device plugin v0.18+ defaults to CDI when the container runtime supports it. Legacy mode remains available as a fallback.
+
+**IMEX channel injection.** Blackwell introduces IMEX (Inter-Module Exchange) channels for high-bandwidth communication between GPU complexes within a rack. The device plugin v0.18+ exposes IMEX channels as CDI devices, enabling pods to request them alongside GPUs. IMEX is critical for NVL72 disaggregated deployments where prefill and decode instances communicate over the rack-scale fabric.
+
+**Integrated GPU Feature Discovery.** Previously a separate DaemonSet, GFD is now integrated into the device plugin binary (v0.17+). This reduces the number of DaemonSets the GPU Operator must manage and eliminates version skew between the plugin and GFD. Labels are now emitted by the same process that discovers and allocates devices, ensuring consistency.
+
 ---
 
 ## 2. MIG — Multi-Instance GPU
@@ -311,6 +334,69 @@ spec:
 ```
 
 Kueue's `ClusterQueue` enforces fair sharing across tenants, supports preemption, and guarantees all-or-nothing allocation. If 8 GPUs are not available in the right topology, the job waits rather than partially allocating.
+
+### 3.5 Dynamo Grove Operator — Topology-Aware Gang Scheduling on NVL72
+
+Dynamo Grove is a Kubernetes operator from the NVIDIA Dynamo 1.0 ecosystem, purpose-built for topology-aware gang scheduling on NVL72 racks. NVL72 racks contain 72 GPUs connected by a full NVLink fabric, and placing workloads correctly within this fabric is critical for both training and disaggregated inference.
+
+**Problem.** A standard Kubernetes scheduler sees 72 GPUs on an NVL72 node and treats them as interchangeable. But NVL72 topology has NUMA domains, PCIe switches, and NVLink hops that affect performance. A disaggregated inference deployment placing prefill instances on one NVLink domain and decode instances on another domain within the same rack suffers higher inter-domain latency than intra-domain placement.
+
+**Grove's approach.** Grove maintains a topology model of each NVL72 rack:
+
+1. **Discovery.** On startup, Grove queries NVML topology for all 72 GPUs, their NVLink connectivity matrix, NUMA affinity, and PCIe switch hierarchy.
+2. **Topology scoring.** When a gang-scheduled workload requests N GPUs, Grove scores all possible placements by the minimum inter-GPU bandwidth across the allocation: $\text{Score}(G) = \min_{i,j \in G} \text{BW}(i, j)$.
+3. **Gang reservation.** Grove creates a `GrovePlacement` CRD that atomically reserves the selected GPUs. The reservation is all-or-nothing: if the optimal placement is not available, the job waits.
+4. **Inter-workload awareness.** Grove tracks all active placements on the rack and scores new placements to minimize interference with existing workloads (e.g., avoiding placing a bandwidth-intensive training job on GPUs that share a PCIe switch with latency-sensitive inference).
+
+```yaml
+apiVersion: grove.dynamo.nvidia.com/v1alpha1
+kind: GrovePlacement
+metadata:
+  name: llama-70b-pd-disagg
+spec:
+  gpuCount: 16
+  topologyConstraint: "min-bottleneck"
+  minBandwidth: "900GB/s"  # require full NVLink within allocation
+  workloadType: "inference-pd"
+  prefillPool:
+    gpuCount: 4
+    placement: "compact"  # minimize inter-prefill hops
+  decodePool:
+    gpuCount: 12
+    placement: "compact"
+```
+
+Grove is particularly important for disaggregated serving where prefill and decode pools share an NVL72 rack. Without topology-aware placement, the KV transfer between pools may traverse a suboptimal path within the NVLink fabric, adding latency that is invisible to standard monitoring.
+
+### 3.6 Dynamo K8s Inference Gateway Plugin
+
+Dynamo 1.0 includes a native Kubernetes Gateway API plugin for inference traffic management. The Gateway API (SIG-NETWORK) is the successor to Ingress, providing a more expressive, role-oriented API for L7 traffic routing. The Dynamo plugin extends the standard Gateway API with inference-specific features:
+
+**SLO-aware routing.** The gateway plugin tracks per-model TTFT and TPOT metrics via Prometheus and routes traffic to the replica (or pool) most likely to satisfy the client's SLO. If a decode pool is experiencing elevated TPOT, the gateway redirects new requests to a less-loaded pool, even if that requires a fresh prefill on the new pool.
+
+**Prefix-aware request affinity.** For disaggregated deployments with global KV pools, the gateway hashes incoming prompt prefixes and routes to the prefill replica with the highest cache locality. This is the gateway-level analog of the application-level routing described in [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md).
+
+**Priority and preemption.** The gateway supports per-tenant priority levels. When a high-priority tenant's queue grows, the gateway can preempt low-priority in-flight requests (returning a retryable error to the client) to free decode capacity.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: inference-route
+spec:
+  parentRefs:
+  - name: dynamo-inference-gateway
+  rules:
+  - backendRefs:
+    - name: llama-70b-prefill
+      port: 8000
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: inference.dynamo.nvidia.com
+        kind: InferenceRoutingPolicy
+        name: slo-aware-policy
+```
 
 ---
 
@@ -529,6 +615,22 @@ llm-d (part of the llm-d open-source project) is a Kubernetes scheduler extender
 3. **KV cache transfer topology.** Prefers placements where prefill and decode pods share NVLink or high-BW network for KV cache transfer.
 4. **Autoscaling with model-aware metrics.** Scaling decisions account for per-model throughput characteristics rather than generic queue depth.
 
+#### 5.2.1 llm-d CNCF Sandbox (March 2026)
+
+In March 2026, llm-d was accepted as a CNCF Sandbox project, founded by Red Hat, Google Cloud, IBM Research, CoreWeave, and NVIDIA. This marks llm-d's transition from a single-vendor project to a vendor-neutral, community-governed standard for LLM inference orchestration on Kubernetes. Key aspects of the CNCG-hosted llm-d:
+
+**Kubernetes Gateway API integration.** llm-d uses the standard Kubernetes Gateway API (not a custom CRD) for inference traffic management. This means llm-d works with any conformant Gateway API implementation (Envoy Gateway, Istio, Kong) rather than requiring a proprietary proxy. The llm-d scheduler extender integrates with the gateway via `HTTPRoute` filters that provide SLO-aware routing, prefix-aware affinity, and priority-based preemption.
+
+**SLO-aware cost optimization.** llm-d's autoscaling controller optimizes for cost subject to SLO constraints. The objective function:
+
+$$
+\min \sum_{i} C_i \cdot R_i \quad \text{subject to} \quad \text{TPOT}_{m} \le \text{SLO}_{m},\; \text{TTFT}_{m} \le \text{SLO}_{m} \quad \forall m \in M
+$$
+
+where $C_i$ is the cost per replica of model $i$ and $R_i$ is the number of replicas. This produces the cheapest deployment that meets all SLO targets, rather than a fixed-ratio or heuristic-based approach.
+
+**Wide expert parallelism for MoE.** llm-d adds native support for wide expert parallelism (EP) in Mixture-of-Experts models. MoE models like Mixtral and DeepSeek-V3 have 128+ experts, and EP degrees of 64--256 are common. llm-d's scheduler understands the expert-to-GPU mapping and places pods to minimize the all-to-all communication overhead between expert groups. This is critical for MoE models where the expert all-to-all can dominate decode latency if pods are poorly placed.
+
 ```mermaid
 flowchart TB
     subgraph K8s["Kubernetes Cluster"]
@@ -598,12 +700,13 @@ where $R_m$ is the number of replicas for model $m$, $\text{HBM}_m$ is HBM per r
 
 | Platform | Abstraction level | GPU awareness | LLM-specific features | Best for |
 |---|---|---|---|---|
-| Vanilla K8s + GPU Operator | Pod/Deployment | Device plugin only | None | Simple single-model deploys |
+| Vanilla K8s + GPU Operator | Pod/Deployment | Device plugin / CDI | None | Simple single-model deploys |
 | KServe | InferenceService CRD | GPU resources, autoscaling | Canary, transformers | Platform teams, multi-model |
 | KubeRay | RayCluster CRD | Ray-native GPU management | Ray Serve, RLHF pipelines | RLHF, multi-stage pipelines |
-| llm-d | Scheduler extender + CRD | Model-aware, topology-aware | Prefill/decode disaggregation | High-throughput LLM fleets |
+| llm-d (CNCF Sandbox) | Scheduler extender + Gateway API | Model-aware, topology-aware, MoE EP-aware | Prefill/decode disaggregation, SLO-aware cost optimization | High-throughput LLM fleets |
 | OME (NVIDIA) | Model-level intent | Full capacity planning | SLO-driven auto-placement | Enterprise GPU fleet management |
 | Run:ai (NVIDIA) | Queue + quota layer | GPU sharing, MIG, fairness | Dynamic quota, oversubscription | Shared multi-tenant clusters |
+| Dynamo Grove | Rack-level placement | NVL72 topology-aware | Gang scheduling for NVL72 disaggregation | NVL72 inference racks |
 
 ### 6.2 Decision Framework
 
@@ -861,6 +964,12 @@ flowchart TD
 | Checkpoint size (70B, AdamW) | ~700 GB | Storage planning for training |
 | Model weight load (70B, local NVMe) | ~10 s | Cold-start lower bound |
 | Istio sidecar overhead | 1–3 ms/hop, 5–15% CPU | Disable on inference data plane |
+| CDI device injection overhead | < 100 ms per pod | vs legacy Allocate() gRPC; negligible in practice |
+| IMEX channel bandwidth (Blackwell) | ~800 GB/s per channel | NVL72 inter-complex communication |
+| Dynamo Grove topology scoring | ~50 ms per placement decision | Trivial vs cold-start time |
+| llm-d CNCF founding members | 5 (Red Hat, Google, IBM, CoreWeave, NVIDIA) | Sandbox since March 2026 |
+| B200 HBM3e capacity | 192 GB | 2.4x H100; changes replica packing math |
+| B300 HBM3e capacity | 288 GB | Largest GPU memory tier; dense model hosting |
 
 ---
 
@@ -876,6 +985,10 @@ flowchart TD
 - **Shared HCA contention.** Two pods on the same HCA halve bandwidth silently. Pin HCAs per pod.
 - **Baking weights into OCI images.** A 70 GB image layer takes 60–300 s to pull. Use init containers with multi-stream S3 downloads instead.
 - **Forgetting hugepages.** CUDA performance suffers without 2 MB hugepages enabled on the host kernel.
+- **Legacy device plugin mode with multi-device pods.** When a pod requests GPUs + RDMA HCAs + IMEX channels, the legacy device plugin `Allocate()` gRPC path can produce conflicting or incomplete container specs. Use CDI mode (device plugin v0.18+) to get coordinated, declarative device injection.
+- **Ignoring NVL72 topology for disaggregated inference.** Placing prefill and decode pods on GPUs within an NVL72 rack without considering the NVLink fabric topology (which GPUs share which NVLink switches) can result in suboptimal inter-pool KV transfer paths. Use Grove or a topology-aware scheduler.
+- **Assuming Gateway API is just Ingress v2.** The Kubernetes Gateway API provides extension points (filters, backend refs) that are essential for inference-specific routing (SLO-aware, prefix-aware). Treating it as a drop-in Ingress replacement misses the key features that llm-d and Dynamo leverage.
+- **Not updating container runtime for CDI.** CDI requires containerd v2.0+ or CRI-O v1.30+. Running an older runtime silently falls back to legacy device plugin mode, losing the multi-device coordination benefits. Verify runtime version before enabling CDI in the device plugin.
 
 ---
 
@@ -887,7 +1000,11 @@ flowchart TD
 - NVIDIA MIG User Guide: profiles, partitioning, and constraints.
 
 **Recent**
-- llm-d project: model-aware scheduling for LLM inference on Kubernetes.
+- llm-d CNCF Sandbox project (March 2026): model-aware scheduling, Gateway API integration, SLO-aware cost optimization, wide EP for MoE.
+- NVIDIA K8s Device Plugin v0.17--0.19: Blackwell labels, CDI support, IMEX channel injection, integrated GPU Feature Discovery.
+- NVIDIA Dynamo Grove operator: NVL72 topology-aware gang scheduling.
+- NVIDIA Dynamo K8s Inference Gateway plugin: Gateway API extension for inference routing.
+- Container Device Interface (CDI) specification: tag-rs/cdi project, Kubernetes CRI integration.
 - Kueue documentation (Kubernetes SIG-scheduling): gang scheduling, fair sharing, Cohorts.
 - KServe documentation: InferenceService CRD, canary rollouts, autoscaling.
 - KubeRay documentation: Ray Serve on Kubernetes, autoscaling internals.

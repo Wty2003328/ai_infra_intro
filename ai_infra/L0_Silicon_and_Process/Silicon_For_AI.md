@@ -288,26 +288,25 @@ So ~51% of fabricated dies are *fully* defect-free. The other 49% would be disca
 
 ### 5.3 Spatial redundancy: how the 49% gets recovered
 
-A B200 logically reports 144 SMs per die. Physically, ~152 SMs are fabricated; 8 are spares fused off post-test. The "recoverable" yield is then:
+The B200 has **128 SMs per die** (confirmed by NVIDIA). The earlier claim of 152 physical / 144 logical SMs was based on pre-release estimates and has been corrected. With 128 SMs per die, the dual-die B200 presents 256 SMs as a single GPU. The spare-SM redundancy model still applies: physically more than 128 SMs are fabricated, with spares fused off post-test. The "recoverable" yield is:
 
 $$
-Y_{\text{rec}} \;=\; \Pr[\text{at least 144 of 152 SMs work}]
-\;=\; \sum_{k=144}^{152} \binom{152}{k} p^k (1-p)^{152-k}
+Y_{\text{rec}} \;=\; \Pr[\text{at least 128 of } N_{\text{phys}} \text{ SMs work}]
 $$
 
 with $p$ the per-SM functional probability. If per-SM defect rate ~ $D_0 \cdot a_{\text{SM}}$ and $a_{\text{SM}} \approx 5$ mm², then $p \approx 1 - 0.005 \approx 0.995$ in the simple Poisson limit. Plugging in: $Y_{\text{rec}} \approx 0.99$.
 
-Effective yield jumps from 51% (zero defects, no redundancy) to ~99% (any defects, with 8 spares). This is why **every** modern accelerator advertises a logical SM count below the physical count — and why the spare ratio stays roughly constant (~5%) across nodes even as die area grows.
+Effective yield jumps from 51% (zero defects, no redundancy) to ~99% (any defects, with spares). This is why **every** modern accelerator advertises a logical SM count below the physical count — and why the spare ratio stays roughly constant (~5%) across nodes even as die area grows.
 
 ### 5.4 Binning
 
-Dies that retain only, say, 114 working SMs (out of 152 physical, 144 logical) are sold as a lower SKU (e.g., "B200A"). The economics work because foundry cost is per-wafer, not per-good-die; binning recovers revenue from dies that would otherwise be scrap.
+Dies that retain fewer than the full 128 working SMs are sold as a lower SKU (e.g., "B200A"). The economics work because foundry cost is per-wafer, not per-good-die; binning recovers revenue from dies that would otherwise be scrap.
 
 ```mermaid
 pie showData
     title Wafer-yield breakdown (B200-class on TSMC N4P, illustrative)
-    "Full B200 (144+ SMs working)" : 64
-    "B200A bin (≥114 SMs)" : 19
+    "Full B200 (128 SMs working)" : 64
+    "B200A bin (partial SMs)" : 19
     "Deep bin / scrap" : 10
     "Completely dead" : 7
 ```
@@ -663,7 +662,56 @@ At PUE 1.1: ~$70 M/year. For a 3-year deployment with $500 M in GPU hardware, el
 
 ---
 
-## 9. Bringing it together: cross-layer cause-and-effect
+## 9. Dark Silicon
+
+### 9.1 Definition
+
+**Dark silicon** refers to the fraction of transistors on a chip that cannot be simultaneously powered on during normal operation due to thermal and power constraints. As process nodes shrink, transistor density increases faster than power per transistor decreases, resulting in more transistors than can be active at once.
+
+The term was coined by researchers at the University of California, San Diego and popularized in the landmark 2011 paper *Dark Silicon and the End of Multicore Scaling*. The core observation: Dennard scaling (which held that power density remained constant as transistors shrank) broke down around 2005–2006. Since then, each generation packs more transistors per mm², but the total power budget of the package (set by the cooling solution and TDP) cannot grow proportionally.
+
+### 9.2 The utilizable fraction
+
+At modern process nodes (5 nm, 3 nm), only approximately **30–50% of transistors** can be active simultaneously within typical TDP limits. The exact fraction depends on:
+
+- The mix of standard-cell libraries (9T HP cells in the tensor cores burn far more power per mm² than 6T HD cells in SRAM).
+- The voltage-frequency operating point.
+- The cooling capability of the package and system.
+
+For a B200-class die at ~800 mm² on TSMC N4P with a ~1,000 W TDP envelope, the chip physically contains enough transistors to deliver perhaps 1.5× its rated FP4 throughput — if you could power and cool them all. You cannot. The silicon that exceeds the TDP budget is "dark."
+
+### 9.3 Implications for AI accelerators
+
+**SRAM and register files consume significant static power even when idle.** A modern accelerator carries 100–300 MB of on-chip SRAM (L2 cache, tensor memory, register files). Leakage power in these arrays is non-trivial: at N3P, ~100 MB of 6T SRAM leaks ~20–30 W at nominal V_dd, regardless of whether the memory is being accessed. This limits how much on-chip memory can be powered — you cannot simply add more SRAM without accounting for the static power tax.
+
+**Tensor cores are the most power-hungry blocks.** A dense matmul kernel exercising all tensor-core FMA pipelines draws 2–3× the power of a memory-bound kernel that only exercises the L2/HBM path. Dark silicon means you cannot activate all streaming multiprocessors (SMs) at peak FLOPS simultaneously for sustained periods without exceeding TDP. GPU boost algorithms already exploit this: they run all SMs at peak clock for short bursts (seconds), then thermally throttle.
+
+**HBM PHYs consume ~15–20% of TDP just for signaling.** The physical-layer transceivers that drive signals between the die and HBM stacks draw significant power regardless of bandwidth utilization. At 1,000 W TDP, this is 150–200 W committed to I/O before any compute happens. This I/O power floor limits how much bandwidth you can provision at a fixed power envelope — you cannot simply add more HBM stacks without paying the PHY power tax.
+
+### 9.4 Design strategies
+
+Several techniques improve the utilizable fraction of silicon:
+
+1. **Power gating**: completely disconnect the power supply from unused blocks (e.g., SMs that are idle during memory-bound kernels). Power gating reduces leakage to near-zero for the gated block. Modern GPUs gate individual SMs, L2 slices, and even portions of the register file on a per-kernel basis.
+
+2. **Dynamic voltage and frequency scaling (DVFS)**: reduce V_dd and clock frequency for blocks that do not need peak performance. Since dynamic power scales as $V^2 \cdot f$, even modest voltage reductions yield significant power savings. A tensor core at 80% V_dd and 80% clock consumes only $\approx 0.8^3 = 51\%$ of its peak power.
+
+3. **Workload-specific activation**: only turn on the functional units needed for the current kernel. A matmul kernel activates tensor cores and L2; an attention kernel may activate only the tensor cores and SRAM; a memory-bound decode kernel may activate primarily the HBM controllers and a small number of SMs. The compiler and runtime jointly schedule which blocks are active each cycle.
+
+### 9.5 Connection to chiplet rationale
+
+Dark silicon is one of the structural motivations for chiplet-based designs. Splitting a large monolithic die into smaller chiplets with independent power domains improves the utilizable fraction:
+
+- Each chiplet has its own TDP envelope and can be power-gated independently.
+- A chiplet that is idle (e.g., an I/O die during pure-compute phases) can be fully power-gated without affecting the compute dies.
+- The power delivery network is simpler per chiplet, reducing IR droop and enabling higher utilization of the active silicon.
+- Manufacturing yield improves (smaller dies yield better, per §5), but the power-management advantage is equally important.
+
+This is why the Blackwell B200 uses two ~800 mm² dies on CoWoS-L rather than one ~1,600 mm² monolithic die (which would exceed the reticle limit anyway) — and why future Rubin Ultra designs with quad-die packages carry independent power domains per die.
+
+---
+
+## 10. Bringing it together: cross-layer cause-and-effect
 
 ```mermaid
 flowchart TD
@@ -697,7 +745,7 @@ Every higher-layer optimization in this notebook is, somewhere, a workaround for
 
 ---
 
-## 10. Numbers to memorize
+## 11. Numbers to memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|
@@ -727,7 +775,7 @@ Every higher-layer optimization in this notebook is, somewhere, a workaround for
 
 ---
 
-## 11. Worked interview problems
+## 12. Worked interview problems
 
 These are not "name the term" questions — each requires deriving from L0 invariants.
 
@@ -760,7 +808,7 @@ CoWoS-S interposer ceiling ~2 800 mm². Each HBM3e 12-Hi stack footprint ~110 mm
 
 ---
 
-## 12. References
+## 13. References
 
 **Primary technical sources**
 - TSMC Technology Symposium proceedings (annual: process node disclosures).

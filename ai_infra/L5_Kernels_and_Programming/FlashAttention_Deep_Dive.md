@@ -8,7 +8,7 @@
 
 ## 0. Why This Page Exists
 
-Standard multi-head attention materializes a full $N \times N$ attention matrix in HBM, consuming $O(N^2)$ memory and, more critically, $O(N^2)$ bytes of DRAM traffic per layer. On a modern GPU the arithmetic intensity of the naive kernel falls well below the ridge point of the roofline, meaning the math units starve while waiting on memory. FlashAttention restructures the algorithm into a tiled, online-softmax formulation that keeps intermediate state in SRAM, reduces HBM traffic by a factor of $\Theta(N d / M)$ (where $M$ is SRAM capacity), and recovers math-bound execution. This page derives every equation, traces the algorithm through three hardware generations, and provides worked examples for reasoning about performance in production.
+Standard multi-head attention materializes a full $N \times N$ attention matrix in HBM, consuming $O(N^2)$ memory and, more critically, $O(N^2)$ bytes of DRAM traffic per layer. On a modern GPU the arithmetic intensity of the naive kernel falls well below the ridge point of the roofline, meaning the math units starve while waiting on memory. FlashAttention restructures the algorithm into a tiled, online-softmax formulation that keeps intermediate state in SRAM, reduces HBM traffic by a factor of $\Theta(M / d^2)$ (where $M$ is SRAM capacity), and recovers math-bound execution. This page derives every equation, traces the algorithm through three hardware generations, and provides worked examples for reasoning about performance in production.
 
 ---
 
@@ -33,31 +33,31 @@ For $N=4096$, $d=128$: $4 \times 4096^2 \times 128 = 8.59 \times 10^9$ FLOPs $\a
 
 ### 1.2 HBM Traffic and Arithmetic Intensity
 
-The naive kernel reads $Q, K, V$ from HBM and writes $S, P, O$ back. In FP16 (2 bytes/element), dominant traffic:
+The naive kernel reads $Q, K, V$ from HBM and writes $S, P, O$ back. In FP16 (2 bytes/element), accounting for write+read of $S$ and write+read of $P$, plus reads of $Q, K, V$ and write of $O$:
 
-$$\text{HBM}_{\text{naive}} \approx 4N^2 + 8Nd \;\text{bytes}$$
+$$\text{HBM}_{\text{naive}} \approx 8N^2 + 8Nd \;\text{bytes}$$
 
-For $N=4096, d=128$: $\approx 71.4$ MB per head.
+For $N=4096, d=128$: $8 \times 4096^2 + 8 \times 4096 \times 128 = 138.4\text{M}$ bytes $\approx 132$ MB per head.
 
 Arithmetic intensity $AI$ = FLOPs / HBM bytes:
 
-$$AI_{\text{naive}} = \frac{4N^2 d}{4N^2 + 8Nd} = \frac{d}{1 + \frac{2d}{N}} \xrightarrow{N \gg d} \boxed{AI_{\text{naive}} \approx d \;\text{FLOPs/byte}}$$
+$$AI_{\text{naive}} = \frac{4N^2 d}{8N^2 + 8Nd} = \frac{d}{2\!\left(1 + \frac{d}{N}\right)} \xrightarrow{N \gg d} \boxed{AI_{\text{naive}} \approx \frac{d}{2} \;\text{FLOPs/byte}}$$
 
-Numerical example (FP16, $d=128$, $N=4096$): $AI = 128 / 1.0625 \approx 120.5$ FLOPs/byte.
+Numerical example (FP16, $d=128$, $N=4096$): $AI = 128 / (2 \times 1.03125) \approx 62.1$ FLOPs/byte.
 
 On H100 SXM (from [Memory Hierarchy and Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md)):
 
 $$AI_{\text{ridge}} = \frac{989 \;\text{TFLOPS}}{3.35 \;\text{TB/s}} \approx 295 \;\text{FLOPs/byte}$$
 
-The naive kernel at $AI \approx 120 < 295$ is **memory-bound**, achieving only $\sim 40\%$ of peak compute.
+The naive kernel at $AI \approx 62 \ll 295$ is **memory-bound**, achieving only $\sim 21\%$ of peak compute.
 
 ```mermaid
 graph TD
     A[Naive Attention Kernel] --> B["Materialize S, P in HBM"]
-    B --> C["HBM traffic ~4N² bytes"]
-    C --> D["AI ≈ d ≈ 128"]
-    D --> E["AI < ridge 295"]
-    E --> F["Memory-bound: ~40% peak"]
+    B --> C["HBM traffic ~8N² bytes"]
+    C --> D["AI ≈ d/2 ≈ 64"]
+    D --> E["AI << ridge 295"]
+    E --> F["Memory-bound: ~21% peak"]
     style F fill:#f66,stroke:#333
 ```
 
@@ -145,13 +145,23 @@ def flash_attention_v1_forward(Q, K, V, B_r, B_c):
 
 ### 3.3 HBM Traffic and Arithmetic Intensity
 
-The naive kernel transfers $\Theta(N^2 + Nd)$ data. FlashAttention avoids materializing $S$ and $P$, yielding:
+The naive kernel transfers $\Theta(N^2 + Nd)$ data (dominated by the $S$ and $P$ round-trips). FlashAttention avoids materializing $S$ and $P$, instead re-reading $K$ and $V$ tiles from HBM for each $Q$-block:
 
 $$\text{HBM}_{\text{FA1}} = \Theta\!\left(\frac{N^2 d^2}{M}\right) \;\text{bytes}$$
 
-where $M$ is SRAM per thread block. For $N=4096$, $d=128$, $M=192$ KB: $\approx 1.37$ MB vs. naive $\approx 71.4$ MB (**~50x reduction**).
+where $M$ is SRAM per thread block. This asymptotic formula hides a constant factor that depends on tile sizing. Deriving the concrete traffic from the tiling with $B_r = B_c = 128$ (fits in 192 KB SRAM; see [Section 7](#7-tile-sizing-math)), $T_r = N/B_r = 32$:
 
-FLOPs remain $4N^2 d$, giving:
+| Transfer | Size (FP16) |
+|----------|------------|
+| Q reads ($T_r$ blocks $\times B_r d$) | 1.0 MB |
+| K reads ($T_r \times T_c$ blocks $\times B_c d$) | 32.0 MB |
+| V reads ($T_r \times T_c$ blocks $\times B_c d$) | 32.0 MB |
+| O writes ($T_r$ blocks $\times B_r d$) | 1.0 MB |
+| **Total** | **~66 MB** |
+
+Naive traffic: $8N^2 + 8Nd \approx 132$ MB. Raw HBM reduction: $132/66 \approx$ **2x**. The savings come from eliminating the $N^2$-element $S$ and $P$ round-trips; FlashAttention instead re-reads $K, V$ tiles $T_r$ times, trading $4N^2$ bytes of $S$/$P$ traffic for $4N^2 d / B_r$ bytes of $K$/$V$ re-reads. Since $B_r \approx d = 128$ for these parameters, the two terms are comparable.
+
+In practice, $K$ and $V$ for a single head ($2Nd = 1$ MB) fit in L2 cache (40--50 MB on A100/H100), so they are read from HBM only once across all $Q$-blocks. **Effective** HBM traffic drops to $\approx 4Nd \approx 4$ MB, yielding a **~33x** reduction vs. naive. FLOPs remain $4N^2 d$, giving an effective arithmetic intensity:
 
 $$AI_{\text{FA1}} = \frac{4N^2 d}{\Theta(N^2 d^2 / M)} = \Theta\!\left(\frac{M}{d}\right) \approx \frac{192 \times 1024}{128} \approx 1536 \;\text{FLOPs/byte}$$
 
@@ -159,11 +169,12 @@ This far exceeds the ridge point of 295, placing FlashAttention firmly in the **
 
 ```mermaid
 graph TD
-    A["FA1 tiled kernel"] --> B["HBM traffic = Theta N²d²/M"]
-    B --> C["AI = Theta M/d ≈ 1536"]
-    C --> D["AI >> ridge 295"]
-    D --> E["Compute-bound: approaches peak"]
-    style E fill:#6f6,stroke:#333
+    A["FA1 tiled kernel"] --> B["No S/P materialization; K/V in L2 cache"]
+    B --> C["Effective HBM ≈ 4Nd ≈ 4 MB"]
+    C --> D["AI = Theta M/d ≈ 1536"]
+    D --> E["AI >> ridge 295"]
+    E --> F["Compute-bound: approaches peak"]
+    style F fill:#6f6,stroke:#333
 ```
 
 ---
@@ -470,7 +481,7 @@ flowchart TD
 
 | Quantity | Value | Context |
 |----------|-------|---------|
-| Naive attention AI ($d$=128, FP16) | ~120 | FLOPs/byte |
+| Naive attention AI ($d$=128, FP16) | ~62 | FLOPs/byte ($\approx d/2$) |
 | H100 SXM FP16 ridge point | ~295 | FLOPs/byte |
 | H100 SXM FP16 peak | 989 | TFLOPS |
 | H100 SXM FP8 dense peak | 1,979 | TFLOPS |
@@ -478,7 +489,7 @@ flowchart TD
 | H100 shared memory per SM | 228 | KB |
 | A100 shared memory per SM | 164 | KB |
 | FA v1 AI ($M$=192KB, $d$=128) | ~1,536 | FLOPs/byte |
-| FA HBM reduction factor | ~50x | vs naive, $N$=4096 |
+| FA HBM reduction factor | ~2x raw, ~33x w/ L2 | vs naive, $N$=4096 |
 | FA v2 speedup over v1 | ~2x | A100 end-to-end |
 | FA v3 speedup over v2 | ~1.5x | H100 end-to-end |
 | v3 FP8 vs. v2 FP16 | ~2x | H100 |
@@ -499,7 +510,7 @@ flowchart TD
 
 **Q:** Training with $N=8192$, $d=256$, FP16 on H100 SXM. Is naive attention compute- or memory-bound? What about FlashAttention with 228 KB SRAM?
 
-**A:** Naive: $AI \approx d = 256 < 295$ (ridge) $\Rightarrow$ memory-bound. FlashAttention: $AI \approx M/d = 228 \times 1024 / 256 = 912 \gg 295 \Rightarrow$ compute-bound. FA achieves $912/295 \approx 3.1\times$ the throughput ceiling of naive.
+**A:** Naive: $AI \approx d/2 = 128 < 295$ (ridge) $\Rightarrow$ memory-bound. FlashAttention: $AI \approx M/d = 228 \times 1024 / 256 = 912 \gg 295 \Rightarrow$ compute-bound. FA achieves $912/295 \approx 3.1\times$ the throughput ceiling of naive.
 
 ### Problem 2: Tile Budget Verification
 
@@ -511,7 +522,7 @@ flowchart TD
 
 **Q:** Derive the FA-to-naive traffic ratio for $N=2048$, $d=128$, $B_r=64$, $B_c=128$, $M=164$ KB.
 
-**A:** Naive: $\text{HBM} = 4N^2 + 8Nd = 4(2048)^2 + 8(2048)(128) = 18.87$ MB. FA avoids writing $S$ and $P$ ($2N^2 = 8.39$ MB saved). Theoretical ratio from the paper: $\text{HBM}_{\text{FA}}/\text{HBM}_{\text{naive}} = \Theta(d^2/M) = 128^2/(164 \times 1024) = 0.097$, i.e., **~10x less traffic**.
+**A:** Naive: $\text{HBM} = 8N^2 + 8Nd = 33.55\text{M} + 2.10\text{M} = 35.65$ MB. FA concrete traffic ($T_r = N/B_r = 32$): $Q$ reads + $O$ writes $= 2 \times 2Nd = 2.10$ MB; $K{+}V$ re-reads $= 2 \times T_r \times 2Nd = 32.0$ MB; total $\approx 34.1$ MB. Raw ratio: $35.65/34.1 \approx 1.05$x (comparable when $B_r \approx d$). With L2 caching of $K, V$ ($2Nd = 0.5$ MB, fits in L2): FA effective traffic $\approx 4Nd = 2.10$ MB, giving $35.65/2.10 \approx$ **17x less traffic**.
 
 ### Problem 4: FlashDecoding Split Count
 

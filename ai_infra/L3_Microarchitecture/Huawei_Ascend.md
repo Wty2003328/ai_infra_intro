@@ -87,7 +87,7 @@ Each Ascend 910C die has multiple AI Cores. Per AI Core:
 - L1 buffer (~256 KB).
 - L0 buffers feeding the Cube directly.
 
-The 910C has 32 AI Cores per die × 2 dies = 64 AI Cores per package. Aggregate: ~640 BF16 TFLOPS dense per package.
+The 910C has 32 AI Cores per die × 2 dies = 64 AI Cores per package. Theoretical peak: 64 × ~10 TFLOPS = ~640 BF16 TFLOPS dense. **Spec-sheet value is ~300 TFLOPS.** The gap arises from: (a) the dual-die package cannot sustain ~1.2 GHz across all 64 Cubes simultaneously — thermal and power delivery constraints force clock-frequency reduction (~750–900 MHz typical sustained); (b) cross-die synchronization overhead on the SMIC 7nm interposer adds stalls that reduce achievable throughput; (c) the quoted ~300 TFLOPS reflects a realistic sustained envelope with a ~0.45–0.50 utilization factor, which is typical for multi-die designs on a constrained process node. Report the ~300 TFLOPS figure for comparisons; the ~640 TFLOPS is the architectural ceiling that real silicon cannot reach.
 
 ---
 

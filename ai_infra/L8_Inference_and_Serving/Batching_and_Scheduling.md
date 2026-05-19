@@ -648,7 +648,7 @@ $$B^* = \frac{T_{\text{SLO}} - T_0}{k}$$
 
 Operating at $B > B^*$ violates the TPOT SLO. Operating at $B \ll B^*$ wastes throughput. The scheduling target is $B \approx 0.8 \cdot B^*$ to leave headroom for variance.
 
-**Worked example: Llama-3-70B FP16 on 2$\times$ H100 (TP=2, aggregate $\beta = 6.7$ TB/s NVLink)**
+**Worked example: Llama-3-70B FP16 on 2$\times$ H100 (TP=2, aggregate HBM bandwidth $\beta = 6.7$ TB/s, i.e., $2 \times 3.35$ TB/s)**
 
 $$T_0 = \frac{140\;\text{GB}}{6700\;\text{GB/s}} = 20.9\;\text{ms}$$
 

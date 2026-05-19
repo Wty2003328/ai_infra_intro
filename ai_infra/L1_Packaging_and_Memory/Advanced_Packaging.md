@@ -379,9 +379,171 @@ The 10× capacitance reduction is what makes 3D-stacked SRAM (V-Cache) feasible 
 
 ---
 
-## 7. Thermal at the package level
+## 7. Emerging interconnect and substrate technologies
 
-### 7.1 The 1D thermal stack
+The packaging techniques in §§1–6 are in production today. The three technologies below address the next set of walls: multi-vendor chiplet assembly, electrical I/O reach at 224 Gbps+, and organic substrate scaling limits for reticle-exceeding packages.
+
+### 7.1 UCIe (Universal Chiplet Interconnect Express)
+
+#### What it is
+
+UCIe is an **open industry standard for die-to-die chiplet interconnect**, initially released in 2022 by a consortium led by Intel, AMD, ARM, TSMC, and others. It defines a complete stack — from the physical bump map up through the protocol layer — so that chiplets from different vendors can be mixed and matched on a single package, much like PCIe standardized board-level interconnect across vendors.
+
+**Specification timeline:**
+
+| Version | Released | Key additions |
+|---|---|---|
+| UCIe 1.0 | 2022 | Initial spec; advanced + standard packaging; 32 GT/s |
+| UCIe 1.1 | 2023 | CXL 3.0 support, improved RAS, extended reach |
+| UCIe 2.0 (in progress) | 2025–2026 | 64 GT/s target, enhanced flit modes |
+
+#### Physical layer
+
+UCIe defines two packaging regimes:
+
+| Parameter | Advanced packaging | Standard packaging |
+|---|---|---|
+| Bump pitch | ≤ 25–55 µm (sub-1 mm reach) | 100–500 µm (~2 mm reach) |
+| Data rate | Up to 32 GT/s per lane | Up to 32 GT/s per lane |
+| Flit width | 256b (mainstream), 64B (optional) | 256b, 64B |
+| Reach | ≤ 2 mm die-to-die | ≤ 2 mm (organics, ABF) |
+
+At 32 GT/s with a 256b flit, a single UCIe module delivers **32 GT/s × 256b / 8 = 1 TB/s** per module. Modules can be ganged; bump-level aggregate bandwidth reaches up to **4 TB/s per mm²** of bump area for advanced packaging — a direct consequence of the sub-25 µm pitch.
+
+Energy target: **≤ 0.5 pJ/bit** for advanced packaging, ≤ 1.0 pJ/bit for standard packaging. Competitive with proprietary links (NV-HBI at ~0.2 pJ/bit, Infinity Fabric at ~0.3 pJ/bit) while offering vendor neutrality.
+
+#### Protocol layer
+
+UCIe supports two modes:
+
+1. **Transparent mode** — PCIe or CXL traffic is tunneled directly over UCIe, with the UCIe link appearing as a standard PCIe/CXL link to the protocol layer. This enables drop-in interoperability: any chiplet with a PCIe/CXL controller can communicate over UCIe without protocol changes.
+
+2. **Raw mode** — a vendor-defined protocol (e.g., a custom cache-coherent interconnect) rides directly on the UCIe flit. This is for tightly-coupled chiplet ensembles where latency must be lower than PCIe's transaction-layer overhead allows.
+
+The two modes map to different use cases: transparent mode for I/O chiplets (NICs, accelerators), raw mode for compute chiplets in a coherent domain.
+
+#### Comparison with proprietary die-to-die links
+
+| Link | Vendor | Bandwidth | Energy/bit | Open? | Use case |
+|---|---|---|---|---|---|
+| **UCIe** | Consortium | Up to 4 TB/s/mm² | ~0.5 pJ/bit | Yes | Multi-vendor chiplet assembly |
+| **NV-HBI** | NVIDIA | ~10 TB/s per link | ~0.2 pJ/bit | No | Compute-die-to-compute-die in Blackwell |
+| **Infinity Fabric** | AMD | ~5 TB/s (MI300X) | ~0.3 pJ/bit | No | XCD↔IOD in EPYC/Instinct |
+| **EMIB / Foveros** | Intel | Variable | ~0.2 pJ/bit | No | Compute↔HBM, 3D stacking |
+
+NV-HBI and Infinity Fabric achieve lower energy/bit because they are tightly optimized for a single vendor's die topology and do not carry the overhead of protocol generality. UCIe trades a modest energy penalty for the ability to mix chiplets across vendors — the "PCIe of die-to-die" analogy.
+
+#### Why it matters
+
+Without UCIe, assembling a package from chiplets built on different process nodes by different vendors requires bilateral protocol agreements (as AMD did with TSMC for MI300X's XCD+IOD integration). UCIe commoditizes the die-to-die link, enabling:
+
+- **Heterogeneous chiplet assembly** — CPU from vendor A, GPU from vendor B, I/O die from vendor C, all on one interposer.
+- **Process-node mixing** — compute chiplets on N3, I/O chiplets on N6, analog/RF on older nodes — each optimized for cost.
+- **Ecosystem scaling** — startups building specialized chiplets (e.g., crypto accelerators, custom NPUs) that plug into standard UCIe sockets on a base die.
+
+Adoption is growing through 2025–2026: Intel's Falcon Shores planned UCIe, AMD has signaled support for future chiplet architectures, and ARM's Total Compute strategy references UCIe for die-to-die coherence.
+
+### 7.2 Co-Packaged Optics (CPO)
+
+#### The problem it solves
+
+Electrical SerDes at 112 Gbps (NRZ) and 224 Gbps (PAM-4) face a hard wall: the **reach-power tradeoff**. At 224G PAM-4, a PCB trace attenuates the signal by ~30 dB/m at Nyquist (56 GHz). Even with advanced equalization (DFE + CTLE), practical electrical reach on FR-4 is ~1–2 m. The DSP, CDR, and driver/receiver circuits at 224G consume **15–20 pJ/bit** — and this number is rising with each generation because equalization complexity scales with channel loss.
+
+For AI training clusters where each GPU needs 8 × 400 GbE (3.2 Tbps host interface), the electrical SerDes alone draws:
+
+$$
+P_{\text{SerDes}} \;=\; 3.2 \times 10^{12}\,\text{bits/s} \cdot 17 \times 10^{-12}\,\text{J/bit} \;\approx\; 54\ \text{W}
+$$
+
+That is 3–5% of total GPU package power, just for the I/O PHY. At next-generation speeds (448G, 896G), this escalates unsustainably.
+
+#### What CPO does
+
+Co-Packaged Optics moves the **electrical-to-optical conversion** from the board-edge transceiver module onto the package itself (or onto a silicon photonics die adjacent to the compute die on the interposer). Instead of driving a 2 m PCB trace electrically, the signal traverses ~1 mm of electrical trace on-package, then converts to optical for the multi-meter link to the switch.
+
+```
+Traditional:  [GPU die] ──2 m PCB trace──> [QSFP module] ──fiber──> [switch]
+CPO:          [GPU die] ──1 mm on-pkg──> [photonic IC] ──fiber──> [switch]
+```
+
+#### Technical approaches
+
+| Approach | Mechanism | Status |
+|---|---|---|
+| **Silicon photonics on interposer** | Photonic waveguides etched into a Si photonics die, co-packaged with the compute die on CoWoS | Intel, Broadcom (2025–2026 demos) |
+| **Micro-ring modulators** | Resonant modulators that encode data via refractive-index shifts; ultra-compact (~10 µm diameter) | Ayar Labs TeraPHY (shipping samples) |
+| **Grating couplers** | Surface-emitting couplers that route light from the photonic IC into fiber arrays attached to the package top | Standard in Si photonics; yield improving |
+
+The photonic die needs its own laser source. Options: off-package lasers coupled via fiber (simpler thermal management), or on-package lasers (lower coupling loss, harder thermal).
+
+#### Energy and performance targets
+
+| Metric | 224G Electrical SerDes | CPO target |
+|---|---|---|
+| Energy per bit | 15–20 pJ/bit | 2–5 pJ/bit |
+| Reach | ~2 m (FR-4) | >2 km (fiber) |
+| Bandwidth density (package edge) | ~1 Tbps/mm | ~5 Tbps/mm |
+| DSP complexity | Heavy (DFE + CTLE + FEC) | Minimal (direct modulation) |
+
+The 4–10× energy improvement comes from eliminating the DSP-heavy electrical equalization. The photonic modulator operates at essentially the speed of light through a low-loss waveguide; the receiver needs only a transimpedance amplifier (TIA), not a multi-tap DFE.
+
+#### Key players
+
+| Company | Approach | Notable |
+|---|---|---|
+| **Intel** | Silicon photonics platform; integrated SiPh dies on EMIB | Largest SiPh volume production (PLR transceivers) |
+| **Broadcom** | CPO switch ASICs (Tomahawk 6 CPO variant) | First CPO switch product announced |
+| **Ayar Labs** | TeraPHY optical I/O chiplets (UCIe-adjacent) | DARPA-funded; ~3 pJ/bit demonstrated |
+| **Lightmatter** | Passage photonic interconnect platform | Wafer-scale photonic interposer concept |
+
+#### Timeline
+
+- **2024–2025**: CPO demonstrations in lab and early silicon (Ayar Labs TeraPHY, Broadcom Tomahawk 6 CPO).
+- **2026–2028**: Production deployment in AI training clusters. First targets are the switch-to-GPU links in large-scale clusters (NVL72, Ultra Ethernet), where the reach×bandwidth product makes CPO's cost premium worthwhile.
+- **2028+**: If yield and packaging costs decline, CPO could displace electrical SerDes entirely for any link >0.5 m, reshaping rack-level system architecture.
+
+### 7.3 Glass Substrates
+
+#### What they are
+
+At SEMICON West 2024, Intel announced **glass substrate technology** for advanced packaging — replacing the organic BT/ABF substrate with a thin glass panel. Glass offers fundamentally different material properties that address several scaling walls of organic substrates.
+
+#### Advantages over organic substrates
+
+| Property | Organic (BT/ABF) | Glass | Impact |
+|---|---|---|---|
+| **I/O density** | ~44 bumps/mm² (150 µm C4) | ~400+ bumps/mm² (sub-50 µm) | ~10× higher bump density |
+| **Dielectric loss (tan δ)** | ~0.02 at 10 GHz | ~0.001 at 10 GHz | 20× lower signal loss; eye stays open at 224G+ |
+| **CTE** | ~16 ppm/°C | ~3–5 ppm/°C (tunable) | Matches silicon (~2.6 ppm/°C); eliminates CTE-shear failures |
+| **Warpage** | Significant at >60 mm × 60 mm | Minimal (rigid) | Enables larger packages |
+| **Dimensional stability** | ±50 µm across panel | ±5 µm | Fine-pitch routing over large area |
+| **Panel size** | ~510 mm × 510 mm | ~510 mm × 510 mm (comparable) | Similar panel economics |
+
+#### Why it matters for next-gen AI accelerators
+
+Current frontier packages (B200, MI355X) are at ~80 mm × 80 mm on organic substrates. Next-generation designs — NVIDIA Rubin Ultra (4 compute dies + 12 HBM), potential 8-die configurations — need package sizes >100 mm × 100 mm. Organic substrates warp beyond ~60–80 mm on a side because of CTE mismatch and lamination stress, making fine-pitch routing unreliable at those sizes.
+
+Glass substrates, with CTE closely matching silicon and negligible warpage, enable:
+
+- **Larger package footprints** (>100 mm × 100 mm) with fine-pitch routing maintained across the full area.
+- **Higher signaling speeds** on the substrate itself — the low dielectric loss of glass means 224G SerDes traces can run longer distances on-substrate without the eye closing, reducing the need for silicon bridges for every high-speed link.
+- **Higher bump density** — sub-50 µm bump pitch on glass is feasible because the rigid, flat surface allows finer solder mask registration.
+
+#### Timeline
+
+| Milestone | Target |
+|---|---|
+| Intel glass substrate announcement | 2024 |
+| Initial production (server/AI) | 2026–2027 |
+| Volume ramp for reticle-exceeding designs | 2027–2028 |
+
+Intel is the primary driver; TSMC and Samsung have also disclosed glass-substrate R&D. If glass substrates mature on schedule, they become the enabling technology for the 5 800+ mm² packages required by Rubin Ultra and beyond — a direct extension of the CoWoS-L 9× roadmap.
+
+---
+
+## 8. Thermal at the package level
+
+### 8.1 The 1D thermal stack
 
 Heat path from the die junction to liquid coolant, modeled as a series of thermal resistances:
 
@@ -421,11 +583,11 @@ $$
 
 This is why **liquid-metal or solder TIM is mandatory at frontier TDPs**. It's also why GB200/MI355X are commonly *lidless* — removing the lid eliminates the θ_lid + θ_TIM1 layers and the cold-plate sits directly on the die.
 
-### 7.2 HBM thermal coupling
+### 8.2 HBM thermal coupling
 
 HBM dies tolerate $T_j \le 95\,°$C (refresh-rate ceiling). Logic die at 100 °C creates a lateral conduction path across the package; HBM stacks ~15 mm from a hot logic core can see +5 to +8 °C of secondary heating. Modern packages add **vapor chambers** spreading laterally above the dies (and below the cold plate) to reduce the spatial temperature gradient across the package.
 
-### 7.3 The 500 W/cm² package wall
+### 8.3 The 500 W/cm² package wall
 
 Direct-to-chip cold plates with microchannels handle ~500 W/cm² steady-state. Beyond that:
 
@@ -436,9 +598,9 @@ These are L4-rack-scale problems but originate at the package interface.
 
 ---
 
-## 8. Yield: known-good-die (KGD) economics
+## 9. Yield: known-good-die (KGD) economics
 
-### 8.1 Combinatorial yield
+### 9.1 Combinatorial yield
 
 A B200 package = 2 compute dies + 8 HBM stacks + 1 substrate + 1 LSI bridge complex = ~12 critical components. Without pre-screening, if each survives at $p = 0.90$:
 
@@ -448,7 +610,7 @@ $$
 
 That's 70% of finished packages discarded — at $30 000+ per package this is uneconomic.
 
-### 8.2 KGD strategy
+### 9.2 KGD strategy
 
 - Every logic die: full wafer-probe test, burn-in, parametric binning before assembly.
 - Every HBM stack: independent BIST run on the stack, including TSV-fault detection and base-die-driven self-repair via redundant TSV remap.
@@ -462,19 +624,20 @@ $$
 
 Now the dominant loss is mechanical defects of the assembly itself (misalignment, void in TIM, microbump bridging). Modern advanced-packaging assembly yields run 95–98%.
 
-### 8.3 Why KGD slows everything down
+### 9.3 Why KGD slows everything down
 
 KGD adds a 4–6 week test cycle to every die *before* it can be packaged. This is a real component of the 6+ month lead time on Blackwell allocations: the dies have been printed, but they're sitting in burn-in.
 
 ---
 
-## 9. The full picture — from L0 substrate to L4 system
+## 10. The full picture — from L0 substrate to L4 system
 
 ```mermaid
 flowchart TD
     A[L0: 858 mm² reticle] --> B[Multi-die required]
     B --> C[CoWoS-S ceiling 2 800 mm²]
     C --> D[CoWoS-L bridges → 6× reticle]
+    D --> D2[CoWoS-L 9× → glass substrates for >100 mm pkgs]
 
     E[L0: bump pitch 25 µm wall] --> F[Hybrid bonding required for HBM4]
     F --> G[<10 µm pitch, 2048-bit HBM4]
@@ -489,13 +652,18 @@ flowchart TD
     O --> P[Lidless GB200/MI355X]
     P --> Q[L4: rack cold-plate loop]
 
+    U[UCIe open chiplet std] --> V[Multi-vendor heterogeneous assembly]
+    W[224G SerDes wall: 15-20 pJ/bit] --> X[CPO: 2-5 pJ/bit optical I/O]
+    X --> Y[2026-2028 production for AI clusters]
+
     G --> R[L3 microarchitecture: how to feed 16 TB/s]
     Q --> R
+    V --> R
 ```
 
 ---
 
-## 10. Numbers to memorize
+## 11. Numbers to memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|
@@ -519,10 +687,16 @@ flowchart TD
 | HBM $T_j$ ceiling | ~95 °C | Refresh-rate cap |
 | Frontier hotspot heat flux | ~400 W/cm² | Liquid-metal TIM mandatory |
 | Hybrid-bond wafer-pair throughput | ~10/hr | Capacity-gating for 2026 |
+| UCIe bandwidth (advanced pkg) | Up to 4 TB/s per mm² | Open chiplet interconnect |
+| UCIe energy/bit | ≤ 0.5 pJ/bit (adv), ≤ 1.0 pJ/bit (std) | Multi-vendor chiplet floor |
+| CPO target energy/bit | 2–5 pJ/bit | vs 15–20 pJ/bit electrical at 224G |
+| Electrical SerDes reach @ 224G | ~1–2 m (FR-4) | Why CPO is needed for rack-scale |
+| Glass substrate I/O density | ~10× organic | Sub-50 µm bump pitch feasible |
+| Glass substrate CTE | ~3–5 ppm/°C | Matches Si; eliminates warpage at >100 mm |
 
 ---
 
-## 11. Worked interview problems
+## 12. Worked interview problems
 
 **Q1.** *A new accelerator wants 4 compute dies + 12 HBM4 stacks on one package. HBM4 footprint with margin is ~140 mm²; compute die is ~700 mm² each. Will it fit on CoWoS-L 6× (3 500 mm²)? What about CoWoS-L 9× (5 800 mm²)?*
 
@@ -552,12 +726,14 @@ NV-HBI: ~10–20 ns die-to-die (cache-coherent, single GPU view). IF-AP across t
 
 ---
 
-## 12. References
+## 13. References
 
 **Standards & primary sources**
 - TSMC Technology Symposium proceedings, CoWoS-S/L disclosures (annual).
 - Intel Foveros, EMIB technical briefs (Hot Chips, ECTC).
 - JEDEC HBM3 (JESD238), HBM4 (JESD270) standards.
+- UCIe Consortium, *UCIe Specification* 1.0 (2022), 1.1 (2023).
+- Intel, "Intel Introduces Glass Substrates for Next-Gen Advanced Packaging" (2024).
 
 **Books**
 - John Lau, *Heterogeneous Integration*, Springer.
@@ -568,6 +744,7 @@ NV-HBI: ~10–20 ns die-to-die (cache-coherent, single GPU view). IF-AP across t
 - IEEE ECTC (Electronic Components and Technology Conf) — the canonical venue.
 - IEEE IEDM — device-physics side.
 - ISSCC — PHY and base-die designs.
+- OFC (Optical Fiber Communication) — silicon photonics and CPO developments.
 
 **Cross-references in this vault**
 - [`digital_design/IC_Packaging.md`](../../digital_design/IC_Packaging.md) — package-engineer view.
