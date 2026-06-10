@@ -50,6 +50,6 @@ Strict bottom-up for depth: Networking → Rack → Storage, in order.
 After this layer, ascend to [L5 — Kernels & Programming](../L5_Kernels_and_Programming/Index.md) where the hardware becomes software.
 
 Cross-domain references:
-- [`digital_design/SerDes_Design.md`](../../digital_design/SerDes_Design.md) — transistor-level SerDes and CDR circuits.
-- [`power/Power_Distribution.md`](../../power/Power_Distribution.md) — VRM design and multiphase buck converters.
-- [`systemverilog/PCIe_Controller.md`](../../systemverilog/PCIe_Controller.md) — RTL for the PCIe/CXL transaction layer.
+- [`digital_design/SerDes_Design.md`](../../hardware_design/Clocking_and_Signals/Signal_Integrity_Reliability.md) — transistor-level SerDes and CDR circuits.
+- [`power/Power_Distribution.md`](../../hardware_design/Power/Power_Fundamentals.md) — VRM design and multiphase buck converters.
+- [`systemverilog/PCIe_Controller.md`](../../hardware_design/Architecture/AHB_AXI_APB.md) — RTL for the PCIe/CXL transaction layer.

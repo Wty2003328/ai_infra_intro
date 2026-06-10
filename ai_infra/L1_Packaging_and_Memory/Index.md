@@ -51,6 +51,6 @@ Start with [Advanced_Packaging](Advanced_Packaging.md) for the package geometry,
 
 Cross-domain references in this vault:
 
-- [`digital_design/IC_Packaging.md`](../../digital_design/IC_Packaging.md) — package-engineer view of the same ground.
-- [`digital_design/Memory.md`](../../digital_design/Memory.md) — DRAM device physics from the design-engineer angle.
-- [`digital_design/Signal_Integrity_Reliability.md`](../../digital_design/Signal_Integrity_Reliability.md) — eye-diagram, jitter, ISI math.
+- [`digital_design/IC_Packaging.md`](../../hardware_design/Implementation/IC_Packaging.md) — package-engineer view of the same ground.
+- [`digital_design/Memory.md`](../../hardware_design/Architecture/Memory.md) — DRAM device physics from the design-engineer angle.
+- [`digital_design/Signal_Integrity_Reliability.md`](../../hardware_design/Clocking_and_Signals/Signal_Integrity_Reliability.md) — eye-diagram, jitter, ISI math.

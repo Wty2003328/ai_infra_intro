@@ -582,9 +582,9 @@ Cycles in routing dependency graph require packets that route in non-monotonic d
 - Foundry-DTCO disclosures from TSMC / Intel — pipelining-friendly cell libraries.
 
 **Cross-references**
-- [`digital_design/Synthesis_and_Optimization.md`](../../digital_design/Synthesis_and_Optimization.md) — synthesis flow and timing closure tools.
-- [`digital_design/Formal_Verification.md`](../../digital_design/Formal_Verification.md) — property-based verification.
-- [`digital_design/Clock_Division.md`](../../digital_design/Clock_Division.md) — PLLs and clock generation.
+- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/Implementation/Synthesis_and_Optimization.md) — synthesis flow and timing closure tools.
+- [`digital_design/Formal_Verification.md`](../../hardware_design/Implementation/Formal_Verification.md) — property-based verification.
+- [`digital_design/Clock_Division.md`](../../hardware_design/Clocking_and_Signals/Clock_Division.md) — PLLs and clock generation.
 
 ---
 

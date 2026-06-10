@@ -805,6 +805,7 @@ flowchart TD
 
     AA["OpenAI-Microsoft 'Build A Better Ethernet'"] --> BB["Open congestion control + telemetry for AI"]
     BB --> CC["Ethernet competitive with IB at extreme scale"]
+```
 
 ---
 

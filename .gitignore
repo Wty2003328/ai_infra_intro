@@ -1,5 +1,12 @@
+# Obsidian workspace (machine-local state)
+.obsidian/
+*.base
+
+# AI assistant scratch
+.claude/
 GEMINI.md
-.claude
-.obsidian
-.Untitled.base
-.Untitled.base.*
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -23,13 +23,14 @@ Twelve distinct families ship AI silicon at scale in 2026. Each occupies a niche
 | NVIDIA | R100 | Vera Rubin (announced GTC Mar 2026) | TSMC 3NP dual-die, Vera CPU | 288 (HBM4) | 22.0 | ~25 | ~50 | NVL576 (576), NVLink-6 | CUDA + TE3 | ~1 500 |
 | AMD | MI300X | CDNA 3 | N5 + N6 | 192 | 5.3 | 2.6 | – | xGMI (8) | ROCm 6 | 750 |
 | AMD | MI355X | CDNA 4 | N3 + N6 | 288 | 8.0 | 10.1 | 20.1 | xGMI (8) | ROCm 7 | 1 000 |
-| AMD | MI450 | Altair | TSMC N2 | TBD | TBD | TBD | TBD | Helios rack (64/72/128 GPU) | ROCm 7+ | TBD |
-| AMD | MI430X | Altair | TSMC N2 | TBD | TBD | TBD | TBD | Helios rack | ROCm 7+ | TBD |
+| AMD | MI450 | Altair (CDNA 5) | TSMC N2 | 432 (HBM4) | 19.6 | ~20 | ~40 | Helios rack (64/72/128 GPU) | ROCm 7+ | <1 200 (volume SKU) |
+| AMD | MI430X | Altair (CDNA 5) | TSMC N2 | 432 (HBM4) | 19.6 | FP64-optimized | – | Helios rack | ROCm 7+ | ~1 100 (HPC/sovereign) |
 | AMD | MI455X | Altair | TSMC N2 | 432 (HBM4) | 19.6 | ~20 | ~40 | UALink (72), UALoE72 confirmed | ROCm 7+ | 1 200 |
 | Google | TPU v5p | TPU v5p | – | 95 | 2.7 | – (BF16: 0.46) | – | ICI (8 960) + OCS | XLA / JAX | ~600 |
 | Google | TPU v6e | Trillium | – | 32 | 1.6 | ~1.8 INT8 | – | ICI (256) | XLA / JAX | ~400 |
 | Google | TPU v7 | Ironwood | – | 192 | 7.37 | 4.6 | – | ICI (9 216) + OCS | XLA / JAX / Pallas | ~900 |
-| Google | TPU v8 | (announced ~Apr 24, 2026) | TBD | TBD | TBD | TBD | TBD | TBD | XLA / JAX / Pallas | TBD |
+| Google | TPU 8t | v8 training (Broadcom) | – | 216 (HBM3e) | 6.53 | – | 12.6 | ICI superpod (9 600, 2 PB HBM) | XLA / JAX / Pallas | TBD |
+| Google | TPU 8i | v8 inference (MediaTek) | – | 288 (HBM3e) + 384 MB SRAM | 8.6 | – | 10.1 | Boardfly + CAE (→1M cluster) | XLA / JAX / Pallas | TBD |
 | AWS | Trainium 2 | NeuronCore-v3 | TSMC 5nm | 96 | 2.9 | 1.3 | – | NeuronLink (16) | Neuron + NKI | ~700 |
 | AWS | Trainium 3 | NeuronCore-v4 | TSMC 3nm | 144 | 4.9 | 2.52 | (MXFP4) | NeuronLink (16) | Neuron + NKI | ~900 |
 | Meta | MTIA v2 | Artemis mesh | TSMC 5nm | 128 LPDDR5 | 0.2 | inference-tier | – | PCIe / Meta-internal | Triton-MTIA | 90 |
@@ -231,15 +232,22 @@ The Rubin architecture, officially named **Vera Rubin** at GTC March 2026, pairs
 - **Memory**: 288 GB HBM4 per GPU, 22.0 TB/s memory bandwidth.
 - **Performance**: ~25 PFLOPS FP8 dense, ~50 PFLOPS FP4 dense (estimated).
 - **Scale-up**: NVL576 provides a 576-GPU coherent domain — 5x larger than NVL72 (Blackwell). This is the first NVIDIA architecture to break the 72-GPU NVLink barrier via optical-augmented Clos.
-- **Status**: changed from "projected" to "announced." Shipping timeline TBD but silicon is expected in late 2026 / early 2027.
+- **Transistor count / process**: 336 B transistors, TSMC 3nm dual-die. R100/R200 delivers ~50 PFLOPS NVFP4 inference per package with 288 GB HBM4 at 22 TB/s (vs 8 TB/s HBM3e on Blackwell Ultra).
+- **Vera CPU ("Olympus")**: 88 Armv9.2 cores / 176 threads (Spatial Multithreading), up to 1.5 TB LPDDR5X, NVLink-C2C at 1.8 TB/s to the GPUs.
+- **VR200 NVL144 rack**: 72 Vera Rubin Superchips (1 Vera CPU + 2 Rubin GPUs each) = 144 GPU dies. NVIDIA claims 3.3× FP4 and 1.6× FP8 vs GB300 NVL72. Rack power climbs to ~190–230 kW (vs 120–130 kW Blackwell).
+- **Rubin CPX**: a separate prefill-specialized GPU for massive-context inference — GDDR7 instead of HBM, optimized for compute-bound prefill; pairs with HBM4 Rubin for decode (hardware-level prefill-decode disaggregation; see [Prefill_Decode_Disaggregation](../L8_Inference_and_Serving/Prefill_Decode_Disaggregation.md)).
+- **Status**: announced GTC Mar 2026; **in full production as of CES Jan 2026 statements, volume H2 2026**.
 
 ---
 
 ## 12. AMD MI400 "Altair" Series
 
-AMD's next-generation MI400 family, codenamed **Altair**, was confirmed with three SKUs:
+AMD's next-generation MI400 family, codenamed **Altair** (CDNA 5), was detailed at CES 2026 with three SKUs:
 
-- **MI450, MI430X, MI455X** — all on TSMC N2 (2nm-class), all under the Altair codename.
+- **MI455X (flagship)**: 320 B transistors, 12 TSMC N2 compute chiplets + 3 N3 base chiplets, 432 GB HBM4, 19.6 TB/s, 40 PFLOPS FP4 / 20 PFLOPS FP8 dense.
+- **MI450 (volume)**: same 432 GB HBM4 / 19.6 TB/s at a lower power envelope — the volume large-scale-deployment SKU.
+- **MI430X (HPC/sovereign)**: FP64-optimized variant for HPC and sovereign-AI procurement.
+- **Helios rack**: 72× MI455X + EPYC "Venice" (Zen 6, >4 600 cores/rack) = 31 TB aggregate HBM4, 1.4 PB/s aggregate bandwidth, 2.9 EFLOPS FP4 / 1.4 EFLOPS FP8 per rack. On track for **H2 2026** shipment.
 - **Helios rack configurations**: 64, 72, or 128 GPUs per system, offering deployment flexibility from mid-scale to ultra-scale training.
 - **UALoE72 configuration confirmed**: the UALink-over-Ethernet 72-GPU domain is a confirmed Helios topology, giving AMD a coherent 72-GPU domain comparable to NVL72 without requiring custom silicon switches.
 - **Engineering samples H2 2026, on track**: AMD has confirmed the MI400 timeline is proceeding as planned.
@@ -250,11 +258,11 @@ AMD's next-generation MI400 family, codenamed **Altair**, was confirmed with thr
 
 ## 13. Google TPU v8
 
-Google announced **TPU v8** on approximately April 24, 2026:
+Google announced the **eighth TPU generation** on April 22, 2026 (Cloud Next) — and split it into two chips for the first time:
 
-- **Tagline**: "makes GenAI systems much better, not just bigger" — suggests a focus on efficiency and system-level improvements rather than raw FLOP scaling.
-- **Specs**: TBD as of announcement. Marked as announced; detailed architecture expected at a future Google I/O or dedicated event.
-- **Implication**: the TPU v6e → v7 → v8 cadence (roughly annual) is now clearly established. TPU v8 likely targets the same inference-heavy workload space that TPU v7 Ironwood opened, with improvements in inference efficiency and multi-host coordination.
+- **TPU 8t (training, Broadcom co-design)**: 12.6 FP4 PFLOPS, 216 GB HBM3e @ 6 528 GB/s. Superpod = 9 600 chips with 2 PB shared HBM and ICI at 2× Ironwood bandwidth (~121 FP4 EFLOPS/superpod).
+- **TPU 8i (inference, MediaTek co-design)**: 10.1 FP4 PFLOPS, 288 GB HBM3e @ 8 601 GB/s, **384 MB on-chip SRAM** (3× Ironwood). "Boardfly" topology + Collectives Acceleration Engine (5× lower sync latency); fabric scales toward 1M TPUs per cluster.
+- **Implication**: confirms the industry-wide training/inference silicon bifurcation (cf. Rubin CPX, Trainium/Inferentia). The 8i's huge SRAM directly targets agentic/reasoning decode where KV-cache residency dominates. GA later in 2026 via AI Hypercomputer. See [Google_TPU](Google_TPU.md) for details.
 
 ---
 

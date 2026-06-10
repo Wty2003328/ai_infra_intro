@@ -532,6 +532,7 @@ flowchart TD
     U --> V["162 TB aggregate HBM, 4,320 PFLOP/s FP4"]
     V --> W["EP up to 576 GPUs for MoE all-to-all on NVLink"]
     W --> X["2-5× MoE throughput vs multi-rack EP over InfiniBand"]
+```
 
 ---
 

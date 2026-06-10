@@ -27,11 +27,17 @@ The result: the only non-NVIDIA hardware that hosts frontier-model training at >
 | TPU v5e | "Efficient" | 2023 | 16 GB HBM2 | 197 INT8 TFLOPS | 2D Torus (no OCS) | 256 chips |
 | TPU v6e | Trillium | 2024 | 32 GB HBM3 | ~918 BF16 TFLOPS | 2D Torus | 256 chips |
 | TPU v7 | Ironwood | 2025/26 | 192 GB HBM3e (7.37 TB/s) | 4 614 FP8 TFLOPS | 3D Torus + OCS | 9 216 chips |
-| TPU v8 | – (announced) | ~2027 | TBD | TBD | TBD | TBD |
+| TPU 8t | – (training) | 2026 (GA H2) | 216 GB HBM3e (6.53 TB/s) | 12.6 FP4 PFLOPS | ICI 2× Ironwood BW | 9 600 chips (2 PB HBM) |
+| TPU 8i | – (inference) | 2026 (GA H2) | 288 GB HBM3e (8.6 TB/s) | 10.1 FP4 PFLOPS | "Boardfly" topology | up to ~1M-TPU cluster fabric |
 
-Ironwood's 9 216-chip pod is the largest single coherent-fabric AI computer in production as of 2026.
+Ironwood's 9 216-chip pod was the largest single coherent-fabric AI computer in production entering 2026; the TPU 8t superpod extends this to 9 600 chips with 2 PB of shared HBM.
 
-**TPU v8 (announced ~April 24, 2026):** Google announced TPU v8 with the tagline "makes GenAI systems much better, not just bigger." Detailed specs are pending disclosure. Marked as announced; awaiting detailed architectural disclosures.
+**TPU v8 (announced April 22, 2026 — Cloud Next):** Google split the eighth generation into two chips for the first time — **TPU 8t** for training (Broadcom co-design) and **TPU 8i** for inference/reasoning (MediaTek co-design). Disclosed specs:
+
+- **TPU 8t (training):** 12.6 FP4 PFLOPS, 216 GB HBM3e at 6 528 GB/s. Superpod = 9 600 chips, 2 PB shared HBM, ICI at 2× Ironwood bandwidth, ~121 FP4 EFLOPS per superpod.
+- **TPU 8i (inference):** 10.1 FP4 PFLOPS, 288 GB HBM3e at 8 601 GB/s, **384 MB on-chip SRAM** (3× Ironwood) — explicitly targeting KV-cache-resident reasoning/agentic decode. New "Boardfly" network topology plus a **Collectives Acceleration Engine (CAE)** claiming 5× lower synchronization latency; cluster fabric scales toward 1M TPUs.
+
+The split mirrors the broader 2026 trend (NVIDIA Rubin CPX, AWS Trainium vs Inferentia): bifurcating training- and inference-optimized silicon instead of one general-purpose accelerator.
 
 ---
 

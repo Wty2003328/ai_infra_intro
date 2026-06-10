@@ -747,9 +747,9 @@ NV-HBI: ~10–20 ns die-to-die (cache-coherent, single GPU view). IF-AP across t
 - OFC (Optical Fiber Communication) — silicon photonics and CPO developments.
 
 **Cross-references in this vault**
-- [`digital_design/IC_Packaging.md`](../../digital_design/IC_Packaging.md) — package-engineer view.
-- [`digital_design/Signal_Integrity_Reliability.md`](../../digital_design/Signal_Integrity_Reliability.md) — eye/jitter/ISI analysis.
-- [`power/Power_Analysis_and_Signoff.md`](../../power/Power_Analysis_and_Signoff.md) — IR/EM signoff.
+- [`digital_design/IC_Packaging.md`](../../hardware_design/Implementation/IC_Packaging.md) — package-engineer view.
+- [`digital_design/Signal_Integrity_Reliability.md`](../../hardware_design/Clocking_and_Signals/Signal_Integrity_Reliability.md) — eye/jitter/ISI analysis.
+- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/Power/Power_Analysis_and_Signoff.md) — IR/EM signoff.
 
 ---
 

@@ -1,7 +1,7 @@
 # FP Unit Design — Multipliers, Wallace Trees, FMA, MX Formats
 
 > **Layer:** L2.
-> **Prerequisites:** [On_Chip_Memory_Hardware](On_Chip_Memory_Hardware.md). IEEE-754 basics ([`digital_design/Floating_Point.md`](../../digital_design/Floating_Point.md)).
+> **Prerequisites:** [On_Chip_Memory_Hardware](On_Chip_Memory_Hardware.md). IEEE-754 basics ([Floating_Point](../../hardware_design/Fundamentals/Floating_Point.md)).
 > **Hands off to:** [Systolic_Arrays_and_Dataflow](Systolic_Arrays_and_Dataflow.md), [L3 Microarchitecture](../L3_Microarchitecture/Index.md).
 
 ---
@@ -502,8 +502,8 @@ FP6 has M=3, so a 3×3 = 9 partial-product multiplier — much smaller than FP8'
 - Kuzmin et al., *FP8 Quantization: The Power of the Exponent*, NeurIPS 2022.
 
 **Cross-references**
-- [`digital_design/Floating_Point.md`](../../digital_design/Floating_Point.md) — IEEE-754 corner cases.
-- [`digital_design/Synthesis_and_Optimization.md`](../../digital_design/Synthesis_and_Optimization.md) — what synthesis does with `*`.
+- [`digital_design/Floating_Point.md`](../../hardware_design/Fundamentals/Floating_Point.md) — IEEE-754 corner cases.
+- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/Implementation/Synthesis_and_Optimization.md) — what synthesis does with `*`.
 
 ---
 

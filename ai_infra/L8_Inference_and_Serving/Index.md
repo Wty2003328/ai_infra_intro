@@ -36,9 +36,11 @@ L8 covers **inference and serving systems** for large language models.
 8. [Inference_Frameworks](Inference_Frameworks.md)
 9. [vLLM_Internals](vLLM_Internals.md)
 10. [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md)
-11. [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md)
-12. [Observability_and_Debugging](Observability_and_Debugging.md)
-13. [Production_Architecture](Production_Architecture.md)
+11. [Agentic_Inference](Agentic_Inference.md)
+12. [GPU_Multitenancy](GPU_Multitenancy.md)
+13. [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md)
+14. [Observability_and_Debugging](Observability_and_Debugging.md)
+15. [Production_Architecture](Production_Architecture.md)
 
 ---
 
@@ -46,4 +48,4 @@ L8 covers **inference and serving systems** for large language models.
 
 Algorithmic foundations first: KV_Cache → Modern_KV_Compression → Batching_and_Scheduling → Speculative_Decoding → Prefill_Decode_Disaggregation → Long_Context_Engineering → Multimodal_Inference.
 
-Then systems: Inference_Frameworks → vLLM_Internals → Disaggregated_Serving → Kubernetes → Observability → Production_Architecture.
+Then systems: Inference_Frameworks → vLLM_Internals → Disaggregated_Serving → Agentic_Inference → GPU_Multitenancy → Kubernetes → Observability → Production_Architecture.

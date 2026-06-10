@@ -2,7 +2,7 @@
 
 > **Layer:** L5.
 > **Prerequisites:** [Attention Mechanisms](../L6_Algorithms_and_Models/Attention_Mechanisms.md), [Memory Hierarchy and Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md), [CUDA Optimization](CUDA_Optimization.md).
-> **Hands off to:** [Cutting Edge Kernels](Cutting_Edge_Kernels.md), [KV Cache](../L8_Inference_and_Serving/KV_Cache.md), [Batching and Scheduling](../L8_Inference_and_Serving/Batching_and_Serving.md).
+> **Hands off to:** [Cutting Edge Kernels](Cutting_Edge_Kernels.md), [KV Cache](../L8_Inference_and_Serving/KV_Cache.md), [Batching and Scheduling](../L8_Inference_and_Serving/Batching_and_Scheduling.md).
 
 ---
 
@@ -561,9 +561,9 @@ flowchart TD
 - [Cutting Edge Kernels](Cutting_Edge_Kernels.md) — fused kernels beyond attention (SSD, linear attention)
 - [KV Cache](../L8_Inference_and_Serving/KV_Cache.md) — paged attention and cache management
 - [Batching and Scheduling](../L8_Inference_and_Serving/Batching_and_Scheduling.md) — continuous batching with FlashDecoding
-- [Transformer Architecture](../L6_Algorithms_and_Models/Transformer_Architecture.md) — attention in the full model
+- [Transformer Architecture](../L6_Algorithms_and_Models/Transformer_Internals.md) — attention in the full model
 
 **Lateral:**
 - [GPU Architecture](../L3_Microarchitecture/GPU_Architecture.md) — SM structure, tensor cores, memory hierarchy
 - [Quantization](../L6_Algorithms_and_Models/Quantization.md) — FP8 formats and numerical properties
-- [Distributed Training](../L7_Distributed_Systems/Ring_Attention.md) — sequence-parallel attention across nodes
+- [Distributed Training](../L7_Training_Stack/Parallelism_Strategies.md) — sequence-parallel attention across nodes

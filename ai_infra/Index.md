@@ -4,7 +4,7 @@
 > Target roles: LLM inference/serving engineer, GPU kernel/CUDA engineer, distributed training/MLSys engineer.
 > Style: deep theory + proofs + worked examples + production-grade tradeoffs + 2025–2026 frontier coverage.
 >
-> **54 content pages** organized in 9 layers (L0–L8) plus interview prep. The layers follow a strict bottom-up dependency chain: silicon physics up through inference serving.
+> **57 content pages** organized in 9 layers (L0–L8) plus interview prep. The layers follow a strict bottom-up dependency chain: silicon physics up through inference serving.
 
 ---
 
@@ -43,7 +43,7 @@ Three layers of preparation are interwoven:
 10. [ISA and Execution Model](L3_Microarchitecture/ISA_and_Execution_Model.md) — PTX/SASS, warp scheduling, instruction pipeline, latency/throughput tables, divergence, SIMT vs VLIW vs spatial dataflow.
 11. [Blackwell Architecture](L3_Microarchitecture/Blackwell_Architecture.md) — B100/B200/B300/GB200/GB300 (128 SMs confirmed), NVLink-5, NVL72/NVL576, TMEM, FP4 hardware, Vera Rubin R100 announced at GTC March 2026, NVLink-6, Rubin Ultra quad-die outlook.
 12. [AMD Instinct](L3_Microarchitecture/AMD_Instinct.md) — CDNA 3/4/Next, MI300/MI350/MI400 "Altair" (432 GB HBM4, TSMC N2), Helios rack architecture, UALink, Infinity Fabric, ROCm 7 compute model, ROCm kernel optimization.
-13. [Google TPU](L3_Microarchitecture/Google_TPU.md) — TPU v4/v5p/v5e/v6e Trillium/v7 Ironwood, TPU v8 announced (~April 2026), MXU systolic array, bfloat16, ICI 3D torus, pod-scale architecture (9,216-chip Ironwood).
+13. [Google TPU](L3_Microarchitecture/Google_TPU.md) — TPU v4/v5p/v5e/v6e Trillium/v7 Ironwood, TPU 8t/8i split (Apr 2026: training vs inference silicon, 384 MB SRAM on 8i), MXU systolic array, bfloat16, ICI 3D torus, pod-scale architecture (9,216-chip Ironwood, 9,600-chip 8t superpod).
 14. [Huawei Ascend](L3_Microarchitecture/Huawei_Ascend.md) — Da Vinci architecture, Ascend 910B/910C/910D, CANN stack, cluster topology (CM-384).
 15. [Cloud ASICs](L3_Microarchitecture/Cloud_ASICs.md) — AWS Inferentia/Trainium2/Trainium3, Azure Maia, Meta MTIA v2/v3, Intel Gaudi, in-house accelerators.
 16. [Specialty Accelerators](L3_Microarchitecture/Specialty_Accelerators.md) — Cerebras WSE-3 (IPO May 2026), Groq LPU / LPU II (NVIDIA-Groq acquisition, $20B), Tenstorrent Blackhole, edge AI accelerators, FPGA AI acceleration, RAS for AI accelerators.
@@ -62,47 +62,50 @@ Three layers of preparation are interwoven:
 23. [Triton and Kernels](L5_Kernels_and_Programming/Triton_and_Kernels.md) — OpenAI Triton 3.6.0 DSL, tiling, autotuning, CUTLASS, writing a matmul, writing FlashAttention, Pallas/TPU.
 24. [FlashAttention Deep Dive](L5_Kernels_and_Programming/FlashAttention_Deep_Dive.md) — v1/v2/v3 algorithm walkthrough with tile math and pseudocode; FlashAttention-4 beta for MLA.
 25. [Cutting-Edge Kernels](L5_Kernels_and_Programming/Cutting_Edge_Kernels.md) — CUTLASS 3.x, CuTe, FlashInfer, DeepEP, TileLang, ThunderKittens, Liger Kernel v0.7.0, BitNet/bitnet.cpp 1-bit kernels; Hopper/Blackwell tile programming.
+26. [ML Compilers](L5_Kernels_and_Programming/ML_Compilers.md) — torch.compile internals (Dynamo/AOTAutograd/Inductor), guards and graph breaks, CUDA Graphs, XLA/GSPMD, MLIR ecosystem, TensorRT-LLM, autotuning, compilers in vLLM/SGLang, fusion roofline math.
 
 ## L6 — Algorithms and Models
 
-26. [Transformer Internals](L6_Algorithms_and_Models/Transformer_Internals.md) — the full forward pass, positional encodings (RoPE, ALiBi), normalization, parameter counts, JAX shard_map for distributed transforms.
-27. [Attention Mechanisms](L6_Algorithms_and_Models/Attention_Mechanisms.md) — scaled dot-product, MHA/MQA/GQA/MLA, online softmax derivation, KV cache formulas.
-28. [Modern MoE](L6_Algorithms_and_Models/Modern_MoE.md) — DeepSeekMoE, fine-grained / shared experts, aux-loss-free balancing, top-k routing, expert choice routing, DeepEP, MoE quantization, MoE inference optimizations.
-29. [State Space Models and Hybrids](L6_Algorithms_and_Models/State_Space_Models_and_Hybrids.md) — Mamba-2, RWKV-7, Jamba, Zamba, hybrid SSM-Transformer stacks; serving engineering.
-30. [Quantization](L6_Algorithms_and_Models/Quantization.md) — FP16/BF16/FP8/FP4/INT8/INT4, GPTQ, AWQ, SmoothQuant, KV cache quantization, MoE quantization, BitNet/1-bit LLMs, error bounds.
-31. [Modern Quantization Frontier](L6_Algorithms_and_Models/Modern_Quantization_Frontier.md) — MXFP4, NVFP4, NVFP4 KV cache, FP6, FP4 inference and training, TurboQuant 2-bit KV, online MXFP8, SpinQuant, Arcquant/2FP4, Transformer Engine v2.
-32. [Frontier Models 2025–2026](L6_Algorithms_and_Models/Frontier_Models_2025_2026.md) — DeepSeek V4 Pro, Llama-4 (Scout/Maverick/Muse Spark), Qwen 3/3.5/3.6, Gemma-4, GPT-5/5.5, Claude Opus 4.7, Gemini 3/3.1 Pro, Mistral Medium 3.5/Small 4/Magistral, Kimi K2.6, GLM-5.1; MLA, MTP, MoE as standard.
+27. [Transformer Internals](L6_Algorithms_and_Models/Transformer_Internals.md) — the full forward pass, positional encodings (RoPE, ALiBi), normalization, parameter counts, JAX shard_map for distributed transforms.
+28. [Attention Mechanisms](L6_Algorithms_and_Models/Attention_Mechanisms.md) — scaled dot-product, MHA/MQA/GQA/MLA, online softmax derivation, KV cache formulas.
+29. [Modern MoE](L6_Algorithms_and_Models/Modern_MoE.md) — DeepSeekMoE, fine-grained / shared experts, aux-loss-free balancing, top-k routing, expert choice routing, DeepEP, MoE quantization, MoE inference optimizations.
+30. [State Space Models and Hybrids](L6_Algorithms_and_Models/State_Space_Models_and_Hybrids.md) — Mamba-2, RWKV-7, Jamba, Zamba, hybrid SSM-Transformer stacks; serving engineering.
+31. [Quantization](L6_Algorithms_and_Models/Quantization.md) — FP16/BF16/FP8/FP4/INT8/INT4, GPTQ, AWQ, SmoothQuant, KV cache quantization, MoE quantization, BitNet/1-bit LLMs, error bounds.
+32. [Modern Quantization Frontier](L6_Algorithms_and_Models/Modern_Quantization_Frontier.md) — MXFP4, NVFP4, NVFP4 KV cache, FP6, FP4 inference and training, TurboQuant 2-bit KV, online MXFP8, SpinQuant, Arcquant/2FP4, Transformer Engine v2.
+33. [Frontier Models 2025–2026](L6_Algorithms_and_Models/Frontier_Models_2025_2026.md) — DeepSeek V4 Pro, Llama-4 (Scout/Maverick/Muse Spark), Qwen 3/3.5/3.6, Gemma-4, GPT-5/5.5, Claude Opus 4.7, Gemini 3/3.1 Pro, Mistral Medium 3.5/Small 4/Magistral, Kimi K2.6, GLM-5.1; MLA, MTP, MoE as standard.
 
 ## L7 — Training Stack
 
-33. [Parallelism Strategies](L7_Training_Stack/Parallelism_Strategies.md) — DP, TP, PP, EP, CP, SP, hybrid/3D/5D, context parallelism (PyTorch native), ring attention production, HybridEP, MTP, LatentMoE, communication-volume math.
-34. [Collectives and NCCL](L7_Training_Stack/Collectives_and_NCCL.md) — AllReduce algorithms (ring, tree, recursive halving-doubling), NCCL internals, SHARP, bandwidth modeling.
-35. [Distributed Training](L7_Training_Stack/Distributed_Training.md) — FSDP2 compile redesign, ZeRO-1/2/3, async checkpointing, fault tolerance, elastic training, DeepSpeed v0.15, Megatron Core 0.15–0.17, MoE-specific training issues.
-36. [Training Optimization](L7_Training_Stack/Training_Optimization.md) — mixed precision (AMP), activation checkpointing, gradient accumulation, Transformer Engine, GRPO production deployment, synthetic data distillation.
-37. [Modern Post-Training](L7_Training_Stack/Modern_Post_Training.md) — DPO/IPO/KTO/SimPO/ORPO, GRPO production, online RL infra, distillation from reasoning teachers.
-38. [Reasoning Models](L7_Training_Stack/Reasoning_Models.md) — o1/o3/o4-mini/R1/Qwen-3 thinking architecture, long-CoT RL, test-time compute scaling, thinking budgets.
+34. [Parallelism Strategies](L7_Training_Stack/Parallelism_Strategies.md) — DP, TP, PP, EP, CP, SP, hybrid/3D/5D, context parallelism (PyTorch native), ring attention production, HybridEP, MTP, LatentMoE, communication-volume math.
+35. [Collectives and NCCL](L7_Training_Stack/Collectives_and_NCCL.md) — AllReduce algorithms (ring, tree, recursive halving-doubling), NCCL internals, SHARP, bandwidth modeling.
+36. [Distributed Training](L7_Training_Stack/Distributed_Training.md) — FSDP2 compile redesign, ZeRO-1/2/3, async checkpointing, fault tolerance, elastic training, DeepSpeed v0.15, Megatron Core 0.15–0.17, MoE-specific training issues.
+37. [Training Optimization](L7_Training_Stack/Training_Optimization.md) — mixed precision (AMP), activation checkpointing, gradient accumulation, Transformer Engine, GRPO production deployment, synthetic data distillation.
+38. [Modern Post-Training](L7_Training_Stack/Modern_Post_Training.md) — DPO/IPO/KTO/SimPO/ORPO, GRPO production, online RL infra, distillation from reasoning teachers.
+39. [Reasoning Models](L7_Training_Stack/Reasoning_Models.md) — o1/o3/o4-mini/R1/Qwen-3 thinking architecture, long-CoT RL, test-time compute scaling, thinking budgets.
 
 ## L8 — Inference and Serving
 
-39. [KV Cache](L8_Inference_and_Serving/KV_Cache.md) — layout, memory math, PagedAttention, prefix caching, radix tree, offloading, KV cache quantization (TurboQuant 2-bit), NIXL/Mooncake transfer.
-40. [Modern KV Compression](L8_Inference_and_Serving/Modern_KV_Compression.md) — StreamingLLM, H2O, KIVI, SnapKV, Quest, MLA, TurboQuant 2-bit KV, NVFP4 KV cache.
-41. [Batching and Scheduling](L8_Inference_and_Serving/Batching_and_Scheduling.md) — continuous batching, chunked prefill, admission control, preemption.
-42. [Speculative Decoding](L8_Inference_and_Serving/Speculative_Decoding.md) — vanilla, self-speculation, Medusa, EAGLE/EAGLE-3 (with MLA), DFLASH pipelined drafting, suffix automaton decoding, adaptive speculative decoding V2, Gemma-4 MTP (multi-token prediction), acceptance rate math.
-43. [Prefill-Decode Disaggregation](L8_Inference_and_Serving/Prefill_Decode_Disaggregation.md) — motivation, architecture, transfer mechanics, NIXL transport, attention-FFN disaggregation, real benchmarks.
-44. [Long Context Engineering](L8_Inference_and_Serving/Long_Context_Engineering.md) — YaRN, LongRoPE, iRoPE, NSA, MoBA, ring attention (production), 1M–10M context.
-45. [Multimodal Inference](L8_Inference_and_Serving/Multimodal_Inference.md) — VLMs (Qwen-VL, InternVL, Llama-4 early-fusion), audio, video gen, unified models, multimodal E/P/D disaggregation.
-46. [Inference Frameworks](L8_Inference_and_Serving/Inference_Frameworks.md) — vLLM v0.21.0, SGLang v0.5.12, TensorRT-LLM v1.3.0, NVIDIA Dynamo 1.0 (replaced Triton Inference Server), llm-d CNCF Sandbox, TGI archived (March 2026), BitNet/bitnet.cpp — feature-by-feature comparison.
-47. [vLLM Internals](L8_Inference_and_Serving/vLLM_Internals.md) — V1 engine architecture, compiler-style IR layer, scheduler, V2 ModelRunner, block manager, APC, TurboQuant 2-bit KV compression, FlashAttention-4 for MLA, bi-directional disaggregated KV transfers, NIXL/MooncakeStoreConnector, thinking budgets, adaptive speculative decoding V2.
-48. [Disaggregated Serving 2025](L8_Inference_and_Serving/Disaggregated_Serving_2025.md) — Mooncake, DistServe, Splitwise, Sarathi-Serve; NVIDIA Dynamo 1.0 disaggregation, llm-d; multimodal E/P/D disaggregation, bi-directional KV transfer, MooncakeStoreConnector, NIXL, attention-FFN disaggregation, TurboQuant 2-bit in serving; cluster KV pools.
-49. [Kubernetes and Orchestration](L8_Inference_and_Serving/Kubernetes_and_Orchestration.md) — GPU operator, device plugin, MIG, topology-aware scheduling, HPA/KEDA, OME/llm-d.
-50. [Observability and Debugging](L8_Inference_and_Serving/Observability_and_Debugging.md) — TTFT/ITL/TPOT metrics, DCGM, Nsight, debugging flow for common pathologies.
-51. [Production Architecture](L8_Inference_and_Serving/Production_Architecture.md) — reference stack, capacity planning, cost modeling, failure modes.
+40. [KV Cache](L8_Inference_and_Serving/KV_Cache.md) — layout, memory math, PagedAttention, prefix caching, radix tree, offloading, KV cache quantization (TurboQuant 2-bit), NIXL/Mooncake transfer.
+41. [Modern KV Compression](L8_Inference_and_Serving/Modern_KV_Compression.md) — StreamingLLM, H2O, KIVI, SnapKV, Quest, MLA, TurboQuant 2-bit KV, NVFP4 KV cache.
+42. [Batching and Scheduling](L8_Inference_and_Serving/Batching_and_Scheduling.md) — continuous batching, chunked prefill, admission control, preemption.
+43. [Speculative Decoding](L8_Inference_and_Serving/Speculative_Decoding.md) — vanilla, self-speculation, Medusa, EAGLE/EAGLE-3 (with MLA), DFLASH pipelined drafting, suffix automaton decoding, adaptive speculative decoding V2, Gemma-4 MTP (multi-token prediction), acceptance rate math.
+44. [Prefill-Decode Disaggregation](L8_Inference_and_Serving/Prefill_Decode_Disaggregation.md) — motivation, architecture, transfer mechanics, NIXL transport, attention-FFN disaggregation, real benchmarks.
+45. [Long Context Engineering](L8_Inference_and_Serving/Long_Context_Engineering.md) — YaRN, LongRoPE, iRoPE, NSA, MoBA, ring attention (production), 1M–10M context.
+46. [Multimodal Inference](L8_Inference_and_Serving/Multimodal_Inference.md) — VLMs (Qwen-VL, InternVL, Llama-4 early-fusion), audio, video gen, unified models, multimodal E/P/D disaggregation.
+47. [Inference Frameworks](L8_Inference_and_Serving/Inference_Frameworks.md) — vLLM v0.21.0, SGLang v0.5.12, TensorRT-LLM v1.3.0, NVIDIA Dynamo 1.0 (replaced Triton Inference Server), llm-d CNCF Sandbox, TGI archived (March 2026), BitNet/bitnet.cpp — feature-by-feature comparison.
+48. [vLLM Internals](L8_Inference_and_Serving/vLLM_Internals.md) — V1 engine architecture, compiler-style IR layer, scheduler, V2 ModelRunner, block manager, APC, TurboQuant 2-bit KV compression, FlashAttention-4 for MLA, bi-directional disaggregated KV transfers, NIXL/MooncakeStoreConnector, thinking budgets, adaptive speculative decoding V2.
+49. [Disaggregated Serving 2025](L8_Inference_and_Serving/Disaggregated_Serving_2025.md) — Mooncake, DistServe, Splitwise, Sarathi-Serve; NVIDIA Dynamo 1.0 disaggregation, llm-d; multimodal E/P/D disaggregation, bi-directional KV transfer, MooncakeStoreConnector, NIXL, attention-FFN disaggregation, TurboQuant 2-bit in serving; cluster KV pools.
+50. [Kubernetes and Orchestration](L8_Inference_and_Serving/Kubernetes_and_Orchestration.md) — GPU operator, device plugin, MIG, topology-aware scheduling, HPA/KEDA, OME/llm-d.
+51. [Observability and Debugging](L8_Inference_and_Serving/Observability_and_Debugging.md) — TTFT/ITL/TPOT metrics, DCGM, Nsight, debugging flow for common pathologies.
+52. [Production Architecture](L8_Inference_and_Serving/Production_Architecture.md) — reference stack, capacity planning, cost modeling, failure modes.
+53. [Agentic Inference](L8_Inference_and_Serving/Agentic_Inference.md) — serving tool-calling/multi-turn workloads, prefix-cache economics, cache-aware routing, KV offload tiers, compressed-FSM structured output, session scheduling, task-level SLOs, TPU 8i / Rubin CPX rationale.
+54. [GPU Multi-Tenancy](L8_Inference_and_Serving/GPU_Multitenancy.md) — MIG/MPS/time-slicing/green contexts, isolation properties, interference math, K8s DRA and fractional GPUs, multi-model packing economics, confidential computing.
 
 ## Interview Prep
 
-52. [System Design Interview](interview_prep/System_Design_Interview.md) — design ChatGPT, multi-tenant inference, training cluster, RAG, agent orchestrator, eval harness.
-53. [Common Interview Questions](interview_prep/Common_Interview_Questions.md) — conceptual Q&A across all topics, updated for 2026 frontier models and hardware.
-54. [Coding Patterns](interview_prep/Coding_Patterns.md) — CUDA kernel patterns, parallel reduction, scheduler algorithms, numerical algorithms, systems C++, BitNet kernel patterns.
+55. [System Design Interview](interview_prep/System_Design_Interview.md) — design ChatGPT, multi-tenant inference, training cluster, RAG, agent orchestrator, eval harness.
+56. [Common Interview Questions](interview_prep/Common_Interview_Questions.md) — conceptual Q&A across all topics, updated for 2026 frontier models and hardware.
+57. [Coding Patterns](interview_prep/Coding_Patterns.md) — CUDA kernel patterns, parallel reduction, scheduler algorithms, numerical algorithms, systems C++, BitNet kernel patterns.
 
 ---
 
@@ -191,10 +194,10 @@ These numbers come up constantly. Burn them into memory before an interview.
 | B200 FP8 tensor TFLOPS | ~4500 | Blackwell prefill ceiling |
 | B200 FP4 tensor TFLOPS | ~9000 | NVFP4 production target |
 | B300 / Blackwell Ultra HBM | 288 GB @ 12 TB/s | 2026 sweet spot |
-| Rubin R100 (announced GTC Mar 2026) | 288 GB HBM4, ~22 TB/s, ~25 PFLOP FP8, ~50 PFLOP FP4, NVL576 domain, NVLink-6 | Next generation |
-| MI455X Altair (announced) | 432 GB HBM4, 19.6 TB/s, ~20 PFLOP FP8, ~40 PFLOP FP4, UALink 72 | AMD next-gen |
+| Rubin R100/R200 (GTC Mar 2026, volume H2 2026) | 336 B transistors, 288 GB HBM4, 22 TB/s, ~25 PFLOP FP8, 50 PFLOP NVFP4; VR200 NVL144 rack 3.3× GB300 FP4, ~190–230 kW | Next generation |
+| MI455X Altair (CES 2026, ships H2 2026) | 320 B transistors, 432 GB HBM4, 19.6 TB/s, 20 PFLOP FP8, 40 PFLOP FP4; Helios 72-GPU: 31 TB, 1.4 PB/s, 2.9 EF FP4 | AMD next-gen |
 | TPU v7 Ironwood | 192 GB HBM3e, 7.37 TB/s, 4614 FP8 TFLOPS, 9216-chip pod | Google production |
-| TPU v8 | announced ~Apr 2026, specs TBD | Google next-gen |
+| TPU 8t / 8i (Apr 2026) | 8t: 12.6 PF FP4, 216 GB, 9600-chip superpod (2 PB HBM); 8i: 10.1 PF FP4, 288 GB @ 8.6 TB/s, 384 MB SRAM | Google next-gen, GA H2 2026 |
 | Groq LPU II / 3 LPX (NVIDIA-Groq) | deterministic SRAM-only inference, $20B acquisition | Microsecond-latency inference |
 | NVLink 5 per-GPU | 1.8 TB/s | Intra-node collectives |
 | NVLink 6 per-GPU (Rubin) | ~3.6 TB/s (announced) | Next-gen intra-node |
@@ -205,22 +208,4 @@ These numbers come up constantly. Burn them into memory before an interview.
 | PCIe Gen5 x16 | 64 GB/s | Host ↔ GPU |
 | NVLink-C2C (Grace-Hopper/Blackwell) | 900 GB/s | CPU↔GPU in superchip |
 | H100 ridge point (FP16) | ~295 ops/byte | Roofline inflection |
-| Llama-3-70B KV per token (FP16, GQA) | 320 KB | 2 × 80 × 8 × 128 × 2 |
-| Llama-3-70B weights (FP16 / FP8 / INT4 / FP4) | 140 / 70 / 35 / 35 GB | Quant options |
-| DeepSeek-V4 Pro KV per token (MLA) | ~70 KB | ~8.5× smaller than dense MHA |
-| DeepSeek-V4 Pro active / total params | 37B / 671B | MoE asymmetry |
-| Llama-4 Maverick active / total | 17B / 400B | Top-1 routing |
-| Llama-4 Scout context window | 10M tokens | Extreme context target |
-| Qwen-3.6 Max Preview Intelligence Index | 52 | Top open-weights contender |
-| Kimi K2.6 Intelligence Index | 54 | Highest-ranked open-weights |
-| Typical TTFT SLO (chat) | <500 ms | Interactive UX |
-| Typical TPOT SLO (chat) | <50 ms | Smooth streaming |
-| Reasoning-mode output length (heavy) | 30K–100K tokens | KV pool sizing target |
-| GRPO sample group K | 8–64 | Per-prompt rollouts |
-| Mooncake-style cluster prefix hit rate | ~80% | Multi-replica chat workloads |
-| Cerebras WSE-3 die area | 46,225 mm² (full wafer) | Wafer-scale compute |
-| Cerebras IPO date | May 15, 2026 | Public market milestone |
-
----
-
-*Last updated: May 2026.*
+| Llama-3-70B KV per token (FP16, GQA) | 320 KB | 2

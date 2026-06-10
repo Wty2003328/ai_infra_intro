@@ -33,7 +33,7 @@ For each: parameter count, architecture highlights, training approach, key innov
 
 ## 1. DeepSeek-V4 Pro (671B total / 37B active)
 
-The latest flagship in the DeepSeek lineage and the single most influential open architectural family of 2024-2026. V4 Pro carries forward the V3 architecture (MLA, fine-grained MoE, FP8, MTP) with iterative improvements to training data quality, expert routing, and reasoning capability. Intelligence Index score: **52**. Priced at approximately **$2.17/1M tokens** (blended), making it one of the most cost-effective frontier models available. Competitive with the top open-weights models globally on standard benchmarks.
+The latest flagship in the DeepSeek lineage and the single most influential open architectural family of 2024-2026. V4 Pro carries forward the V3 architecture (MLA, fine-grained MoE, FP8, MTP) with iterative improvements to training data quality, expert routing, and reasoning capability. Intelligence Index score: **52**. MIT-licensed. In May 2026 DeepSeek made its 75% promotional discount the **permanent standard rate: $0.435/M input, $0.87/M output** — by far the cheapest frontier-class API. DeepSeek officially endorsed **SGLang** as its reference serving stack (native MTP integration: 1.8× decode speedup at batch 1 on H200).
 
 The V3 generation was trained on 14.8T tokens for approximately $5.5M in compute, demonstrating that frontier quality is achievable at a fraction of the conventional cost through aggressive co-design of architecture, MoE routing, quantization, and training infrastructure. V4 Pro builds on this foundation with refined training recipes and scaled infrastructure.
 
@@ -200,9 +200,9 @@ Released April 2025 as Meta's first native MoE model family, marking a complete 
 
 ---
 
-## 4. Qwen-3 / 3.5 / 3.6 (MoE + Dense Variants)
+## 4. Qwen-3 / 3.5 / 3.6 / 3.7 (MoE + Dense Variants)
 
-The Qwen family (developed by Alibaba) has expanded rapidly through 2025-2026, progressing from Qwen-3 through Qwen-3.5 to Qwen-3.6. The family introduces a "thinking mode" toggle: the same weights produce either direct responses or extended chain-of-thought reasoning depending on a system prompt directive. MoE is now standard across the larger variants, with the "total-A-active" notation (e.g., 397B A17B) becoming the industry norm for describing MoE models.
+The Qwen family (developed by Alibaba) has expanded rapidly through 2025-2026, progressing from Qwen-3 through Qwen-3.5/3.6 to **Qwen 3.7 Max (announced May 20, 2026 at Alibaba Cloud Summit)**, which posted benchmark wins against closed frontier models and displaced Qwen3.6 Max Preview at the top of the open-weights leaderboard. The family introduces a "thinking mode" toggle: the same weights produce either direct responses or extended chain-of-thought reasoning depending on a system prompt directive. MoE is now standard across the larger variants, with the "total-A-active" notation (e.g., 397B A17B) becoming the industry norm for describing MoE models.
 
 ### 4.1 Model variants
 
@@ -370,7 +370,8 @@ Google's Gemini-3/3.1 family (2025-2026) represents the latest generation of Goo
 
 ### 8.1 What is known
 
-- **Gemini 3.1 Pro Preview.** Current flagship. Intelligence Index score: **57**. Priced at **$4.50/1M tokens**. Supports 1M context window. Offers the **best price-performance ratio among frontier models** -- matching Claude Opus 4.7's intelligence score at less than half the cost. Native multimodal input and output (text, images, audio, video).
+- **Gemini 3.5 Flash (GA at I/O, May 2026).** Frontier-level intelligence at ~4× the speed of comparable models. $1.50/$9 per 1M tokens, 1M context, 76.2% Terminal-Bench 2.1 — beats Gemini 3.1 Pro on coding and agentic benchmarks despite being the Flash tier.
+- **Gemini 3.1 Pro Preview.** Intelligence Index score: **57**. Priced at **$4.50/1M tokens**. Supports 1M context window. Strong price-performance — matching Claude Opus 4.7's intelligence score at less than half the cost. Native multimodal input and output (text, images, audio, video).
 - **Gemini-3 Pro / Flash.** The preceding generation in the same family. Strong on long-context benchmarks, multimodal reasoning, and code. Flash variant optimized for throughput.
 - Both generations likely use MoE (pricing asymmetries and throughput characteristics consistent with MoE).
 - Google's infrastructure advantages (TPU v5p/v6 pods, massive interconnect) enable serving at context lengths (1M+) that are impractical on most GPU clusters.

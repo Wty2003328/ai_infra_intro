@@ -25,10 +25,9 @@ This page covers CDNA 3 (MI300X), CDNA 4 (MI355X), and the rack-scale Helios arc
 | CDNA 3 | MI325X | 2024 | N5 + N6 | 256 GB HBM3e | 1 000 W | Memory-capacity refresh |
 | CDNA 4 | MI350X | 2025 | TSMC N3 (XCD) + N6 base | 288 GB HBM3e | 750 W (air) | Matrix-core overhaul; FP4/FP6 support |
 | CDNA 4 | MI355X | 2025 | N3 + N6 | 288 GB HBM3e | 1 000 W (liquid) | Liquid-cooled, full FP4/FP6 throughput |
-| CDNA-Next | MI400-class (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, native UALink |
-| CDNA-Next | MI450 (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
-| CDNA-Next | MI430X (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
-| CDNA-Next | MI455X (Altair) | 2026 | TSMC N2 | 432 GB HBM4 | 1 200 W | Helios rack, UALink |
+| CDNA 5 | MI455X (Altair, flagship) | H2 2026 | TSMC N2 ×12 XCD + N3 ×3 base | 432 GB HBM4, 19.6 TB/s | ~1 200 W | 320 B transistors; 40 PF FP4 / 20 PF FP8 dense; Helios, native UALink |
+| CDNA 5 | MI450 (Altair, volume) | H2 2026 | TSMC N2 | 432 GB HBM4, 19.6 TB/s | lower envelope | Volume hyperscale SKU; same memory subsystem as MI455X |
+| CDNA 5 | MI430X (Altair, HPC) | H2 2026 | TSMC N2 | 432 GB HBM4, 19.6 TB/s | ~1 100 W | FP64-optimized for HPC / sovereign AI |
 | CDNA 4 | MI350P | 2025 | PCIe card | 144 GB HBM3E | 350 W (air) | PCIe accelerator; ~40% faster FP16/FP8 than H200 NVL |
 
 ---
@@ -301,9 +300,9 @@ flowchart TB
     classDef hbm fill:#fbcfe8,stroke:#9d174d,color:#000
 ```
 
-Confirmed Helios rack configurations: **64, 72, or 128 GPUs** per rack. The UALoE72 configuration (72 GPUs) directly matches NVIDIA's NVL72 domain size. At the 72-GPU config: ~31 TB HBM4 aggregate, ~150 kW power, ~35 PFLOPS FP4 dense × 72 = ~2 520 PFLOPS rack-scale. Fully comparable to GB300 NVL72.
+Confirmed Helios rack configurations: **64, 72, or 128 GPUs** per rack. The UALoE72 configuration (72 GPUs) directly matches NVIDIA's NVL72 domain size. Official CES 2026 numbers for the 72× MI455X config: **31 TB aggregate HBM4, 1.4 PB/s aggregate memory bandwidth, 2.9 EFLOPS FP4 dense (inference) / 1.4 EFLOPS FP8 (training)** — directly comparable to GB300 NVL72 and positioned against Vera Rubin VR200 NVL144 (which claims 3.3× GB300 FP4). Host CPUs: EPYC **"Venice"** (Zen 6), >4 600 cores per rack.
 
-**Supply chain and manufacturing:** ZT Systems ($4.9B AMD acquisition) handles rack-level engineering and system integration. Sanmina serves as NPI manufacturing partner. MI450, MI430X, MI455X (all codenamed "Altair") engineering samples on track for H2 2026.
+**Supply chain and manufacturing:** ZT Systems ($4.9B AMD acquisition) handles rack-level engineering and system integration. Sanmina serves as NPI manufacturing partner. AMD reconfirmed (Feb 2026) Helios racks and the full MI400 lineup are **on track for H2 2026**; MI500 series committed for 2027.
 
 ---
 
@@ -348,8 +347,11 @@ flowchart TD
 | MI355X FP8 | 10 100 TFLOPS | spec |
 | MI355X FP4 | 20 100 TFLOPS | spec |
 | MI355X TDP | 1 000 W (liquid) | spec |
-| MI455X HBM | 432 GB HBM4 | proj |
-| MI455X BW | 19.6 TB/s | proj |
+| MI455X HBM | 432 GB HBM4 | confirmed CES 2026 |
+| MI455X BW | 19.6 TB/s | confirmed CES 2026 |
+| MI455X FP4 / FP8 | 40 / 20 PFLOPS dense | confirmed CES 2026 |
+| MI455X transistors | 320 B (12× N2 XCD + 3× N3 base) | confirmed CES 2026 |
+| Helios 72-GPU rack | 31 TB HBM4, 1.4 PB/s, 2.9 EF FP4 / 1.4 EF FP8 | official |
 | Wavefront size | 64 (CDNA), 32 (RDNA + CDNA-3+) | SIMD lanes |
 | Infinity Cache | 256 MB chip-wide | L3-equivalent |
 | xGMI BW per GPU | ~448 GB/s | scale-up |

@@ -493,6 +493,7 @@ flowchart TD
     R --> S["1-2 ms fork overhead; parent resumes immediately"]
     R --> T["10-20% memory overhead during checkpoint window"]
     S --> U["Local NVMe write → background S3 upload"]
+```
 
 ---
 
