@@ -822,10 +822,10 @@ CoWoS-S interposer ceiling ~2 800 mm². Each HBM3e 12-Hi stack footprint ~110 mm
 - Plummer, Deal, Griffin, *Silicon VLSI Technology* — the fab-process side.
 
 **Cross-references in this vault**
-- [`digital_design/Fabrication_Process.md`](../../hardware_design/Fundamentals/Fabrication_Process.md) — wafer-flow chemistry.
-- [`digital_design/CMOS_Fundamentals.md`](../../hardware_design/Fundamentals/CMOS_Fundamentals.md) — device-level companion.
-- [`digital_design/IC_Packaging.md`](../../hardware_design/Implementation/IC_Packaging.md) — package-engineer view of the same ground.
-- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/Power/Power_Analysis_and_Signoff.md) — IR/EM signoff math.
+- [`digital_design/Fabrication_Process.md`](../../hardware_design/07_Manufacturing_and_Bringup/Fabrication_Process.md) — wafer-flow chemistry.
+- [`digital_design/CMOS_Fundamentals.md`](../../hardware_design/00_Fundamentals/CMOS_Fundamentals.md) — device-level companion.
+- [`digital_design/IC_Packaging.md`](../../hardware_design/07_Manufacturing_and_Bringup/IC_Packaging.md) — package-engineer view of the same ground.
+- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/02_Power_and_Low_Power/Power_Analysis_and_Signoff.md) — IR/EM signoff math.
 
 ---
 

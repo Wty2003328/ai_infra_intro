@@ -58,5 +58,5 @@ Strict bottom-up for depth: ISA → GPU → Roofline → Blackwell → others �
 After this layer, ascend to [L4 — Networking & Interconnects](../L4_Systems_and_Interconnects/Index.md) where chips become racks.
 
 Cross-domain references:
-- [`digital_design/CPU_Architecture.md`](../../hardware_design/Architecture/CPU_Architecture.md) — the CPU side of the SIMT/VLIW comparison.
-- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/Implementation/Synthesis_and_Optimization.md) — what synthesis sees of these microarchitectures.
+- [`digital_design/CPU_Architecture.md`](../../hardware_design/01_Architecture_and_PPA/CPU_Architecture.md) — the CPU side of the SIMT/VLIW comparison.
+- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/04_Synthesis/Synthesis_and_Optimization.md) — what synthesis sees of these microarchitectures.

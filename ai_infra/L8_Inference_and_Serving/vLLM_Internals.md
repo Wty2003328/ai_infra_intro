@@ -1130,7 +1130,7 @@ Major debugging concentrates in `engine_core.py` (scheduling decisions), `block_
 
 ---
 
-## 15. Speculative Decoding Integration
+## 15B. Speculative Decoding Integration
 
 Speculative decoding (draft-then-verify) accelerates decode throughput by having a small draft model propose $k$ candidate tokens that the target model verifies in a single batched forward pass. In vLLM, this flows through the scheduler and block manager as follows.
 

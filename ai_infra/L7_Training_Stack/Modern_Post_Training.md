@@ -718,7 +718,23 @@ The critical difference is **exploration**: GRPO's on-policy sampling explores t
 
 ---
 
-## 14. References
+## 14. Numbers to Memorize
+
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Post-training compute | **0.1–5%** of pretraining → ~90% of user-facing quality | the highest-ROI compute in the stack |
+| PPO model memory (70B, BF16) | actor 140 + ref 140 + reward 14–140 + critic 140 = **434–560 GB** | needs multi-node + TP |
+| DPO vs PPO models | **2** (policy + ref) vs **4** | DPO removes reward+critic training |
+| SimPO / ORPO models | **1** (reference-free) → saves ~140 GB on 70B | often an entire node |
+| GRPO critic | **none** — group-relative baseline replaces the value net | saves the 140 GB critic copy |
+| RL learning rate | ~**1×10⁻⁶** (≈10× lower than SFT) | stability of the policy update |
+| Rollout length T | 512–1024 tokens | RL step cost driver |
+| Reward-model accuracy by size | 7B ~0.72 → 70B ~0.87 → 3×70B ensemble ~0.91 | bigger/ensemble RMs label better |
+| KL penalty | β keeps policy near reference | prevents reward hacking / drift |
+
+---
+
+## 15. References
 
 - Ouyang et al., *Training language models to follow instructions with human feedback*, NeurIPS 2022.
 - Schulman et al., *Proximal Policy Optimization Algorithms*, arXiv 1707.06347, 2017.
@@ -731,18 +747,3 @@ The critical difference is **exploration**: GRPO's on-policy sampling explores t
 - von Werra et al., *TRL: Transformer Reinforcement Learning Library*, GitHub, 2020–2026.
 - OpenRLHF Team, *OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework*, GitHub, 2024–2026.
 - ByteDance, *veRL: Volcano Engine Reinforcement Learning for LLM*, GitHub, 2025.
-- NVIDIA, *NeMo-Aligner: Scalable Alignment of LLMs*, GitHub, 2024–2026.
-
-**GRPO infrastructure and new losses**
-- Liger Kernel Team, *Liger Kernel: Triton Kernels for LLM Training*, GitHub, 2024–2026.
-- Liger Kernel v0.7.0 Release Notes: GRPO loss, CISPO, SAPO, 2025–2026.
-- NVIDIA, *Megatron-Core GRPO: Importance Sampling and Sequence Packing*, 2025.
-
-**Synthetic data for reasoning**
-- DeepSeek-AI, *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*, arXiv 2501.12948, 2025 (synthetic data pipeline discussion).
-- Meta, *Llama 3.3 Post-Training Report*, 2025 (distillation from reasoning teachers at scale).
-
----
-
-**Up the stack:** [Reasoning_Models](Reasoning_Models.md), [Frontier_Models_2025_2026](../L6_Algorithms_and_Models/Frontier_Models_2025_2026.md).
-**Down the stack:** [Training_Optimization](Training_Optimization.md), [Transformer_Internals](../L6_Algorithms_and_Models/Transformer_Internals.md), [Distributed_Training](Distributed_Training.md).

@@ -917,19 +917,24 @@ A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM c
 
 ---
 
-## 22. Further Reading
+## 22. Numbers to Memorize
+
+| Quantity | Value | Why it matters |
+|---|---|---|
+| vLLM latency (typical) | TTFT p50 50–100 ms · TPOT p50 15–25 ms | the high-throughput baseline |
+| vLLM throughput | 3000–5000 tok/s per 8-GPU node | ~85–95% of TRT-LLM on same HW |
+| SGLang | TTFT p50 40–80 ms (RadixAttention prefix reuse) | wins when prompt reuse is high |
+| TensorRT-LLM | TTFT p50 40–70 ms (best-in-class), 10–30% lower at low batch | compiled engine, peak single-stream |
+| Chunked-prefill chunk size | default 512–4096 tokens | interleaves long prompts with decode |
+| Throughput vs latency tiers | TRT-LLM ≳ vLLM ≳ SGLang (latency) | the build-vs-interpret tradeoff |
+| Engine anatomy | scheduler + block manager + model runner + workers | the shape every framework shares |
+
+---
+
+## 23. Further Reading
 
 - Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) — the vLLM paper.
 - Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) — RadixAttention and the SGLang engine.
 - TensorRT-LLM v1.3 documentation, NVIDIA Developer — EAGLE-3, FlexKV, build pipeline, deployment guides.
 - NVIDIA Dynamo 1.0 documentation and GTC 2026 talks — disaggregated serving, KV Block Manager, Grove, Planner, AIConfigurator.
-- llm-d project repository (CNCF Sandbox) — open-source disaggregated serving stack, v0.6 performance data.
-- BitNet / bitnet.cpp (Microsoft) — 1-bit LLM inference framework, CPU and GPU kernels.
-- vLLM v0.21 release notes — HMA, TurboQuant, FlashAttention 4, vLLM IR, bi-directional KV transfer.
-- SGLang v0.5.12 release notes — Spec Decoding V2, piecewise CUDA graphs, NIXL-EP, MLX backend, SGLang-Diffusion.
-- "Deep Dive into LLM Inference Acceleration" — Anyscale, Mosaic AI, and NVIDIA technical blogs.
-
----
-
-**Next:** [vLLM_Internals](vLLM_Internals.md).
-**See also:** [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md), [Speculative_Decoding](Speculative_Decoding.md), [Production_Architecture](Production_Architecture.md), [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md).
+- llm-d project re

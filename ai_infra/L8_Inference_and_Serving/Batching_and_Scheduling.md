@@ -869,16 +869,21 @@ A: Each sequence in a spec-step produces 1--$K+1$ accepted tokens, creating a ra
 
 ---
 
-## 17. Further Reading
+## 17. Numbers to Memorize
 
-- Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022) -- origin of continuous batching.
-- Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) -- vLLM, paging, and iteration-level scheduling.
-- Holmes et al., "Sarathi-Serve: Taming Compute-Utilization and Memory-Bottlenecks in LLM Serving" (OSDI 2024) -- chunked prefill analysis and optimal chunk sizing.
-- Patel et al., "Splitwise: Efficient generative LLM inference using phase splitting" (ISCA 2024) -- prefill--decode disaggregation.
-- Wu et al., "Fast Distributed Inference Serving for Large Language Models" (MLSys 2024) -- SLO-aware scheduling.
-- Zhong et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) -- RadixAttention and scheduling with prefix caching.
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Decode arithmetic intensity | ~1 FLOP/byte vs H100 ridge 295 → **0.3% of peak** | decode is HBM-bandwidth-bound |
+| Decode step (70B FP16, 3.35 TB/s) | ~42 ms (re-read 140 GB weights) | batching adds tokens, not weight reads |
+| Continuous batching gain | B=64 in one ~67 ms step → 64 tokens, near-linear | "batching is nearly free" until KV reads dominate |
+| Static batching efficiency | only **10–40%** of peak under realistic length variance | padding + idle slots = 60–90% lost |
+| Padding waste (static) | 40–80% of FLOPs at 50–500-token output spread | the reason continuous batching exists |
+| Prefill tensor-core util | 50–70% single-seq → saturates when batched | prefill is compute-bound |
+| Chunked-prefill purpose | split long prompts → avoid TPOT spikes | bounds prefill's head-of-line blocking |
+| SLO triad | TTFT (prefill) · TPOT/ITL (decode) · throughput | independently tuned, jointly constrained |
 
 ---
 
-**Next:** [Speculative_Decoding](Speculative_Decoding.md).
-**See also:** [KV_Cache](KV_Cache.md), [vLLM_Internals](vLLM_Internals.md), [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md), [Production_Architecture](Production_Architecture.md).
+## 18. Further Reading
+
+- Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OS

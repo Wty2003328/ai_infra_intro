@@ -687,7 +687,7 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 
 ## 10. Comprehensive comparison tables
 
-### 9.1 Precision formats for training
+### 10.1 Precision formats for training
 
 | Format | Memory vs FP32 | Throughput (H100) | Loss scaling | Typical use |
 |---|---|---|---|---|
@@ -699,7 +699,7 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 | FP8 E5M2 | 0.25$\times$ | 1,979 TFLOPS | Delayed scaling | Backward-pass gradients |
 | FP4 | 0.125$\times$ | 4,500 TFLOPS (B200) | Block scaling | Blackwell inference only |
 
-### 9.2 Activation checkpointing strategies
+### 10.2 Activation checkpointing strategies
 
 | Strategy | Memory savings | Compute overhead | Saved tensors | When to use |
 |---|---|---|---|---|
@@ -709,7 +709,7 @@ The accumulated gradient is mathematically identical to the single-batch gradien
 | Optimal ($\sqrt{L}$) | $O(\sqrt{L})$ | 33% | $\sqrt{L}$ checkpoints | Deep non-Transformer nets |
 | Attention-only | 2–4$\times$ | 10% | Attention scores | Long sequences |
 
-### 9.3 Gradient compression methods
+### 10.3 Gradient compression methods
 
 | Method | Compression ratio | Biased? | Convergence guarantee | Implementation complexity |
 |---|---|---|---|---|

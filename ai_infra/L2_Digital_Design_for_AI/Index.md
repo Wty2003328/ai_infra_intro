@@ -52,7 +52,7 @@ L2 explicitly does **not** cover transistor or process physics (→ L0), HBM int
 After this layer, ascend to [L3 — Microarchitecture](../L3_Microarchitecture/Index.md) where these L2 atoms become SMs, tensor cores, ISAs, and rooflines.
 
 Cross-domain references in this vault:
-- [`digital_design/Floating_Point.md`](../../hardware_design/Fundamentals/Floating_Point.md) — IEEE-754 corner cases (NaNs, subnormals, rounding modes).
-- [`digital_design/Memory.md`](../../hardware_design/Architecture/Memory.md) — primitive memory cells.
-- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/Implementation/Synthesis_and_Optimization.md) — what synthesis does with `*` and `+=` operators.
-- [`digital_design/Formal_Verification.md`](../../hardware_design/Implementation/Formal_Verification.md) — property-based verification.
+- [`digital_design/Floating_Point.md`](../../hardware_design/00_Fundamentals/Floating_Point.md) — IEEE-754 corner cases (NaNs, subnormals, rounding modes).
+- [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) — primitive memory cells.
+- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/04_Synthesis/Synthesis_and_Optimization.md) — what synthesis does with `*` and `+=` operators.
+- [`digital_design/Formal_Verification.md`](../../hardware_design/03_Frontend_RTL_and_Verification/Formal_Verification.md) — property-based verification.

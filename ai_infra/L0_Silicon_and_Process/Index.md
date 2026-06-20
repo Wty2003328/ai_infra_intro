@@ -64,6 +64,6 @@ After this layer, ascend to [L1 — Packaging & Memory Stack](../L1_Packaging_an
 ---
 
 *Cross-domain references:*
-- [`digital_design/Fabrication_Process.md`](../../hardware_design/Fundamentals/Fabrication_Process.md) — process flow at the chemistry/etch level (deeper than this layer goes).
-- [`digital_design/CMOS_Fundamentals.md`](../../hardware_design/Fundamentals/CMOS_Fundamentals.md) — CMOS device physics primer.
-- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/Power/Power_Analysis_and_Signoff.md) — IR-droop and PDN signoff math at the chip level.
+- [`digital_design/Fabrication_Process.md`](../../hardware_design/07_Manufacturing_and_Bringup/Fabrication_Process.md) — process flow at the chemistry/etch level (deeper than this layer goes).
+- [`digital_design/CMOS_Fundamentals.md`](../../hardware_design/00_Fundamentals/CMOS_Fundamentals.md) — CMOS device physics primer.
+- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/02_Power_and_Low_Power/Power_Analysis_and_Signoff.md) — IR-droop and PDN signoff math at the chip level.

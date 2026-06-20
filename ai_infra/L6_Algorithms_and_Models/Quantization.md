@@ -656,7 +656,13 @@ With SmoothQuant: channel 0 is now magnitude $0.6$. Represented as $\lfloor 0.6/
 
 ### 9.1 Why KV cache quantization matters
 
-During autoregressive decode, the KV cache grows by $2 \cdot n_{\text{kv\_heads}} \cdot d_h$ elements per token per layer. For Llama-3-70B at $S = 128\text{K}$ context (FP16): $\approx 40$ GB of KV cache per request. Quantizing the KV cache from FP16 to INT8 halves this to 20 GB; to INT4 quarters it to 10 GB. This directly translates to more concurrent requests per GPU.
+During autoregressive decode, the KV cache grows by $2 \cdot n_{\text{kv\_heads}} \cdot d_h$ elements per token per layer. For a model with $L$ layers, $n_{\text{kv}}$ KV heads, head dim $d_h$, sequence length $S$, and $b$ bytes/element, the total is:
+
+$$
+M_{\mathrm{KV}} = 2 \cdot L \cdot n_{\text{kv}} \cdot d_h \cdot S \cdot b
+$$
+
+For Llama-3-70B ($L=80$, $n_{\text{kv}}=8$, $d_h=128$) at $S = 128\text{K}$ context in FP16 ($b=2$): $M_{\mathrm{KV}} \approx 40$ GiB per request — *more than the model weights themselves* at long context, so the KV cache is the dominant memory consumer and the primary throughput limiter. Quantizing FP16→INT8 halves this to 20 GB; →INT4 quarters it to 10 GB. This directly translates to more concurrent requests per GPU.
 
 ### 9.2 Granularity options
 
@@ -718,6 +724,37 @@ KV cache quantization requires calibration data to determine the per-token or pe
 
 For production deployment, **FP8 KV cache** is the default on H100/B200: 2x KV cache compression with negligible quality loss and native hardware support. INT4 KV cache is used only when KV cache is the dominant memory bottleneck (e.g., serving 100K+ context on a single GPU).
 
+### 9.6 Runtime support and the fused dequant path
+
+FP8 KV cache needs **no offline calibration** — the scale is computed from the activations at runtime — which is why it is a one-flag change in production engines:
+
+```
+vLLM:          --kv-cache-dtype fp8_e4m3fn
+TensorRT-LLM:  FP8 KV via the attention plugin
+```
+
+The attention kernel reads FP8 K/V, dequantizes to FP16/BF16 *inside* the flash-attention kernel for the $QK^\top$ and $PV$ dot-products, and never writes the FP16 copy back to HBM — the conversion is fused, so the 2× memory saving comes with zero extra memory traffic. INT8 needs the same fused dequant but requires calibrated per-token/per-head scales (no native FP8 tensor-core path on pre-Hopper parts is the usual reason to pick it).
+
+### 9.7 Mixed-precision KV — protect the recent window
+
+The INT4 accuracy hit falls hardest on small-magnitude "needle" keys, so production INT4 KV is rarely uniform. Keep the recent, most-attended tokens at higher precision and demote the long tail:
+
+| Token position | Precision | Rationale |
+|---|---|---|
+| Most recent ~$S/4$ tokens | FP8 | recent context is attended most; errors compound through later layers |
+| Older tokens | INT4 / FP4 | attended less often; some loss tolerable |
+
+This recovers most of the 4× saving (~3.2× effective) while holding the perplexity hit to ~0.5–1.5 points instead of 1–5.
+
+### 9.8 Orthogonality with GQA and MLA
+
+KV-cache *quantization* (fewer **bytes per element**) is orthogonal to architectural KV *compression* (fewer **elements**), so they multiply:
+
+- **GQA** already shrinks $n_{\text{kv}}$ — Llama-3-70B's 8:1 GQA is 8× smaller than full MHA; add FP8 and you get $8\times2 = 16\times$ vs FP16 MHA.
+- **MLA** (DeepSeek-V2/V3) caches a low-rank latent; quantizing that latent stacks on top of the rank reduction.
+
+Architectural compression reduces the count; quantization reduces the width; deploy both.
+
 ---
 
 ## 10. Comparison of quantization methods
@@ -734,86 +771,6 @@ For production deployment, **FP8 KV cache** is the default on H100/B200: 2x KV c
 | HQQ | 2024 | 2–4 | Per-group | No calibration needed | Data-free, half-quadratic | Zero-data scenarios |
 
 The practical deployment stack in 2026: **SmoothQuant for W8A8** (when hardware supports INT8 matmul natively), **AWQ or GPTQ for INT4 weight-only** (when memory is the bottleneck, as in LLM decode).
-
----
-
-## 10. KV Cache Quantization
-
-### 10.1 Why KV cache quantization matters
-
-During autoregressive decoding, the model must store the key and value vectors for every previously generated token so that attention can attend to the full context. For a model with $L$ layers, $n_{\mathrm{kv}}$ KV heads, head dimension $d_h$, and sequence length $S$, the KV cache size in bytes is:
-
-$$
-M_{\mathrm{KV}} = 2 \cdot L \cdot n_{\mathrm{kv}} \cdot d_h \cdot S \cdot b
-$$
-
-where $b$ is bytes per element (2 for FP16, 1 for FP8, 0.5 for INT4). For LLaMA-3-70B ($L = 80$, $n_{\mathrm{kv}} = 8$, $d_h = 128$, FP16) at $S = 128\mathrm{K}$ context:
-
-$$
-M_{\mathrm{KV}} = 2 \times 80 \times 8 \times 128 \times 131\,072 \times 2 \approx 32\;\text{GB}
-$$
-
-This exceeds the model weights themselves at long contexts. The KV cache becomes the dominant memory consumer, directly limiting maximum batch size and throughput. Quantizing the KV cache is therefore not optional for long-context serving — it is the primary lever for reducing the memory bottleneck.
-
-### 10.2 FP8 KV cache (E4M3)
-
-The E4M3 format (Section 1 of [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md)) is the natural choice for FP8 KV cache. Keys and values are stored as FP8 E4M3 with per-tensor or per-token scales.
-
-**Accuracy.** Because keys and values are consumed inside the attention softmax (which is normalizing), small quantization errors are partially absorbed. Empirical results show ~0.1% perplexity increase for FP8 KV cache on standard benchmarks — effectively negligible.
-
-**Hardware support.** FP8 KV cache is natively supported on Hopper+ GPUs (H100, B200). The attention kernel reads FP8 keys/values, dequantizes to FP16/BF16 for the dot-product, and the conversion is fused into the flash-attention kernel with zero extra memory traffic.
-
-**Implementation.** vLLM enables FP8 KV cache with:
-
-```
---kv-cache-dtype fp8_e4m3fn
-```
-
-TensorRT-LLM similarly supports FP8 KV cache through its attention plugin. No calibration is required; the scale is computed dynamically from the input activations at runtime.
-
-### 10.3 INT8 KV cache
-
-INT8 KV cache uses signed 8-bit integer representation with per-head or per-token scale factors. Unlike FP8, INT8 requires calibration to determine the appropriate scale factors:
-
-- **Per-head scales.** One scale per KV head, computed during calibration by observing the range of key/value magnitudes across representative inputs. Simpler but may be suboptimal if a single token produces extreme values.
-- **Per-token scales.** One scale per token position, stored alongside the KV cache entries. More metadata (1 extra byte per token per head) but adapts to token-level distribution shifts.
-
-INT8 KV cache is slightly less accurate than FP8 (the fixed quantization step cannot represent the dynamic range as gracefully as E4M3's floating-point exponent) but is compatible with pre-Hopper hardware that lacks native FP8 tensor-core support.
-
-### 10.4 INT4 / FP4 KV cache
-
-Aggressive 4-bit quantization of the KV cache is possible but comes with significant caveats:
-
-**Accuracy degradation.** At 4 bits, the quantization step is large enough to corrupt the attention score distribution. For attention-heavy workloads (retrieval, long-document QA, needle-in-a-haystack), INT4/FP4 KV cache can degrade accuracy by 1--5% on downstream tasks. The effect is most pronounced for "needle" tokens whose key vectors have small magnitude — these get crushed to zero or one of very few quantization levels.
-
-**Mixed-precision mitigation.** A practical strategy keeps recent tokens at higher precision and older tokens at lower precision:
-
-| Token position | Precision | Rationale |
-|---|---|---|
-| Most recent $S/4$ tokens | FP8 | Recent context is most attended-to; errors compound through subsequent layers |
-| Older tokens | INT4/FP4 | Older tokens are attended with lower frequency; some accuracy loss is tolerable |
-
-This mixed-precision KV cache retains most of the 4x memory savings while protecting accuracy at the attention "hot zone."
-
-### 10.5 Memory savings summary
-
-| KV cache format | Bytes per element | Memory vs FP16 | Typical perplexity delta |
-|---|---|---|---|
-| FP16 (baseline) | 2 | 1x | 0 |
-| FP8 E4M3 | 1 | **2x reduction** | +0.1% |
-| INT8 (calibrated) | 1 | **2x reduction** | +0.3--0.5% |
-| INT4 / FP4 | 0.5 | **4x reduction** | +1--5% (workload-dependent) |
-| INT4 mixed (recent FP8) | ~0.625 | **~3.2x reduction** | +0.5--1.5% |
-
-### 10.6 Interaction with GQA and MLA
-
-KV cache quantization is **orthogonal** to architectural compression techniques:
-
-**Grouped-Query Attention (GQA).** GQA reduces the number of KV heads $n_{\mathrm{kv}}$ by sharing each KV head across multiple query heads. For LLaMA-3-70B with GQA ratio 8:1, the KV cache is already 8x smaller than full MHA. Quantizing the already-reduced KV cache by an additional 2x (FP8) yields a **multiplicative** total reduction of $8 \times 2 = 16$x vs full MHA in FP16.
-
-**Multi-head Latent Attention (MLA).** MLA (used in DeepSeek-V2/V3) compresses the KV cache into a low-rank latent vector before caching. The latent vectors can themselves be quantized (FP8 INT4), and the compression stacks multiplicatively with MLA's inherent rank reduction.
-
-The general principle: architectural compression reduces the *number* of elements to cache; quantization reduces the *bytes per element*. The two multiply.
 
 ---
 
@@ -1025,26 +982,4 @@ The activation outlier is reduced by $10\times$ — a dramatic improvement for I
 
 With $n = 4096$ channels and one outlier at magnitude 100:
 
-**Min-max:** $\alpha = 100$. Step size $s = 200 / 255 = 0.784$. For a non-outlier channel with magnitude $\sim 1$: the signal is 1, the quantization noise is $s/\sqrt{12} = 0.226$. SQNR per non-outlier channel: $20\,\log_{10}(1 / 0.226) = 12.9$ dB — terrible.
-
-**Percentile ($p = 99.9\%$):** With 4096 channels, the 99.9th percentile excludes the top 4 channels. If the outlier is among them, $\alpha \approx 1.0$. Step size $s = 2/255 = 0.0078$. SQNR for non-outlier: $20\,\log_{10}(1 / 0.0023) = 52.8$ dB — excellent. But the outlier channels are clipped with error $\approx 99$, causing potential quality loss on those channels.
-
-**MSE-optimal:** The optimizer balances clipping error on the outlier against rounding precision everywhere else. For a distribution that is 99.98% bounded by 1 and 0.02% at 100, the optimal $\alpha$ will be in the range 2–5 (depending on the exact outlier density), yielding $s \approx 0.016$–$0.039$. SQNR for non-outlier channels: $20\,\log_{10}(1 / 0.005) \approx 46$ dB — a good compromise. The outlier is clipped but with moderate error.
-
-This is precisely the motivation for SmoothQuant: instead of choosing between bad SQNR for most channels (min-max) or clipping the outlier (percentile), migrate the outlier to the weight side where per-channel quantization handles it naturally.
-
----
-
-## 15. References
-
-- Frantar, Ashkboos, et al., *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers*, ICLR 2023.
-- Lin, Ji, et al., *AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration*, MLSys 2024.
-- Xiao, Guangxuan, et al., *SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models*, ICML 2023.
-- Nagel, Markus, et al., *A White Paper on Neural Network Quantization*, arXiv:2106.08295, 2021 — comprehensive survey of PTQ fundamentals.
-- Gholami, Amir, et al., *A Survey of Quantization Methods for Efficient Neural Network Inference*, arXiv:2103.13630, 2021.
-- Egilmez, Hakan, *Quantization Error Analysis* lecture notes, Stanford EE392M, 2022 — SQNR derivation.
-
----
-
-**Up the stack:** [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Transformer Engine, the sub-integer frontier.
-**Down the stack:** [FP_Unit_Design](../L2_Digital_Design_for_AI/FP_Unit_Design.md) — why smaller multipliers yield 2× throughput; [Transformer_Internals](Transformer_Internals.md) — the model architecture being quantized.
+**Min-max:** $\alpha = 100$. Step size $s = 200 / 255 = 0.784$. For a non-outlier channel with magnitude $\sim 1$: the signal is 1, the quantization no

@@ -446,12 +446,12 @@ Every latency spike falls into one of the six pathology categories above. The di
 
 ---
 
-## References
+## 9. Numbers to Memorize
 
-1. NVIDIA DCGM Documentation — <https://docs.nvidia.com/datacenter/dcgm/latest/>
-2. NVIDIA Nsight Systems — <https://docs.nvidia.com/nsight-systems/>
-3. NVIDIA Nsight Compute — <https://docs.nvidia.com/nsight-compute/>
-4. vLLM Prometheus Metrics — <https://docs.vllm.ai/en/latest/serving/metrics.html>
-5. NCCL Tests — <https://github.com/NVIDIA/nccl-tests>
-6. Prometheus Histogram Quantiles — <https://prometheus.io/docs/practices/histograms/>
-7. OpenTelemetry Protocol — <https://opentelemetry.io/docs/specs/otlp/>
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Prometheus scrape interval | **5 s** (not the 15 s default) | 15 s aliases sub-second preemption spikes |
+| H100 thermal-throttle point | **80 °C** → ~**18%** throughput loss (1.5/1.83 GHz) | the most common silent ITL regression |
+| DCGM GPU-util normal / alert | 70–98% / **< 50% sustained** | but "util" counts barrier spins (§2.2) |
+| Power normal / alert (H100 SXM) | 300–700 W / **> 680 W** | power-cap throttle precursor |
+| SM clock normal / throttl

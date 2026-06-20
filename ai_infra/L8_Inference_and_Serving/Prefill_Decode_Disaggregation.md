@@ -774,16 +774,15 @@ A: A research design (ISCA 2024) showing that disaggregated prefill/decode acros
 
 ---
 
-## 15. Further reading
+## 15. Numbers to Memorize
 
-- Patel et al., "Splitwise: Efficient Generative LLM Inference Using Phase Splitting" (ISCA 2024).
-- Hu et al., "DistServe: Disaggregating Prefill and Decoding for Goodput Optimization" (OSDI 2024).
-- Holmes et al., "Sarathi-Serve: Taming Compute-End Memory Utilization Imbalance" (OSDI 2024).
-- Qin et al., "Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving" (arXiv 2024).
-- NVIDIA Dynamo documentation and GTC 2025 talks on disaggregated serving.
-- llm-d open-source project documentation (Meta/Github).
-
----
-
-**Next:** [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md).
-**See also:** [Batching_and_Scheduling](Batching_and_Scheduling.md), [KV_Cache](KV_Cache.md), [Speculative_Decoding](Speculative_Decoding.md), [Rack_Scale_Design](../L4_Systems_and_Interconnects/Rack_Scale_Design.md), [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md).
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Decode arithmetic intensity | ~1 FLOP/byte — ~2 orders below ridge | decode is memory-bound; prefill is compute-bound |
+| Coupled step (4K prefill + B=64 decode) | prefill ~30 ms vs decode ~5 ms alone | the prefill stalls every decode in the step |
+| Disaggregated decode TPOT | ~5 ms (isolated) vs ~30 ms coupled | ~**6×** smoother streaming — the core win |
+| Pool hardware split | prefill on compute-rich (H100), decode on BW-rich (H200) | match silicon to each phase's bottleneck |
+| Example pool ratio | 3 prefill (4×H100, TP4) : 3 decode (2×H200, TP2) | sized to traffic, not 1:1 |
+| KV transfer payload | full per-layer K,V for the prompt, prefill→decode | the price of disaggregation |
+| KV transfer medium | NVLink (intra-node) / IB or RDMA (cross-node) | transfer time must hide under first decode |
+| When it helps | high prefill:decode 

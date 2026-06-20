@@ -564,8 +564,8 @@ The full working set doesn't fit, but *transient* working sets do: FlashAttentio
 - Triton compiler source — `padding` autotuner heuristics.
 
 **Cross-references**
-- [`digital_design/Memory.md`](../../hardware_design/Architecture/Memory.md) — primitive memory cells.
-- [`digital_design/Physical_Design.md`](../../hardware_design/Implementation/Physical_Design.md) — SRAM macro placement.
+- [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) — primitive memory cells.
+- [`digital_design/Physical_Design.md`](../../hardware_design/05_Backend_Physical_Design/Physical_Design.md) — SRAM macro placement.
 
 ---
 

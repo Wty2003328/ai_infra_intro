@@ -835,7 +835,7 @@ __global__ void matmul(const float * __restrict__ A,
 
 A production matmul (cuBLAS / CUTLASS) achieves ~900 TFLOPS on H100 vs ~2 TFLOPS for the above naive tiled kernel — a 450x gap. Closing this gap is the subject of [CUDA_Optimization](CUDA_Optimization.md) and [Triton_and_Kernels](Triton_and_Kernels.md).
 
-### 9.5 Hopper Warp-Specialized Programming
+### 10.3 Hopper Warp-Specialized Programming
 
 The Hopper architecture (SM90) introduces a fundamentally different kernel execution model where warp groups take on specialized producer and consumer roles, coordinated by hardware-accelerated barrier objects and asynchronous memory copies. CUTLASS 3.x kernels use this pattern exclusively. Understanding it is essential for reasoning about Hopper-era tensor-core performance.
 

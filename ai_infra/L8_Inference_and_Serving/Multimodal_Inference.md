@@ -532,20 +532,18 @@ Production deployments often tier GPU pools by KV cache budget. Short-context te
 
 ---
 
-## 11. Further Reading
+## 11. Numbers to Memorize
 
-- Liu et al., "Visual Instruction Tuning" (LLaVA, 2023).
-- Wang et al., "Qwen2-VL: Enhancing Vision-Language Model's Perception of the World at Any Resolution" (2024).
-- Chen et al., "InternVL 2.5 / 3" technical reports (Shanghai AI Lab, 2024--2025).
-- Meta, "Llama-4" model card and technical report (2025).
-- Radford et al., "Robust Speech Recognition via Large-Scale Weak Supervision" (Whisper, 2022).
-- Defossez et al., "High Fidelity Neural Audio Compression" (Encodec, 2022).
-- Defossez et al., "Moshi: a speech-text foundation model for real-time dialogue" (Kyutai, 2024).
-- Brooks et al., "Video Generation Models as World Simulators" (Sora, OpenAI, 2024).
-- Chen et al., "Janus-Pro: Unified Multimodal Understanding and Generation" (DeepSeek, 2025).
-- Fang et al., "xDiT: Distributed Diffusion Transformer Inference" (2025).
-
----
-
-**Next:** [Inference_Frameworks](Inference_Frameworks.md).
-**See also:** [KV_Cache](KV_Cache.md), [Long_Context_Engineering](Long_Context_Engineering.md), [Batching_and_Scheduling](Batching_and_Scheduling.md), [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md).
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Image tokens (Qwen2-VL, p=14) | 336²→576, 1024²→5329, 4K→21094 | one HD image ≫ most text prompts |
+| KV per 1080p image | ~167 MB FP16 (32 layers, D=4096); batch-8 ≈ 2 GB | image KV alone before any text |
+| ViT encode (SigLIP-400M, 1024²) | ~733 GFLOP ≈ 5 ms on H100 | encoder is **rarely** the bottleneck |
+| Audio token rate (RVQ) | 12.5 Hz × 8 codebooks = **100 tok/s**; 5 min ≈ 30K | audio context grows fast |
+| Voice-agent turn-latency target | **< 500 ms**; audio chunk 50–80 ms | pipeline budget is tight |
+| Audio-LLM (Moshi/4o-voice) collapse | 3 stages → 1 → **~200–300 ms** | removes ASR+TTS hops |
+| Diffusion step cost | **1 full forward / step**; 50 (image), 40–200 (video) | step count = latency |
+| Few-step distillation (LCM/DMD) | 50 → **1–4 steps** (10–50×) | the dominant gen speedup |
+| 1-hour video (1 fps, 128 tok/frame) | ~**461K tokens** | cap concurrent video sessions |
+| Prefill/decode ratio | text ~30/70; **VLM 5–25× (B=1), ~3× (B=8)** | why chunked prefill is mandatory |
+| VLM prefill thr

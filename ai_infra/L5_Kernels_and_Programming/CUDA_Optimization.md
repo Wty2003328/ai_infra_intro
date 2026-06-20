@@ -488,7 +488,7 @@ The extra stage means Blackwell kernels benefit from triple or quad buffering (v
 
 ## 8. Async copy — cp.async and TMA
 
-### 7.1 cp.async (Ampere+)
+### 8.1 cp.async (Ampere+)
 
 The `cp.async` instruction copies data from global memory to shared memory without going through registers. The thread issues the copy and can overlap with compute.
 
@@ -509,7 +509,7 @@ asm volatile("cp.async.wait_group %0;\n" :: "n"(0));
 
 `cp.async` bypasses the register file entirely, freeing registers for tiling. Each thread can issue a 4, 8, or 16-byte copy. A warp collectively copies $32 \times 16 = 512$ bytes per instruction — one 128-byte cache line per quadrant of the warp.
 
-### 7.2 TMA (Hopper+)
+### 8.2 TMA (Hopper+)
 
 The **Tensor Memory Accelerator** (TMA) is a hardware unit in the SM that handles multi-dimensional tile descriptors. Instead of each thread computing its own address, a single thread programs a TMA descriptor with the source tensor's dimensions, strides, and the desired sub-tile. The TMA engine then DMAs the entire tile into SMEM autonomously.
 
@@ -541,7 +541,7 @@ TMA advantages:
 
 ---
 
-## 8. Double buffering and software pipelining
+## 8B. Double buffering and software pipelining
 
 ### 8.1 The overlap principle
 

@@ -625,23 +625,25 @@ Alert if effective TPOT exceeds baseline for more than a few minutes. This indic
 
 ---
 
-## 14. Further Reading
+## 14. Numbers to Memorize
 
-- Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (ICML 2023).
-- Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (arXiv 2023).
-- Cai et al., "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads" (ICML 2024).
-- Li et al., "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty" (ICML 2024).
-- Li et al., "EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees" (arXiv 2024).
-- Fu et al., "Break the Sequential Dependency of LLM Inference Using Lookahead Decoding" (arXiv 2024).
-- DeepSeek-AI, "DeepSeek-V3 Technical Report" (arXiv 2024) --- multi-token prediction.
-- Spectral et al., "Prompt Lookup Decoding" (blog, 2024).
-- SGLang v0.5.12 release notes --- DFLASH speculative decoding (2025).
-- NVIDIA TensorRT-LLM v1.3.0 release notes --- DFLASH and suffix automaton speculative decoding (2025).
-- Google DeepMind, "Gemma 4 Technical Report" (2025) --- native multi-token prediction heads.
-- Moonshot AI, "Kimi K2.5 Technical Report" (2025) --- EAGLE-3 with Multi-head Latent Attention.
-- vLLM documentation --- Adaptive Speculative Decoding V2 (2025).
+| Quantity | Value | Why it matters |
+|---|---|---|
+| Why it works (Llama-3-70B, H100) | 1-token compute 0.14 ms vs **42 ms** memory read | decode is memory-bound — free compute headroom |
+| Verify γ tokens vs 1 | ~42.7 ms vs 42.1 ms (**<2%**) for up to **γ+1** tokens | the whole premise |
+| Expected tokens/step | $(1-\alpha^{\gamma+1})/(1-\alpha)$ | the acceptance-rate speedup law |
+| Output per verify step | **1 … γ+1** tokens (≥1 guaranteed by bonus/correction) | never slower than baseline in tokens |
+| Typical draft length γ | 4–5 | longer γ helps only if α is high |
+| Medusa | ~5% extra params, 1K–5K steps, α 0.70–0.85 → 2.0–2.8× | cheap heads, approximate |
+| EAGLE | ~2% extra params, 1K–3K steps, feature-level draft | higher α than Medusa |
+| Same-family draft model | α 0.65–0.80 → **2.0–3.0×** on chat | needs a small sibling model |
+| Acceptance-rate floor to win | α high enough that accepted > draft+verify overhead | low α can be *slower* than baseline |
+| Where it fails | structured/grammar tasks if draft ignores the FSM → α≈0 | share the grammar between draft & verify |
 
 ---
 
-**Next:** [Inference_Frameworks](Inference_Frameworks.md).
-**See also:** [Batching_and_Scheduling](Batching_and_Scheduling.md), [KV_Cache](KV_Cache.md), [Production_Architecture](Production_Architecture.md).
+## 15. Further Reading
+
+- Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (ICML 2023).
+- Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (arXiv 2023).
+- Cai et al., "Medusa: S

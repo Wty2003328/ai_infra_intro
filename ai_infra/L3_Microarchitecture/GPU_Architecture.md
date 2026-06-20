@@ -453,11 +453,11 @@ To scale beyond a single reticle limit, NVIDIA uses extremely dense point-to-poi
 | NVLink | 4 (900 GB/s/GPU) | 5 (1.8 TB/s/GPU) |
 | Domain | NVL8/NVL256 | NVL72 / NVL576 |
 
-### 4.2 NV-HBI mesochronous bridge
+### 5.2 NV-HBI mesochronous bridge
 
 Two compute dies bridged via 10 TB/s die-to-die link. CUDA presents them as one GPU; cache-coherent at L2. Cross-die access penalty: 2–4 cycles + ~50 cycles (NoC traversal on remote die). Negligible for HBM accesses (already 400 cycles), modest for L2 accesses.
 
-### 4.3 TMEM (covered fully in Blackwell page)
+### 5.3 TMEM (covered fully in Blackwell page)
 
 256 KB dedicated tensor-operand SRAM per SM, separating wgmma traffic from general SMEM. Required because FP4 demand on operand bandwidth exceeds SMEM port budget.
 

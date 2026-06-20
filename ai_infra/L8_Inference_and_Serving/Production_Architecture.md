@@ -705,14 +705,14 @@ A: (1) Edge rate limiting: per-tenant tokens/min cap, 429 on excess. (2) Router:
 
 ---
 
-## 15. Further Reading
+## 15. Numbers to Memorize
 
-- **Production systems**: vLLM deployment guide, NVIDIA NIM docs, KServe case studies.
-- **Disaggregated serving**: Mooncake (2024), Splitwise (ISCA 2024), DistServe (OSDI 2024), Sarathi-Serve (OSDI 2024).
-- **SRE**: "Site Reliability Engineering" (Google), "Designing Data-Intensive Applications" (Kleppmann).
-- **LLM serving**: "Efficient Inference for LLMs" survey (2024), SemiAnalysis GPU pricing reports.
-
----
-
-**Next:** [Index](../Index.md).
-**See also:** [Inference_Frameworks](Inference_Frameworks.md), [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md), [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md), [Observability_and_Debugging](Observability_and_Debugging.md), [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md).
+| Quantity | Value | Why it matters |
+|---|---|---|
+| TTFT budget breakdown | net 20–80 + TLS/auth 5–10 + router 25–50 + queue 20–80 + prefill 100–300 + 1st decode 30–60 | sums to **200–580 ms** (<1 s target) |
+| Decode throughput (70B FP8, H100) | ~2.4K tok/s TP=1 → ~18K TP=8 (theoretical) | real 1.2–1.8K/GPU with KV pressure |
+| Achievable HBM bandwidth | 70–80% of peak | derate every roofline estimate |
+| KV size (70B FP8) | ~160 KB/token; TP=8 (640 GB) → ~3.5M tokens | why paging/compression/disagg are mandatory |
+| RPS per replica | 70B FP8 TP=8, 12K tok/s, 200-tok output → **60 RPS** | the capacity-planning unit |
+| Fleet sizing example | 10K RPS → 167 replicas → **1,336 H100s** | translate demand to hardware |
+| Bytes/param by forma
