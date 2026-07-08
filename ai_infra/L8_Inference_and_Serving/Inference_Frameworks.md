@@ -26,6 +26,7 @@ This page covers eight production-grade frameworks and the architectural pattern
 Every serious framework has the same layered architecture, differing only in implementation language, kernel provenance, and scheduling sophistication.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     A["Frontend<br/>HTTP / gRPC / OpenAI API"] --> B["Tokenizer"]
     B --> C["Scheduler / Engine Core"]
@@ -60,12 +61,13 @@ Frameworks differ in (a) which kernels they ship versus import, (b) how the sche
 
 All frameworks execute the same logical loop, one GPU forward pass at a time:
 
-```
-while running:
-    runnable  = scheduler.next_step()
-    inputs    = build_packed_inputs(runnable)
-    logits    = model.forward(inputs)
-    samples   = sampler(logits, per_seq_params)
+```text
+WHILE running:
+    runnable = scheduler.next_step()
+    inputs   = build_packed_inputs(runnable)
+    logits   = model.forward(inputs)
+    samples  = sampler(logits, per_seq_params)
+    
     scheduler.update(runnable, samples)
     emit_streaming_tokens(samples)
 ```
@@ -91,6 +93,7 @@ vLLM originated PagedAttention (SOSP 2023) and has become the de facto open-sour
 ### 4.2 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "vLLM V1 Engine"
         API["OpenAI-compatible API<br/>(FastAPI + asyncio)"]
@@ -161,6 +164,7 @@ SGLang (NeurIPS 2024) originated from the RadixAttention idea — a token-granul
 The scheduler is implemented in Rust for low overhead. The model runner uses PyTorch with custom CUDA kernels. The KV cache manager maintains a **radix tree** over token sequences rather than a flat hash table.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "SGLang Engine"
         HTTP["HTTP Frontend"]
@@ -231,6 +235,7 @@ TensorRT-LLM is NVIDIA's hand-tuned C++ inference engine, built on the TensorRT 
 TRT-LLM does not interpret a model — it **compiles** it. Each combination of model architecture, tensor parallelism degree, precision, and maximum sequence length is built into a binary "engine" file. This engine is a fused, kernel-scheduled computation graph.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     HF["HuggingFace<br/>Model Weights"] --> Build["TRT-LLM<br/>Build Pipeline"]
     Config["Config:<br/>TP, precision,<br/>max_seq_len"] --> Build
@@ -263,6 +268,7 @@ graph TD
 The compile step is TRT-LLM's greatest strength and its greatest operational burden:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     A["Model weights + config"] --> B["Weight quantization<br/>(FP8, INT8, INT4)"]
     B --> C["Graph construction<br/>(all layers, attention, sampling)"]
@@ -306,6 +312,7 @@ NVIDIA Dynamo 1.0 (released March 15, 2026) is the **successor to Triton Inferen
 ### 7.2 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "Dynamo 1.0 Cluster"
         Router["Frontend Router<br/>(prefix-aware, SLA-driven)"]
@@ -619,7 +626,8 @@ The SGLang advantage concentrates in workloads with complex prefix reuse pattern
 TRT-LLM does not interpret a model at runtime. It compiles the full inference graph into an optimized binary engine before deployment. The pipeline:
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     A["HuggingFace<br/>safetensors"] --> B["Weight<br/>quantization"]
     B --> C["ONNX export<br/>(per-layer graph)"]
     C --> D["TensorRT graph<br/>optimization"]
@@ -777,6 +785,7 @@ When comparing frameworks, control for:
 Most engines run as a single process per inference replica with a worker per GPU shard:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     Engine["Engine Process (scheduler + frontend)"]:::engine
     W0["Worker[0] (GPU 0, shard 0 of TP)"]:::worker

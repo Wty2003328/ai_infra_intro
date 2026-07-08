@@ -159,6 +159,7 @@ FP8 replaces the integer grid with a **floating-point** grid at 8 bits, retainin
 PTQ quantizes a *fully trained* model without retraining. The pipeline:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     FP32["FP32/BF16 model"] --> CAL["Calibration<br/>(run N samples)"]
     CAL --> STATS["Collect tensor statistics<br/>xmin, xmax per tensor/channel/group"]
@@ -406,12 +407,12 @@ $$
 
 where $L_{qq}$ is the diagonal of the lower-triangular Cholesky factor. This is a forward-substitution — $O(j)$ per update instead of $O(j^2)$ for explicit $H^{-1}$ indexing. The total algorithm:
 
-```
+```text
 Input: W (n x d), L = Cholesky(H_inv), group_size G
 For each block of G columns (q = 0, 1, ...):
     Quantize: w_q = quantize(W[:, q])
-    Error: delta = (W[:, q] - w_q) / L[q,q]
-    Update: W[:, q+1:] -= outer(delta, L[q, q+1:])
+    Error:    delta = (W[:, q] - w_q) / L[q,q]
+    Update:   W[:, q+1:] -= outer(delta, L[q, q+1:])
 ```
 
 Complexity: $O(d^2 \cdot n / G)$ — linear in $d$ per column, with the Cholesky as a one-time $O(d^3)$ cost amortized over all rows $n$.
@@ -728,7 +729,7 @@ For production deployment, **FP8 KV cache** is the default on H100/B200: 2x KV c
 
 FP8 KV cache needs **no offline calibration** — the scale is computed from the activations at runtime — which is why it is a one-flag change in production engines:
 
-```
+```bash
 vLLM:          --kv-cache-dtype fp8_e4m3fn
 TensorRT-LLM:  FP8 KV via the attention plugin
 ```
@@ -777,6 +778,7 @@ The practical deployment stack in 2026: **SmoothQuant for W8A8** (when hardware 
 ## 11. End-to-end cause and effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     FP32["FP32/BF16 trained model"] --> QCHOICE{"Quantization target"}
     QCHOICE -->|"W8A8<br/>(full INT8)"| SQ["SmoothQuant<br/>Smooth activations → W8 + A8"]

@@ -41,6 +41,7 @@ Where $\bigoplus$ denotes the reduction operator (sum, max, min). In training, s
 The five primitives decompose and compose:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Primitives["Collective Operations"]
         BCAST[Broadcast<br/>1 → N]:::op
@@ -107,16 +108,16 @@ Four GPUs each hold a buffer of 4 elements. The goal: sum all corresponding elem
 
 **Initial state:**
 
-```
-GPU 0: [a0, a1, a2, a3]    GPU 1: [b0, b1, b2, b3]
-GPU 2: [c0, c1, c2, c3]    GPU 3: [d0, d1, d2, d3]
+```text
+GPU 0: [ a0, a1, a2, a3 ]    GPU 1: [ b0, b1, b2, b3 ]
+GPU 2: [ c0, c1, c2, c3 ]    GPU 3: [ d0, d1, d2, d3 ]
 ```
 
 **Phase 1: Reduce-Scatter (3 steps)**
 
 Step 1 — each GPU sends chunk (i-0) mod 4 to GPU (i+1) mod 4, and accumulates received data:
 
-```
+```ascii-graph
 GPU 0 sends chunk 0 [a0] → GPU 1     GPU 0 receives [d3] from GPU 3, accumulates into chunk 3
 GPU 1 sends chunk 1 [b1] → GPU 2     GPU 1 receives [a0] from GPU 0, accumulates into chunk 0
 GPU 2 sends chunk 2 [c2] → GPU 3     GPU 2 receives [b1] from GPU 1, accumulates into chunk 1
@@ -129,7 +130,7 @@ GPU 2: [c0, b1+c1, c2, c3]    GPU 3: [d0, d1, c2+d2, d3]
 
 Step 2 — each GPU sends the accumulated chunk from step 1:
 
-```
+```ascii-graph
 GPU 0 sends chunk 3 [a2+d3] → GPU 1     GPU 0 receives [b1+c1] from GPU 3 into chunk 1
 GPU 1 sends chunk 0 [a0+b0] → GPU 2     GPU 1 receives [a2+d3] from GPU 0 into chunk 3
 GPU 2 sends chunk 1 [b1+c1] → GPU 3     GPU 2 receives [a0+b0] from GPU 1 into chunk 0
@@ -144,7 +145,7 @@ GPU 3: [d0, b1+c1+d1, c2+d2, d3]
 
 Step 3 — each GPU sends the accumulated chunk from step 2:
 
-```
+```ascii-graph
 GPU 0 sends chunk 2 [a2] → GPU 1         GPU 0 receives [c2+d2] from GPU 3 into chunk 2
 GPU 1 sends chunk 3 [b2+d2+d3] → GPU 2   GPU 1 receives [a2] from GPU 0 into chunk 2
 GPU 2 sends chunk 0 [a0+b0+c0] → GPU 3   GPU 2 receives [b2+d2+d3] from GPU 1 into chunk 3
@@ -170,6 +171,7 @@ After step 6, all GPUs hold $[a0{+}b0{+}c0{+}d0, \; a1{+}b1{+}c1{+}d1, \; a2{+}b
 **Total data transferred per GPU:** 3 sends × 1 element + 3 sends × 1 element = 6 elements = $2(N-1) \times M/N = 2 \times 3 \times 1 = 6$ elements. For $M$ bytes total data: $\frac{2(N-1)}{N} \times M = \frac{6}{4} \times 4 = 6$ elements per GPU.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph RS["Reduce-Scatter Phase (N−1 steps)"]
         direction TB
@@ -291,6 +293,7 @@ When `ncclCommInitRank()` is called, NCCL performs three phases:
 **Phase 3: Channel allocation.** Each ring is assigned a set of *channels*. A channel is a unit of parallelism — it corresponds to one GPU thread block managing one DMA engine. More channels means more parallel transfers but more memory for buffers. NCCL auto-tunes the channel count.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Init["NCCL Initialization"]
         TP[Topology Probe<br/>nvml, cudaGetDeviceProperties]:::phase
@@ -377,6 +380,7 @@ Collective operations operate in one of two regimes:
 **Bandwidth-bound** ($M \gg M^*$): The cost is dominated by data volume. Optimization strategy: maximize usable bandwidth by using multiple rings, channels, and in-network reduction.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Decision["Algorithm Selection"]
         SIZE{Message size M}:::q
@@ -484,6 +488,7 @@ $$\text{Reduction ratio} = \frac{V_{\text{ring, per GPU}}}{V_{\text{SHARP, per G
 For $N = 32$: ratio $= 2 \times 31^2 / 33 \approx 58$. SHARP reduces network traffic by ~58× for 32 ranks.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Without_SHARP["Without SHARP (Ring AllReduce)"]
         direction TB

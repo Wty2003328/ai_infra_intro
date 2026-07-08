@@ -72,6 +72,7 @@ Mooncake (Qin et al., 2024) extended disaggregation from a per-node or per-rack 
 ## 2. Comparison of Approaches
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Splitwise["Splitwise (ISCA 2024)"]
         direction TB
@@ -312,6 +313,7 @@ NIXL selects the optimal transport at runtime based on source/destination topolo
 Naive transfer waits for all layers to complete prefill before beginning the transfer. Layer pipelining overlaps transfer with compute:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title Layer-pipelined KV transfer (4-layer example)
     dateFormat X
@@ -468,6 +470,7 @@ Below ~8 GPUs, the operational overhead (routing, monitoring, pool management) e
 ### 7.3 Hardware Assignment Decision
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START["What is the P:D GPU ratio?"]:::q
     START -->|"P >> D<br/>(chat, RAG)"| CHAT["Use B200 for prefill<br/>(high FLOPS), H100 for decode"]:::ans
@@ -548,6 +551,7 @@ TPOT is determined purely by the decode pool: $t_d = \bar{Q}_d / (\eta_d \cdot \
 ## 10. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Long-output reasoning workload<br/>S_d = 50K tokens"] --> B["Decode phase dominates<br/>cluster time"]
     B --> C["Decode pool GPU count<br/>10--20x prefill pool"]

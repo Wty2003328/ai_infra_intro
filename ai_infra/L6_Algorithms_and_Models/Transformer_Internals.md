@@ -27,6 +27,7 @@ A decoder-only transformer maps a sequence of integer token IDs to a probability
 $$\text{logits}[b, s, :] = \text{Unembed}\!\left(\text{TransformerBlocks}\!\left(\text{Embed}(\text{token\_ids}[b, s])\right)\right)$$
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     TOK["token_ids [B, S]"] --> EMB["Embedding lookup + positional encoding"]
     EMB --> H0["hidden [B, S, D]"]
@@ -39,7 +40,7 @@ flowchart TD
     subgraph BLK["Transformer Block (repeated L times)"]
         direction TB
         X0["x"] --> N1["RMSNorm"]
-        N1 --> ATT["Multi-Head Attention (QKV, RoPE, Scaled Dot-Product, Output Proj.)"]
+        N1 --> ATT["Multi-Head Attention (QKV, RoPE, Scaled Dot-Product,<br/>Output Proj.)"]
         ATT --> R1["x = x + attn_out"]
         R1 --> N2["RMSNorm"]
         N2 --> FFN["SwiGLU FFN (gate, up, SiLU, down)"]
@@ -738,6 +739,7 @@ For Llama-3-70B training at $S = 8192$: without checkpointing, activations consu
 ## 11. End-to-End Cause/Effect Flow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph INPUT["Input Processing"]
         TOK["Token IDs [B,S]"] --> EMB["Embedding Gather [B,S,D]"]

@@ -44,6 +44,7 @@ where $N_{out}$ is the number of output tokens and $T_{queue}$ is the admission-
 ### 1.3 Prefill vs Decode Breakdown
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     REQ["Request arrives"]:::t0
     QUEUE["Queue wait"]:::t1
@@ -136,7 +137,7 @@ vLLM exposes `/metrics` with these key signals:
 
 ### 3.2 Histogram Quantile Queries
 
-```promql
+```text
 # P99 TTFT over 5 minutes
 histogram_quantile(0.99,
   sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le, instance))
@@ -161,6 +162,7 @@ When cache usage exceeds 90%, preemptions begin. Monitor `vllm:gpu_cache_usage_p
 Nsight Systems (`nsys`) provides a system-wide timeline showing kernel launches, memory copies, and API calls. It answers: *where does the time go?*
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph NSYS["Nsight Systems Timeline"]
         direction TB
@@ -228,6 +230,7 @@ For decode-step GEMM on H100 SXM with Llama-3-70B FP16, arithmetic intensity = 1
 ### 5.1 Debugging Flow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     SYM["Symptom observed"]:::s0
     SYM --> CHECK{"Which metric<br/>is elevated?"}
@@ -326,6 +329,7 @@ flowchart TD
 ### 6.1 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph INFERENCE["Inference Cluster"]
         VLLM["vLLM instances<br/>/metrics"]:::app
@@ -360,6 +364,7 @@ The 5-second scrape interval is critical: LLM scheduling operates at sub-second 
 ### 6.3 Distributed Tracing
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant LB as Load Balancer
@@ -412,6 +417,7 @@ vLLM logs contain structured patterns for debugging:
 ## 8. Summary
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph METRICS["Metrics Layer"]
         TTFT["TTFT / TPOT"]

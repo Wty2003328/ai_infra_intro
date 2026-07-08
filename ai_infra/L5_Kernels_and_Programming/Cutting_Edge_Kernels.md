@@ -17,6 +17,7 @@ The gap between "what the hardware can do" and "what software extracts" has narr
 Every GPU kernel written in 2025-2026 lives somewhere on the abstraction hierarchy below. The choice determines development time, portability, and how close the result gets to theoretical peak.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph STACK["Kernel Abstraction Hierarchy"]
         direction TB
@@ -186,6 +187,7 @@ The CuTe type system is entirely compile-time (C++ template metaprogramming). Th
 A CUTLASS 3.x GEMM kernel assembles from five templated components:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph CUTLASS_GEMM["CUTLASS 3.x GEMM Pipeline"]
         SCHED["Scheduler<br/>assigns CTA tiles"]
@@ -252,6 +254,7 @@ The pipeline has 2-4 stages. Stage $k+1$ loads while stage $k$ computes. With TM
 CUTLASS 3.x on Hopper uses warp specialization: within a threadblock, one warp group (4 warps, 128 threads) acts as the **producer** (issues TMA loads), and one or more warp groups act as **consumers** (issue wgmma, accumulate, run epilogue).
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant P as Producer Warp Group
     participant B as Shared Memory Barrier
@@ -273,7 +276,7 @@ This decouples load latency from compute throughput. The producer can prefetch s
 
 The epilogue is where post-matmul operations get fused into the kernel, avoiding extra HBM round-trips:
 
-```cpp
+```text
 // Built-in epilogue operations in CUTLASS 3.x
 using Epilogue = cutlass::epilogue::collective::Sm90TmaWarpSpecialized<
     // Output tile: accumulate then apply
@@ -351,6 +354,7 @@ FlashInfer (Yu et al., 2024-2025, CMU) is the dominant attention-kernel library 
 ### 5.1 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph FlashInfer["FlashInfer Architecture"]
         PREFILL["Prefill Kernels<br/>chunked, batched"]
@@ -443,6 +447,7 @@ FlashAttention 4 (Tri Dao lab, 2026) is the next major version of the canonical 
 FA4 introduces a **2CTA (2 Cooperative Thread Array)** optimization where two CTAs collaborate on a single attention tile, effectively doubling the per-tile compute budget. This is critical on Blackwell where TMEM and larger shared memory allow bigger working sets:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph FA4["FlashAttention 4 Pipeline"]
         CTA0["CTA 0<br/>TMA load Q/K/V tile<br/>wgmma QK^T"]
@@ -486,6 +491,7 @@ Standard NCCL all-to-all is optimized for uniform message sizes. MoE routing pro
 ### 7.2 DeepEP design
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph FWD["MoE Forward Pass"]
         GATE["Gating Network<br/>top-K expert selection"]
@@ -521,7 +527,7 @@ DeepSeek reports 5-10x speedup over NCCL all-to-all for typical MoE shapes (e.g.
 
 DeepEP plugs into Megatron-LM, vLLM, and SGLang as a selectable all-to-all backend:
 
-```python
+```yaml
 # vLLM config
 moe_all_to_all_backend: deepep   # or nccl, mscclpp
 ```
@@ -948,6 +954,7 @@ BitNet kernels are not a drop-in replacement for standard quantized kernels: the
 The attention kernel landscape has fragmented into specialized variants for different model architectures and serving scenarios:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph ATTN["Attention Kernel Landscape 2025-2026"]
         TRAIN["Training Kernels"]
@@ -1011,6 +1018,7 @@ The key trend: attention kernels are no longer one-size-fits-all. Each model arc
 ## 14. End-to-End: From Model Forward Pass to Hardware
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     INPUT["Input tokens<br/>shape (B, S)"]
     EMBD["Embedding lookup<br/>gather from weight matrix"]

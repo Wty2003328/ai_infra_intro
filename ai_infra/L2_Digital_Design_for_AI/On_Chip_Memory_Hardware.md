@@ -39,10 +39,11 @@ Multiply by ~128 SMs per die (B200 confirmed; B300 SM count is estimated and may
 ### 1.2 The hierarchy with bandwidth budgets
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     HBM[HBM3e / HBM4<br/>~10 TB/s/package · 300–500 cycle latency<br/>capacity ~96–512 GB]:::offchip
     L2[L2 cache (distributed slices)<br/>~10 TB/s · 30–80 cycle latency<br/>~50 MB chip-wide]:::l2
-    SMEM[SMEM / LDS<br/>~6.5 TB/s/SM · 8–20 cycle latency<br/>~256 KB/SM · 32 banks · 4 B/bank/cycle]:::smem
+    SMEM[SMEM / LDS<br/>~6.5 TB/s/SM · 8–20 cycle latency<br/>~256 KB/SM · 32 banks · 4<br/>B/bank/cycle]:::smem
     TMEM[TMEM (Blackwell+)<br/>~50–80 TB/s/SM · 2–4 cycle latency<br/>~256 KB/SM · ultra-wide read ports]:::tmem
     RF[Register file<br/>~30 TB/s/SM · 1 cycle latency<br/>~256 KB/SM · 32 banks via operand collector<br/>wider per-bank ports than SMEM]:::rf
     MAC[Tensor-core MAC array<br/>operand demand ~97 TB/s/SM at FP4]:::mac
@@ -70,6 +71,7 @@ Bandwidth grows ~10× per tier as you climb. The "bandwidth cliff" is what happe
 ### 2.1 Topology
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CELL["6T SRAM bitcell — two cross-coupled inverters + two access transistors"]
         direction TB
@@ -162,6 +164,7 @@ At N3 and below, three sources of variation conspire to break the 6T cell:
 For a cell to pass yield with $\ge 6\sigma$ SNM, the mean SNM must absorb 6 standard deviations of variation. At N3, the only way to do this is to keep transistors *wider* than logic minimum — so SRAM density scales at <0.85× per node vs. logic at 0.6× per node. Over four generations, SRAM has fallen from being area-comparable to logic to being ~3× the relative cost.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 xychart-beta
     title "SRAM bitcell area scaling vs logic NAND2 area scaling (TSMC nodes)"
     x-axis "Process node" ["7nm", "5nm", "4nm", "3nm", "2nm"]
@@ -258,6 +261,7 @@ because both wordlines and bitlines grow linearly, and they share the cell's sil
 GPUs cheat: build the RF identically to SMEM (32 banks, 1R/1W each), then put a hardware **operand collector** between the instruction decoder and the ALU.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant ID as Instruction Decoder
@@ -321,6 +325,7 @@ NVIDIA chose option 3 in Blackwell.
 FP4 was the trigger; FP6/FP4 packed tensors and future FP3 will multiply demand again. The bitcell physics from §2.5 says SMEM cannot scale further. Every future architecture from Blackwell onwards will keep tensor-operand staging *physically separate* from general SMEM. AMD CDNA-4 doesn't have an explicit TMEM but achieves similar isolation via aggressively double-buffered LDS regions managed by the compiler.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph PRE["Pre-Blackwell (Hopper et al.)"]
         direction TB
@@ -356,8 +361,9 @@ flowchart TD
 L2 is ~50 MB chip-wide on Blackwell, ~64 MB Infinity Cache on MI355X. Not a monolith: 32–64 distributed slices, each $\sim 1$ MB, geographically spread around the die so every SM has roughly equal NoC distance to its nearest few slices.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    subgraph DIE[GPU die — schematic L2 slice distribution]
+    subgraph DIE[GPU die — schematic L2 slice<br/>distribution]
         direction TB
         SM00[SM block 0]:::sm
         SM01[SM block 1]:::sm
@@ -473,6 +479,7 @@ If $B_r = B_c = B$: $512 B + 4 B^2 \le 256\,000$ → $B \le 220$. Choose $B = 12
 ## 10. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[6T SRAM β-ratio inequalities] --> B[SRAM density stalls at N3]
     B --> C[SMEM frozen at 256 KB]
@@ -480,16 +487,16 @@ flowchart TD
     D --> E[TMEM introduced as 2nd memory tier]
 
     F[1R/1W bank → bank conflict math] --> G[CUTLASS / Triton padding tricks]
-    G --> H[L5 kernels can ignore most conflicts]
+    G --> H[L5 kernels can ignore most<br/>conflicts]
 
     I[Multi-port cell area O(P²)] --> J[True 8R/4W RF infeasible]
-    J --> K[Operand collector hides bank conflicts]
+    J --> K[Operand collector hides bank<br/>conflicts]
 
     L[L2 50 MB ≪ 70 GB working set] --> M[L2 = transient reduction buffer]
-    M --> N[L8 inference engines design KV cache around L2 misses]
+    M --> N[L8 inference engines design KV<br/>cache around L2 misses]
 
-    E --> O[Blackwell wgmma exposes TMEM directly to programmer]
-    K --> P[Register pressure = L5 kernel-tuning lever]
+    E --> O[Blackwell wgmma exposes TMEM<br/>directly to programmer]
+    K --> P[Register pressure = L5<br/>kernel-tuning lever]
     H --> P
     O --> P
 ```

@@ -24,7 +24,8 @@ A representative coding-agent task vs a chat request:
 | State | none | session: KV cache, tool sandbox, memory files |
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     U[Task prompt]:::u --> P1[Prefill: system+tools+task]:::pf
     P1 --> D1[Decode: thought + tool_call]:::dc
     D1 --> T1[Tool executes<br/>50 ms – 30 s]:::tool

@@ -49,6 +49,7 @@ $$t_{\text{step}} = \max\!\left(\frac{W_{\text{prefill}}(K)}{\pi},\; \frac{Q_{\t
 Because prefill is compute-bound, it dominates the step time. Every decode sequence in that batch waits the full prefill duration. Users observe **TPOT spikes** when long prompts arrive — the telltale "stutter" in streaming output.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Mixed["Mixed Step (Coupled)"]
         direction TB
@@ -83,6 +84,7 @@ The cost is a **KV transfer** between pools after prefill completes. The entire 
 ### 2.1 System overview
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     CLIENT["Client requests"]:::client
 
@@ -211,14 +213,25 @@ The end-to-end KV transfer path traverses: **GPU $\to$ NIC $\to$ network $\to$ N
 
 **Step-by-step data flow (RDMA path):**
 
-```
-Prefill GPU                    Network                     Decode GPU
-┌──────────┐                  ┌─────────┐                 ┌──────────┐
-│ KV tensor │──DMA──> NIC Tx  │  fabric  │  NIC Rx ──DMA─>│ KV tensor │
-│ (HBM)    │   ~3.3TB/s │    │ ~50-900 │    │ ~3.3TB/s │ (HBM)    │
-└──────────┘            ↓     │  GB/s   │    ↓          └──────────┘
-                    PCIe/NVLink          PCIe/NVLink
-                    ~64-900 GB/s         ~64-900 GB/s
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    subgraph PG["Prefill GPU"]
+        KV1["KV tensor (HBM)<br/>~3.3 TB/s"]
+    end
+    subgraph NET["Network fabric<br/>~50-900 GB/s"]
+        direction LR
+        TX["NIC Tx"] --> FAB["fabric"] --> RX["NIC Rx"]
+    end
+    subgraph DG["Decode GPU"]
+        KV2["KV tensor (HBM)<br/>~3.3 TB/s"]
+    end
+    KV1 -->|"DMA · PCIe/NVLink<br/>~64-900 GB/s"| TX
+    RX -->|"DMA · PCIe/NVLink<br/>~64-900 GB/s"| KV2
+    classDef hbm fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef net fill:#fde68a,stroke:#b45309,color:#000
+    class KV1,KV2 hbm
+    class TX,FAB,RX net
 ```
 
 1. **GPU HBM $\to$ NIC DMA**: the KV tensor data is read from GPU HBM via PCIe (64 GB/s) or NVLink (900 GB/s) to the NIC's transmit buffer. With GPUDirect RDMA, the NIC reads directly from GPU-registered memory -- no CPU involvement.
@@ -226,7 +239,7 @@ Prefill GPU                    Network                     Decode GPU
 3. **NIC $\to$ GPU HBM DMA**: the receiving NIC writes the data directly into the decode GPU's HBM via GPUDirect RDMA.
 
 **Without GPUDirect RDMA (fallback path):**
-```
+```ascii-graph
 GPU_P --PCIe--> CPU_P --socket/network--> CPU_D --PCIe--> GPU_D
 ```
 This adds two CPU memory copies and doubles the latency. Only used when GPUDirect is not available (older GPUs, misconfigured drivers).
@@ -266,6 +279,7 @@ NIXL provides a unified API for GPU-to-GPU, GPU-to-CPU, and GPU-to-storage data 
 Naive transfer waits for all $L$ layers to complete prefill, then transfers the entire KV in one shot. Layer pipelining overlaps transfer with compute:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title Layer-pipelined KV transfer (4-layer example)
     dateFormat X
@@ -491,6 +505,7 @@ Production deployment serving a large-scale chat product:
 ### 7.3 Decision flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START["Total fleet > 8 GPUs?"]:::q
     START -->|"No"| CHUNKED["Use chunked prefill<br/>on coupled pool"]:::ans
@@ -785,4 +800,4 @@ A: A research design (ISCA 2024) showing that disaggregated prefill/decode acros
 | Example pool ratio | 3 prefill (4×H100, TP4) : 3 decode (2×H200, TP2) | sized to traffic, not 1:1 |
 | KV transfer payload | full per-layer K,V for the prompt, prefill→decode | the price of disaggregation |
 | KV transfer medium | NVLink (intra-node) / IB or RDMA (cross-node) | transfer time must hide under first decode |
-| When it helps | high prefill:decode 
+| When it helps | high prefill:decode

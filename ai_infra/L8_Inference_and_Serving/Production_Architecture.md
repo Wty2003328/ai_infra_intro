@@ -23,6 +23,7 @@ The page is prescriptive: concrete numbers, formulas, and configurations, not ju
 ### 1.1 End-to-end data path
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Edge["Edge Tier"]
         CDN[CDN / Anycast]
@@ -217,6 +218,7 @@ GPU compute: 65-75%. Network: 8-12%. Storage: 3-5%. Operations: 5-8%. Software: 
 ### 4.1 Failure taxonomy
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph FAIL["Failure taxonomy"]
         GPU[GPU-level]
@@ -266,6 +268,7 @@ flowchart TB
 Per-replica circuit state machine:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 stateDiagram-v2
     [*] --> Closed
     Closed --> Open : failures > threshold<br/>in window
@@ -314,6 +317,7 @@ Per-stage defaults: prefill timeout $\min(5\,\text{s},\; 2 \times \text{expected
 ### 6.1 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     DNS[Global DNS / Anycast<br/>latency-based routing]
     DNS --> US[US-East<br/>FE → INF → KV + Store]
@@ -345,6 +349,7 @@ Failover fraction $f \in [0.3, 0.5]$ (not 1.0; some degradation is acceptable du
 ### 7.1 Rollout strategies
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph BG["Blue/Green"]
         BG_OLD[v1 100%] -->|cutover| BG_NEW[v2 100%]
@@ -387,6 +392,7 @@ Automated promotion if all pass; manual review if any fail. Rollback is instant 
 The router maintains a **prefix cache index**: prefix hash → set of replicas holding that prefix.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant C as Client
     participant R as Router
@@ -531,28 +537,28 @@ Typical deployment: sidecar container co-located with the application, or a shar
 
 ### 11.6 Architecture
 
-```
+```verilog
 Client Request
-     |
-     v
-[ Gateway ]  -- rate limiting, auth, cost tracking
-     |
-     v
-[ Router ]  -- model selection (routing rules, cascade logic)
-     |
-     v
-[ Load Balancer ]  -- replica selection (locality-aware, least-loaded)
-     |
-     v
-[ Inference Backend ]  -- vLLM, TensorRT-LLM, TGI, or provider API
-     |
-     v
+      |
+      v
+[ Gateway ]             -- Rate limiting, auth, cost tracking
+      |
+      v
+[ Router ]              -- Model selection (routing rules, cascade logic)
+      |
+      v
+[ Load Balancer ]       -- Replica selection (locality-aware, least-loaded)
+      |
+      v
+[ Inference Backend ]   -- vLLM, TensorRT-LLM, TGI, or provider API
+      |
+      v
 [ Response ]
-     |
-     v
-[ Guardrail Check ]  -- output moderation, PII detection, schema validation
-     |
-     v
+      |
+      v
+[ Guardrail Check ]     -- Output moderation, PII detection, schema validation
+      |
+      v
 Response to Client
 ```
 
@@ -634,6 +640,7 @@ These optimizations are early but indicate the direction: inference frameworks a
 ### 13.1 Metric hierarchy
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph GOLD["Gold signals"]
         TTFT[TTFT p50/p99]

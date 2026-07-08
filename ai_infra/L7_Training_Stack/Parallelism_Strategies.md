@@ -29,6 +29,7 @@ This page specifies **how** to partition. There are six fundamental axes — dat
 Each rank holds a complete copy of the model. The global batch is split into $N$ equal microbatches, one per rank. Each rank independently computes forward and backward passes on its microbatch, producing local gradients. An all-reduce synchronizes gradients across all ranks, after which each rank performs an identical optimizer step.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph R0["Rank 0"]
         F0["Forward"] --> B0["Backward"] --> G0["Local grads"]
@@ -118,6 +119,7 @@ $$Z^{(i)} = Y^{(i)} \cdot W_{\text{down}}^{(i)} \quad \text{(local partial resul
 $$Z = \sum_{i=0}^{T-1} Z^{(i)} \quad \text{(all-reduce to combine)}$$
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     X["Input x<br/>(B x S x d)<br/>replicated on all ranks"] --> CP1["Column-Parallel<br/>x @ W_gate^(i)"]
     X --> CP2["Column-Parallel<br/>x @ W_up^(i)"]
@@ -203,6 +205,7 @@ For Llama-3-70B with TP=8: $2 \times 70 / 8 = 17.5$ GB per rank — fits in HBM.
 Pipeline parallelism partitions layers into $P$ stages, each assigned to a different rank (or group of ranks). Microbatches flow sequentially through stages in the forward direction; gradients flow in reverse. Communication occurs only at stage boundaries — point-to-point sends of activation tensors.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph S0["Stage 0<br/>Layers 0-19"]
         F0["F"] --> B0["B"]
@@ -237,7 +240,7 @@ The pipeline has a **warmup phase** (stages are gradually filled) and a **cooldo
 
 **GPipe timing diagram ($P=4$ stages, $M=4$ microbatches):**
 
-```
+```ascii-graph
 Time →   t0    t1    t2    t3    t4    t5    t6    t7    t8    t9    t10   t11   t12   t13
 Stage 0: [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
 Stage 1:       [F1]  [F2]  [F3]  [F4]  idle  idle  idle  [B4]  [B3]  [B2]  [B1]
@@ -278,7 +281,7 @@ $$\underbrace{F_1, F_2, \ldots, F_P}_{\text{warmup}} \;\rightarrow\; \underbrace
 
 **1F1B timing diagram ($P=4$ stages, $M=8$ microbatches):**
 
-```
+```ascii-graph
 Time →   t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15  t16  t17
 Stage 0: [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
 Stage 1:      [F1] [F2] [F3] [F4] [B1] [F5] [B2] [F6] [B3] [F7] [B4] [F8] [B5] [B6] [B7] [B8]
@@ -298,7 +301,7 @@ Megatron-LM's interleaved schedule assigns each physical stage multiple non-cont
 
 **Interleaved timing diagram ($P=4$ stages, $V=2$ virtual stages, $M=4$ microbatches):**
 
-```
+```ascii-graph
 Time →   t0    t1    t2    t3    t4    t5    t6    t7    t8    t9    t10   t11
 Stage 0: [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
 Stage 1:       [F1a] [F2a] [F1b] [F2b] idle  [B1a] [B2a] [B1b] [B2b] [B3a] [B4a] [B3b] [B4b]
@@ -608,6 +611,7 @@ Every parallelism strategy introduces communication that, if executed naively (b
 Every frontier training run composes at least three axes. Each GPU is identified by a tuple $(d, t, p)$ where $d \in [0, D-1]$ is the data-parallel rank, $t \in [0, T-1]$ is the tensor-parallel rank, and $p \in [0, P-1]$ is the pipeline-parallel rank. The total number of GPUs is $N = D \times T \times P$.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Cube["3D Parallelism Cube (DP=4 x TP=4 x PP=2 = 32 GPUs)"]
         direction TB

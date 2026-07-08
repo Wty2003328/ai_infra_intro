@@ -41,6 +41,7 @@ The Ascend 910C is the production part for 2024–2026; 910D is on the roadmap p
 Unlike NVIDIA's small-tile 2D tensor cores or TPU's large 2D MXU, DaVinci uses a **3D Cube** — a $16 \times 16 \times 16$ array of MAC cells:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CUBE["DaVinci 3D Cube · 16×16×16 = 4096 MACs · 8192 FLOPs/cycle FP16"]
         direction TB
@@ -139,6 +140,7 @@ To scale beyond 8, Huawei built **CM-384** — a 384-chip rack-scale mesh fabric
 - Aggregate domain: 384 chips treated as one logical training cluster.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CM384[CM-384 mesh — 384 Ascend 910C]
         direction TB
@@ -190,23 +192,24 @@ CM-384 wins on aggregate HBM capacity (largest in 2026), loses on per-chip throu
 ## 6. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[SMIC 7nm DUV process] --> B[Lower density vs TSMC N4]
     B --> C[Wire capacitance ~1.6× higher]
-    C --> D[Need to minimize routing distance per FLOP]
+    C --> D[Need to minimize routing distance<br/>per FLOP]
     D --> E[3D Cube architecture]
 
     F[3D Cube 16×16×16 = 4 096 MACs] --> G[~10 TFLOPS BF16 per Cube]
-    G --> H[~640 TFLOPS per package · ~3× lower than B200]
+    G --> H[~640 TFLOPS per package · ~3× lower<br/>than B200]
 
     I[64 MB L2 per die] --> J[Compensate for HBM3 vs HBM3e BW]
 
     K[CM-384 scale-up] --> L[384 chips · ~120 PFLOPS aggregate]
-    L --> M[Competitive at rack scale despite per-chip gap]
+    L --> M[Competitive at rack scale despite<br/>per-chip gap]
 
     N[CANN + MindSpore stack] --> O[~10–25% perf gap vs CUDA]
 
-    H & M --> P[Ascend dominates Chinese AI deployments through 2026]
+    H & M --> P[Ascend dominates Chinese AI<br/>deployments through 2026]
 ```
 
 ---

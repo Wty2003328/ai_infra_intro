@@ -49,11 +49,12 @@ Performance numbers are dense steady-state thermal-budget throughput. Sparse (2:
 Recall (from [Memory_Hierarchy_and_Roofline](Memory_Hierarchy_and_Roofline.md)): **ridge point = π/β**. Below ridge → memory-bound, above → compute-bound.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 xychart-beta
     title "Ridge points (FP8 / FP4 / BF16) — log-conceptual"
     x-axis "Chip" ["WSE-3", "TPU v7", "H100 (FP8)", "B200 (FP8)", "B300 (FP8)", "B200 (FP4)", "MI355X (FP4)", "Rubin (FP4)"]
     y-axis "Ridge (FLOP/B)" 0 --> 3000
-    bar [6, 626, 591, 562, 675, 1125, 2513, 2273]
+    bar [6, 626, 591, 562, 675, 1125, 2513,<br/>2273]
 ```
 
 The lower the bar, the more workloads are compute-bound on that chip. Cerebras inverts the regime entirely; FP4 generations push the ridge so high that essentially everything becomes memory-bound.
@@ -111,38 +112,39 @@ Maturity ranking (approximate, 2026):
 ## 5. Workload → chip decision tree
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START[Workload] --> Q1{Type?}
 
     Q1 -->|Frontier dense pretraining ≥100B| TRAIN
     TRAIN --> T1[Compute-bound on dense GEMM]
-    T1 --> T2[Need large coherent domain for TP+EP]
+    T1 --> T2[Need large coherent domain for<br/>TP+EP]
     T2 --> T3["NVL72 GB200/GB300 OR<br/>TPU v7 Ironwood pod OR<br/>Helios UALink (when shipping)"]
 
     Q1 -->|MoE training| MOE
     MOE --> M1[All-to-all needs huge bisection]
-    M1 --> M2[NVL72 / TPU pod / Helios — anything with ≥72 coherent]
+    M1 --> M2[NVL72 / TPU pod / Helios — anything<br/>with ≥72 coherent]
 
     Q1 -->|Long-context inference >1M| LC
     LC --> L1[KV cache size dominates]
     L1 --> L2["B300/MI455X (288–432 GB HBM) +<br/>Grace LPDDR (480 GB Tier-2) +<br/>Mooncake-style global pool"]
-    L1 --> L3[OR: Cerebras WSE-3 — long-context fits in 44 GB SRAM]
+    L1 --> L3[OR: Cerebras WSE-3 — long-context<br/>fits in 44 GB SRAM]
 
     Q1 -->|Mainstream LLM inference| LLM
     LLM --> I1[Memory-bound decode]
     I1 --> I2["B200/MI355X for general workloads<br/>Trainium 3 / TPU v7 for fixed-shape steady-state"]
 
     Q1 -->|Latency-critical chat <1ms TTFT| LAT
-    LAT --> LA1[Need deterministic SRAM-only execution]
+    LAT --> LA1[Need deterministic SRAM-only<br/>execution]
     LA1 --> LA2["Groq LPU (now NVIDIA) — only viable production option"]
 
     Q1 -->|DLRM / recommendation| DLRM
-    DLRM --> D1[Low arithmetic intensity, embedding-heavy]
+    DLRM --> D1[Low arithmetic intensity,<br/>embedding-heavy]
     D1 --> D2[MTIA / TPU v5p with SparseCore]
 
     Q1 -->|Cost-sensitive batch inference| BATCH
-    BATCH --> B1[High continuous batching utilization]
-    B1 --> B2["Trainium 3 / TPU v7 / MI355X<br/>(when ROCm/Neuron/XLA stack supports the model)"]
+    BATCH --> B1[High continuous batching<br/>utilization]
+    B1 --> B2["Trainium 3 / TPU v7 / MI355X<br/>(when ROCm/Neuron/XLA stack supports<br/>the model)"]
 ```
 
 ---
@@ -293,6 +295,7 @@ NVIDIA announced **Spectrum-X MRC** (Multi-Resource Coordination) on May 6, 2026
 ## 17. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Process node + EUV access] --> B[Per-chip throughput ceiling]
     C[HBM gen + capacity] --> D[Per-chip BW + memory ceiling]
@@ -308,7 +311,7 @@ flowchart TD
     H --> N[MoE / TP scale]
     J --> O[Production deployment friction]
 
-    L & M & N & O --> P[Vendor competitiveness for given workload]
+    L & M & N & O --> P[Vendor competitiveness for given<br/>workload]
 ```
 
 ---

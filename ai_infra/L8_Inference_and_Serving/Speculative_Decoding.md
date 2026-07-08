@@ -50,6 +50,7 @@ Both are dwarfed by the 42 ms memory read. The five-token batch finishes in $\ap
 Two models: a **draft model** $q$ (small, fast) and a **target model** $p$ (large, accurate). The draft proposes $\gamma$ tokens autoregressively; the target verifies them all in one forward pass.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     CTX["Context tokens"] --> DRAFT["Draft model q<br/>autoregressive, γ steps"]
     DRAFT --> CAND["Candidates x₁, x₂, …, x_γ"]
@@ -61,7 +62,7 @@ flowchart TD
 
 **Pseudocode:**
 
-```
+```text
 Input: context, draft model q, target model p, draft length γ
 
 # Phase 1: Draft
@@ -169,6 +170,7 @@ In practice the sweet spot is $\gamma \in [3, 7]$. Longer drafts waste time when
 Rather than maintaining a separate draft model, **early-exit speculation** uses the target model itself at intermediate layers. The target model has $L$ layers; the draft "model" is layers $1$ through $L_{\text{exit}} < L$, followed by a lightweight classifier head.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     IN["Input token"] --> L1["Layers 1..L_exit<br/>(draft)"]
     L1 --> DRAFT_LOGITS["Draft logits"]
@@ -218,6 +220,7 @@ Medusa replaces the separate draft model with $K$ lightweight prediction heads a
 ### 4.1 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     HT["h_t = target hidden state<br/>[B, 1, D]"] --> H0["Head 0 (original LM head)<br/>predicts x_{t+1}"]
     HT --> H1["Medusa Head 1<br/>predicts x_{t+2}"]
@@ -295,6 +298,7 @@ EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency) drafts at 
 ### 5.1 Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     HT["h_t = target hidden state<br/>at position t"] --> FC["Feature-level<br/>context <br/>(h_{t-1}, h_t, emb_t)"]
     FC --> D0["Draft layer 0:<br/>f(h_t) → ĥ_{t+1}"]
@@ -504,7 +508,7 @@ At temperature $\tau$, the distributions become $p_\tau(x) \propto p(x)^{1/\tau}
 
 Inside a continuous-batching loop (see [Batching_and_Scheduling](Batching_and_Scheduling.md)), each step becomes:
 
-```
+```ascii-graph
 for each step:
     1. For each in-flight sequence:
        a. Produce draft tokens (via draft model, Medusa heads, or n-gram).

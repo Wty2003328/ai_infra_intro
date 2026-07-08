@@ -59,6 +59,7 @@ A purely combinational FP32 FMA exceeds 50 FO4 (multiply tree + alignment + CPA 
 Solution: pipeline. For a 5-stage pipeline:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     IN[FFin]:::ff
     S1[Stage 1<br/>multiply Wallace tree<br/>~10 FO4]:::stage
@@ -106,6 +107,7 @@ NV-HBI is mesochronous-with-phase-drift; the receiver needs phase tracking but n
 ### 2.2 The phase interpolator + elastic FIFO
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph TX[Die A — transmitter]
         direction TB
@@ -156,6 +158,7 @@ vs ~302 cycles on the local die. <2% latency penalty. This is why NVIDIA can cla
 When two clock domains have *unrelated* frequencies (e.g., a peripheral clock domain at 200 MHz vs core at 2 GHz), simple PI + FIFO doesn't help. You need a **multi-flop synchronizer**:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     SRC["Source FF<br/>clk_A (e.g., 200 MHz)"]:::a
     SYNC1["Sync FF 1<br/>clk_B (e.g., 2 GHz)"]:::b
@@ -192,6 +195,7 @@ This wastes scheduler bandwidth. NVIDIA's solution: **TMA (Tensor Memory Acceler
 ### 3.2 TMA architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph SM[SM perspective]
         direction TB
@@ -233,6 +237,7 @@ Performance impact: a Hopper SMEM tile load that previously cost ~50 cycles of w
 The canonical kernel:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant Warp
@@ -266,6 +271,7 @@ A direct crossbar between $N$ source SMs and $M$ L2 slices has $N \cdot M$ wires
 ### 4.2 Mesh, torus, and hierarchical NoCs
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph MESH["2D mesh — Cerebras / Tenstorrent"]
         direction TB
@@ -356,6 +362,7 @@ So 4 cycles per hop is typical. Across a 12-hop diameter (B200 die corner-to-cor
 Dynamic power $P = \alpha C V^2 f$. Idle logic with no useful work to do still toggles internal nodes if its clock keeps running. Solution: insert an AND gate (or, in modern flows, a dedicated **integrated clock gating cell** ICG) that masks the clock when the logic is unused.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     CLK[clk]:::clk
     EN["enable signal<br/>(from controller)"]:::en
@@ -426,6 +433,7 @@ State-space explosion masks deep corner-case bugs in *interacting* FSMs. Example
 When found, vendors release **errata** documents and driver-level workarounds. AI researchers occasionally hit "non-deterministic NaNs on specific matrix sizes" — usually an undocumented erratum being sloppily masked.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Spec the design] --> B[Write RTL]
     B --> C{Block-level}
@@ -488,6 +496,7 @@ RAS features add to the verification burden (Section 6). Error-injection tests (
 ## 8. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[FO4 budget at N4 ≈ 6 ps] --> B[5-stage FMA at 2 GHz]
     B --> C[Pipelined latency = 5 cycles]
@@ -495,10 +504,10 @@ flowchart TD
 
     E[Multi-die packaging at L0/L1] --> F[Mesochronous CDC required]
     F --> G[2–4 cycle die-crossing penalty]
-    G --> H[NV-HBI engineered to be ~invisible to software]
+    G --> H[NV-HBI engineered to be ~invisible<br/>to software]
 
-    I[TMA async copies] --> J[Decouple HBM 300-cyc latency from compute]
-    J --> K[FlashAttention-3 hits 70%+ utilization on Hopper]
+    I[TMA async copies] --> J[Decouple HBM 300-cyc latency from<br/>compute]
+    J --> K[FlashAttention-3 hits 70%+<br/>utilization on Hopper]
 
     L[NoC hierarchical: hops × 4 cyc] --> M[L2 access latency 30–80 cycles]
     M --> N["Why GPU programmers care about L2 hit rate (L8)"]
@@ -506,7 +515,7 @@ flowchart TD
     O["Power = αCV²f"] --> P[Clock gating at idle clusters]
     O --> Q[Power gating at idle SMs]
     O --> R[DVFS at sub-ms granularity]
-    P & Q & R --> S[Maintain 1 kW package within thermal budget]
+    P & Q & R --> S[Maintain 1 kW package within<br/>thermal budget]
 
     T[Formal coverage capped ~10^7 states] --> U[FSM corner cases escape]
     U --> V[Errata + driver workarounds]

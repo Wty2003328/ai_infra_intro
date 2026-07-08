@@ -97,6 +97,7 @@ $$
 Worked: $N=64$ partial products (FP16-mantissa) → $L \approx 8.7$, so 9 levels of FAs. Each level adds ~1 FO4 of delay → ~9 FO4 ≈ ~50 ps at TSMC N4. Add the CPA's $\log_2$ delay (~5 FO4) and an $11\times 11$ multiplier comes in around 80 ps combinational — well below a 500 ps clock period.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     PP["64 partial products<br/>(8-bit × 8-bit AND-gate matrix)"]:::pp
     L1[Level 1: 64 → 43 rows<br/>21 FA + 1 HA]:::lv
@@ -138,13 +139,14 @@ Kogge-Stone is the speed champion (also lowest fanout per stage); Brent-Kung win
 Doing $A \times B$ in IEEE-754 splits into three parallel tracks:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Operand A<br/>S_A · M_A · 2^(E_A - bias)"]:::op
     B["Operand B<br/>S_B · M_B · 2^(E_B - bias)"]:::op
     SIGN["Sign: S_A ⊕ S_B<br/>(1 XOR gate)"]:::triv
     EXP["Exponent: E_A + E_B − bias<br/>(narrow integer adder)"]:::triv
     MANT["Mantissa: (1.M_A) × (1.M_B)<br/>(M+1)×(M+1) integer multiplier — area dominator"]:::big
-    NORM[Normalize:<br/>shift right if MSB=10, increment exp]:::norm
+    NORM[Normalize:<br/>shift right if MSB=10, increment<br/>exp]:::norm
     ROUND["Round (Round-to-Nearest-Even or<br/>Flush-to-Zero for subnormals)"]:::norm
     OUT[Result S, E, M]:::op
     A --> SIGN
@@ -187,6 +189,7 @@ A tensor core doesn't compute $A \times B$ then $+ C$ as two ops. It does the fu
 ### 4.1 The FMA pipeline
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph S1["Stage 1: multiply + ΔE"]
         direction TB
@@ -222,6 +225,7 @@ When adding two operands of opposite sign and similar magnitude (e.g., $1.0001 \
 LZA takes ~1.5 FO4 less than the CPA → totally hidden on the critical path.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant CPA as Carry-Propagate Adder
@@ -289,6 +293,7 @@ Exactly 2×. Not coincidence — the operand-fetch port budget is what the Black
 Only by either (a) shrinking the accumulator (precision loss → unusable) or (b) breaking the 1-byte minimum addressability of memory (which would require a totally new SRAM bitcell). Both are off the table. So **FP4 = 2× FP8** is structural, not a design choice.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 pie showData
     title "MAC area breakdown — FP8 vs FP4 (relative units)"
     "FP8: multiplier (16)" : 16
@@ -324,6 +329,7 @@ Because *all 32 elements share the same exponent pair*, the scale is constant ac
 3. Only **once per block**, apply the unified shared-exponent shift to the sum.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph N["Naïve (32 alignment shifters)"]
         direction TB
@@ -365,10 +371,11 @@ Dense row: `[A, 0, 0, B]` (4 values). Compressed: `[A, B]` + 4-bit metadata `100
 ### 7.2 Hardware execution
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     DENSE[4 dense activations<br/>a₀ a₁ a₂ a₃]:::act
-    META[Weight metadata mask<br/>e.g., 1001 = a₀ pairs w₀, a₃ pairs w₃]:::meta
-    MUX[4:2 multiplexer network<br/>routes activations to surviving multipliers]:::mux
+    META[Weight metadata mask<br/>e.g., 1001 = a₀ pairs w₀, a₃ pairs<br/>w₃]:::meta
+    MUX[4:2 multiplexer network<br/>routes activations to surviving<br/>multipliers]:::mux
     M0[Multiplier 0<br/>active: a₀ × w₀]:::active
     M1[Multiplier 1<br/>active: a₃ × w₃]:::active
     M2[Multiplier 2<br/>clock-gated]:::gated
@@ -412,9 +419,10 @@ The catch: MUX routing takes up area too. Empirical: every additional supported 
 ## 9. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Multiplier area O(M²)"] --> B[FP4 mult is ¼ FP8 mult]
-    B --> C[But MAC has fixed FP32 accumulator cost]
+    B --> C[But MAC has fixed FP32 accumulator<br/>cost]
     C --> D[FP4 MAC area = ⅔ FP8 MAC area]
     D --> E[1.5× more FP4 MACs in same area]
 
@@ -423,13 +431,13 @@ flowchart TD
 
     E --> I[Combined: exactly 2× FP4 throughput]
     H --> I
-    I --> J[Blackwell datasheet: 9000 TFLOPS FP4 vs 4500 FP8]
+    I --> J[Blackwell datasheet: 9000 TFLOPS<br/>FP4 vs 4500 FP8]
 
-    K[MX shared exponent over K=32] --> L[Sum-together saves 31 of 32 shifters]
+    K[MX shared exponent over K=32] --> L[Sum-together saves 31 of 32<br/>shifters]
     L --> M[MXFP4 hardware fits on Blackwell SM]
 
     N[Wallace tree depth log_1.5 N] --> O[~80 ps for FP16 multiplier]
-    O --> P[2 GHz clock survivable with 4-stage FMA pipe]
+    O --> P[2 GHz clock survivable with 4-stage<br/>FMA pipe]
 
     Q[LZA in parallel with CPA] --> R[3-stage FMA fits ~50 ps per stage]
     R --> P

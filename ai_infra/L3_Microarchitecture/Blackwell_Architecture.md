@@ -23,6 +23,7 @@ This page covers all five; per-page focus on the architectural mechanisms, deriv
 ## 1. Generation map
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title NVIDIA datacenter-GPU generation rollout
     dateFormat  YYYY-MM
@@ -58,6 +59,7 @@ gantt
 L0 fact: EUV reticle limit ≈ 858 mm². NVIDIA wants ~1 600 mm² of compute → must split. Two ~800 mm² dies bridged by NV-HBI on a CoWoS-L 4× substrate.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph PKG["B200 package on CoWoS-L 4× (~2 400 mm²)"]
         direction LR
@@ -127,6 +129,7 @@ For most workloads the penalty is negligible (decode is HBM-bound; the few extra
 Blackwell does **not** have separate physical FP4 multipliers. The hardware reuses the same Wallace tree, dynamically reconfigured:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph SHARED["Shared 16×16 multiplier (FP16-class)"]
         direction TB
@@ -237,6 +240,7 @@ TMEM is a dedicated SRAM structure per SM, physically separate from SMEM, design
 - General CUDA threads cannot touch TMEM → no contention with wgmma.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     HBM[HBM3e]:::off
     TMA[TMA engine<br/>cp.async.bulk.tensor]:::tma
@@ -320,6 +324,7 @@ The NVL72 rack contains exactly 72 B200 GPUs because of the arithmetic of NVSwit
 **The topology is a single-tier fat tree (non-blocking):** Every pair of GPUs has a guaranteed 1.8 TB/s path through exactly one NVSwitch hop. No oversubscription. The 72-GPU count is the maximum radix achievable with 18 lanes per GPU and the NVSwitch-4 port count.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph RACK["NVL72 rack — single 72-GPU coherent NVLink domain"]
         direction TB
@@ -388,6 +393,7 @@ Each GB200 Superchip = 1 Grace ARM CPU (72 cores Neoverse V2) + 2 B200 GPUs, glu
 For long-context decode (1M+ tokens), KV cache exceeds HBM. Without C2C, swapping to host memory over PCIe stalls the GPU. With C2C, host LPDDR becomes a viable Tier-2:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     HBM[GPU HBM<br/>384 GB · 16 TB/s]:::hot
     C2C[NVLink-C2C<br/>900 GB/s coherent]:::med
@@ -457,6 +463,7 @@ The headline architectural change: with **High-NA EUV** halving the reticle fiel
 ## 10. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[L0: 858 mm² reticle] --> B[B200 dual-die]
     B --> C[NV-HBI 10 TB/s + ~3 cycle CDC]
@@ -466,10 +473,10 @@ flowchart TD
     F --> G[9 PFLOPS FP4 dense per package]
 
     H[FP4 demand 50 TB/s SMEM] --> I[TMEM bifurcation]
-    I --> J[~70% utilization at FP4 vs ~30% without TMEM]
+    I --> J[~70% utilization at FP4 vs ~30%<br/>without TMEM]
 
     K[TMA async] --> L[Operand prefetch overlaps wgmma]
-    L --> M[FlashAttention-3 ~75% on Hopper, ~80% on Blackwell]
+    L --> M[FlashAttention-3 ~75% on Hopper,<br/>~80% on Blackwell]
 
     N[NVLink 5 1.8 TB/s/GPU] --> O[NVL72 fully non-blocking domain]
     O --> P[MoE all-to-all stays in rack]

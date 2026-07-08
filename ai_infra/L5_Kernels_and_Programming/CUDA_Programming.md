@@ -17,6 +17,7 @@ CUDA maps a C/C++ function onto a hierarchy of threads (grid $\to$ cluster $\to$
 ### 1.1 Grid, block, warp, thread
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph GRID["Grid (kernel launch)"]
         direction TB
@@ -116,6 +117,7 @@ The `<<<blocks, tpb>>>` syntax is CUDA's launch extension, translated by `nvcc` 
 ### 2.1 The memory hierarchy from a programming perspective
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     RF["Register file<br/>~1 cycle · per-thread<br/>256 KB/SM"]:::rf
     LM["Local memory<br/>(register spill to L1/HBM)<br/>~400 cycles"]:::lm
@@ -496,6 +498,7 @@ Clusters are most beneficial when the data exchange pattern involves a small num
 ### 6.1 CUDA streams
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph S0["Default stream (0) — synchronizing"]
         K0["Kernel A"] --> K1["Kernel B"]
@@ -969,7 +972,7 @@ The `wgmma` instruction is Hopper's tensor-core operation for warp-group-wide ma
 
 **API (via PTX inline assembly or CUTLASS wrappers):**
 
-```
+```text
 wgmma.mma_async.sync.aligned.m64n128k32.f32.f16.f16
     {%d0, ..., %d63},    // 64 accumulator registers (FP32)
     {%a0, ..., %a7},     // SMEM descriptor for A (FP16, 64x32 tile)
@@ -1191,7 +1194,7 @@ Build and use:
 pip install .            # JIT-compiles kernel.cu with the detected CUDA toolkit
 ```
 
-```python
+```text
 import myops, torch
 a = torch.randn(1024, device='cuda')
 b = torch.randn(1024, device='cuda')
@@ -1243,6 +1246,7 @@ if (threadIdx.x < 16) {
 ## 13. End-to-End Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Kernel launch <<<grid, block>>>"] --> B["Grid of blocks scheduled to SMs"]
     B --> C["Block maps to one SM"]

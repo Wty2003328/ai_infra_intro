@@ -51,6 +51,7 @@ GDDR7 per chip: ~144 GB/s (32 b @ 36 Gbps). To deliver 9.8 TB/s would require **
 ### 1.1 Vertical structure
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph STACK["HBM stack (12-Hi or 16-Hi)"]
         direction TB
@@ -74,6 +75,7 @@ flowchart TB
 A single 1 024-b HBM3e interface is **not one big bus**:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     STACK["HBM3e stack<br/>1024-bit interface = 128 B wide"]:::root
     C0["Channel 0 (64 b)"]:::channel
@@ -185,6 +187,7 @@ where $g_m$ is the latch transistor transconductance. *You cannot make this fast
 Every DRAM access goes through three commands:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant MC as Memory controller
@@ -200,7 +203,7 @@ sequenceDiagram
     Note over MC,BNK: t_CAS ≈ 2 ns + burst (variable)
     MC->>BD: PRE
     BD->>BNK: lower wordline; precharge bitlines to V_dd/2
-    Note over BNK: t_RP ≈ 14 ns (must complete before next ACT to same bank)
+    Note over BNK: t_RP ≈ 14 ns (must complete before next ACT to<br/>same bank)
     Note right of MC: Same-bank, different-row access ⇒ t_RP + t_RCD + t_CAS ≈ 30 ns penalty
 ```
 
@@ -327,6 +330,7 @@ JEDEC partitions HBM into temperature zones. At each zone-crossing, refresh inte
 The catch: refresh cycles dissipate energy, *raising* the temperature, which forces *more* refresh. Without active cooling this is a positive-feedback runaway:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[High utilization] --> B[Power increases]
     B --> C[T_j rises]
@@ -385,6 +389,7 @@ Aging shifts the optimal eye-sample point. Symptom: ECC correctable-error rate c
 ## 9. The 2025–2027 HBM roadmap
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title HBM generation rollout
     dateFormat  YYYY-MM

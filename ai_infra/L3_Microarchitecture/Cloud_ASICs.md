@@ -35,6 +35,7 @@ Trainium 2 powers AWS's "Project Rainier" — a 100 K+-chip cluster training Ant
 Trainium 3 has **8 NeuronCore-v4** cores. Each core is a heterogeneous VLIW pipeline:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CORE["NeuronCore-v4 (1 of 8 per Trainium 3 chip)"]
         direction TB
@@ -72,6 +73,7 @@ Properties:
 The compiler stitches compute, memory, and activations into overlapping streams via **modulo scheduling**:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant DMA
@@ -122,6 +124,7 @@ MTIA right-sizes: **less compute, less HBM, more memory ports per FLOP, and a No
 ### 2.2 MTIA v2 (Artemis) architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph MTIA["MTIA v2 (Artemis) — 8×8 PE mesh + 4 DDR5 controllers"]
         direction TB
@@ -201,22 +204,23 @@ The economics: cloud ASICs win on $/inference for steady-state workloads (chat, 
 ## 5. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Workload-specific design] --> B[Eliminate general-purpose overhead]
     B --> C[~30–50% silicon area saved vs GPU]
 
-    D[VLIW + statically scheduled pipelines] --> E[No hardware scheduler]
+    D[VLIW + statically scheduled<br/>pipelines] --> E[No hardware scheduler]
     E --> F[Lower W/FLOP than equivalent GPU]
     E --> G[Compiler complexity is the price]
 
-    H[Trainium 3 systolic 512×128] --> I[Higher MXU utilization on dense GEMM]
-    I --> J[Project Rainier scales to 100 K+ chips]
+    H[Trainium 3 systolic 512×128] --> I[Higher MXU utilization on dense<br/>GEMM]
+    I --> J[Project Rainier scales to 100 K+<br/>chips]
 
     K[MTIA right-sized DDR5 for DLRM] --> L["10× lower TDP for the same DLRM throughput"]
 
-    M[NeuronLink 16-chip + EFAv3 SRD] --> N[Hyperscaler-friendly network at AWS scale]
+    M[NeuronLink 16-chip + EFAv3 SRD] --> N[Hyperscaler-friendly network at AWS<br/>scale]
 
-    O[Triton/NKI/Pallas porting] --> P[Data scientists can target ASICs without rewrites]
+    O[Triton/NKI/Pallas porting] --> P[Data scientists can target ASICs<br/>without rewrites]
 
     C & F & I & N --> Q["At >100K chip scale, custom silicon makes economic sense"]
     G & O --> R["At <10K chip scale, GPU wins on time-to-deploy"]

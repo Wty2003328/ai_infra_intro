@@ -46,6 +46,7 @@ $$P_{loss,48V} = 2{,}500^2 \times R = 6.25 \times 10^6 \times R = 625 \text{ W}$
 Reduction factor: $\left(\frac{12}{48}\right)^2 = 16\times$. Losses drop from 10 kW to 625 W — a savings of 9.375 kW per rack. Across a 10,000-rack cluster: 93.75 MW saved, worth ~$82M/year at $0.10/kWh.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Power["48 V Rack Power Distribution"]
         FAC[Facility 480V AC]:::fac --> PDU[PDU / RPP]:::pdu
@@ -138,6 +139,7 @@ At 45 GPM, the coolant loop pressure drop through 72 cold plates in series would
 The coolant enters at ~35°C and exits at ~45°C. This warm water is then piped to a Coolant Distribution Unit (CDU) which exchanges heat with the facility water loop, which in turn goes to outdoor dry coolers or cooling towers.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Rack["NVL72 Rack (120 kW)"]
         CP1[Cold Plate GPU 0]:::cp
@@ -200,6 +202,7 @@ The NVL72 is the reference AI rack for 2025–2026.
 **Interconnect**: 9 NVSwitch ASICs in a copper backplane spine.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph NVL72["NVL72 Rack (side view)"]
         direction TB
@@ -378,6 +381,7 @@ The jump from HBM3e to HBM4 brings higher per-stack bandwidth (~2 TB/s vs ~1.6 T
 The Rubin-generation NVL576 creates the largest single NVLink domain to date by connecting 576 R100 GPUs:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph NVL576["NVL576 (576 Rubin R100 GPUs)"]
         direction LR
@@ -415,7 +419,7 @@ The NVL576's 576-GPU domain enables **tensor parallelism up to TP=576** without 
 
 An alternative to the full NVL576 is the NVL36x2, which splits each 72-GPU domain into two 36-GPU halves connected via NVSwitch:
 
-```
+```ascii-graph
 Rack A: 36 GPUs + 4-5 NVSwitches  ←→ NVLink inter-rack ←→  Rack B: 36 GPUs + 4-5 NVSwitches
 ```
 
@@ -508,6 +512,7 @@ Air-cooled AI servers produce 80–90 dBA at 1 m. A row of 10 racks exceeds 100 
 ## 5. End-to-end Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["B300 TDP = 1,200 W"] --> B["72 GPUs = ~120 kW/rack"]
     B --> C["Air cooling infeasible (>40 kW limit)"]

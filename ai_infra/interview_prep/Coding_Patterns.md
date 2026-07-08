@@ -39,7 +39,7 @@ For interviews, you should be able to write CUDA on a whiteboard or shared edito
 
 Tiled SMEM matmul. Memorize the structure; the variations come from tile sizes and tensor-core variants.
 
-```cuda
+```cpp
 // C = A @ B, A: (M, K) row-major, B: (K, N) row-major, C: (M, N) row-major
 template <int BM, int BN, int BK>
 __global__ void matmul_tiled(
@@ -174,7 +174,7 @@ Whiteboard expectation: you should be able to write this skeleton — outer loop
 
 ### 6.1 Block-level Sum
 
-```cuda
+```cpp
 __global__ void block_sum(const float* x, float* out, int N) {
     __shared__ float smem[BLOCK];
     int tid = threadIdx.x;
@@ -194,7 +194,7 @@ __global__ void block_sum(const float* x, float* out, int N) {
 
 ### 6.2 Warp Shuffle (faster)
 
-```cuda
+```cpp
 __inline__ __device__ float warp_reduce_sum(float v) {
     for (int offset = 16; offset > 0; offset >>= 1)
         v += __shfl_xor_sync(0xffffffff, v, offset);
@@ -367,7 +367,7 @@ def beam_search(model, prompt, beam_width, max_len):
 
 ### 8.4 KV Cache Update
 
-```python
+```text
 def append_kv(kv_cache, layer, k_new, v_new, slot):
     # kv_cache shape: (L, 2, B, S_max, H, D)
     kv_cache[layer, 0, :, slot] = k_new
@@ -510,7 +510,7 @@ A: See §7.1.
 A: Pool of fixed-size blocks; per-sequence block table mapping logical → physical. Allocator with refcounts for prefix sharing. See §7.2.
 
 **Q: Write online softmax and explain how it generalizes to attention.**
-A: Maintain (m, ℓ). For each block, compute local max m', shift+exp, sum to ℓ', combine with `α=exp(m-m_new), β=exp(m'-m_new)`. In attention, also maintain a running output O, rescaled the same way; final divide by ℓ.
+A: Maintain (m, ℓ). For each block, compute local max m', shift+exp, sum to ℓ', combine with $\alpha=\exp(m-m_{new}),\ \beta=\exp(m'-m_{new})$. In attention, also maintain a running output O, rescaled the same way; final divide by ℓ.
 
 **Q: What's the difference between `__syncthreads` and `__threadfence`?**
 A: `__syncthreads` is a barrier — all threads in the block wait. `__threadfence` only orders memory operations from the calling thread relative to others; doesn't block. Use the latter when you need ordering but not synchronization.

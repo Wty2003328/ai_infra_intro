@@ -46,6 +46,7 @@ $$
 Geometrically, this is where the diagonal $I \cdot \beta$ crosses the horizontal $\pi$ ceiling. Workloads with $I < I_{\text{ridge}}$ are **memory-bound**; those with $I > I_{\text{ridge}}$ are **compute-bound**.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 xychart-beta
     title "Roofline plot: B200 (FP4 numbers, log-log conceptual)"
     x-axis "Arithmetic intensity log₁₀(FLOP/B)" -1 --> 4
@@ -359,6 +360,7 @@ Verify $K$ candidate tokens in one weight read; if $\alpha$ are accepted, you go
 ## 5. The roofline visualized for decision-making
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     KERNEL[Workload] --> AI{Compute AI = W/Q}
     AI -->|"AI < ridge"| MB[Memory-bound]
@@ -370,8 +372,8 @@ flowchart TD
     MB --> M4[KV compression for attention]
     MB --> M5[Speculative decoding]
 
-    CB --> C1[Already at peak; tune occupancy + tile size]
-    CB --> C2[Lower precision unlocks higher peak FLOPS]
+    CB --> C1[Already at peak; tune occupancy +<br/>tile size]
+    CB --> C2[Lower precision unlocks higher peak<br/>FLOPS]
 
     style MB fill:#fca5a5,stroke:#991b1b,color:#000
     style CB fill:#bbf7d0,stroke:#15803d,color:#000
@@ -415,6 +417,7 @@ A kernel that fits its working set in SMEM sees an effective ridge of 22 FLOP/B 
 ### 6.2 Bandwidth ratios
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     HBM["HBM ~10 TB/s/package<br/>~400 cycle latency"]:::off
     L2["L2 ~10 TB/s aggregate<br/>30–80 cycle latency"]:::l2
@@ -479,6 +482,7 @@ The `--set roofline` flag collects the FLOP counters and byte counters needed fo
 ## 7. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["π HBM bandwidth at L1"] --> B[Per-tier β]
     C["π peak FLOPS at L2/L3"] --> D[Compute ceiling]
@@ -489,9 +493,9 @@ flowchart TD
     G -->|>| I[Compute-bound]
 
     H --> J[Quantization, fusion, batching, MLA]
-    J --> K[Increase AI → shift toward compute-bound]
+    J --> K[Increase AI → shift toward<br/>compute-bound]
 
-    I --> L[Already optimal in BW; can lower precision for higher π]
+    I --> L[Already optimal in BW; can lower<br/>precision for higher π]
 
     M[Decode AI = 2/bytes] --> N["Always memory-bound (<5%)"]
     O[Prefill AI = 2S/bytes] --> P[Compute-bound for S > ~100]

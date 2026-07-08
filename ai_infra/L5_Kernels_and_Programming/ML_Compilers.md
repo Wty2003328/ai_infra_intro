@@ -9,7 +9,8 @@
 Every other L5 page is about writing one kernel well. But a transformer forward pass is thousands of ops, and nobody hand-writes them all. The ML compiler is the machinery that takes framework-level code (PyTorch/JAX) and emits fused, scheduled, autotuned device code — automatically. Interviews for inference and training-systems roles now routinely probe: *What does `torch.compile` actually do? Why do CUDA graphs matter for decode? What's a graph break and why does it kill performance? Why does TPU not need Triton?* This page gives the mechanism: the IR pipeline, the fusion math, the guard system, and where compilers still lose to humans.
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     subgraph FE[Frontends]
         PT[PyTorch eager]:::fe
         JX[JAX]:::fe
@@ -70,6 +71,7 @@ Memory-bound ops are *linear* in traffic, so fusing a `mul + add + gelu + dropou
 `torch.compile(model)` is three separate systems chained together (PyTorch 2.x; current stable 2.12):
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     SRC[Python bytecode<br/>of forward]:::fe
     DYN[TorchDynamo<br/>CPython frame hook PEP 523<br/>symbolically evaluates bytecode]:::be

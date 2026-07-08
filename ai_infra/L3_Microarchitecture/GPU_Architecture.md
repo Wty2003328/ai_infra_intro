@@ -37,6 +37,7 @@ Before dissecting the SM, we must map the software hierarchy to the hardware tha
 ### 1.2 Anatomy of the SM
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph SM["Streaming Multiprocessor (SM) - Hopper / Blackwell"]
         direction TB
@@ -274,7 +275,7 @@ The FP8 instruction doubles K to 32 because each register/SMEM word holds twice 
 ### 2.4 The `wgmma` Instruction and Async Semantics
 Introduced in Hopper, `wgmma` (Warp-Group MMA) expands collaboration from 1 warp to **4 warps (128 threads)** computing collaboratively.
 
-```ptx
+```text
 wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16
     {acc_regs},          // Destination FP32 accumulator registers 
     desc_a,              // 64-bit descriptor pointing to A in SMEM/TMEM
@@ -333,6 +334,7 @@ Pre-Hopper, memory copies were strictly synchronous. A 32-thread warp cooperativ
 The **Tensor Memory Accelerator (TMA)** offloads this completely to an independent hardware **Proxy Engine**:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph SM_EXEC["Warp Execution (SM)"]
         K["Thread issues:<br/>cp.async.bulk"]:::k
@@ -492,6 +494,7 @@ The FP4 generation often shows *lower* % utilization than FP8 because peak FLOPS
 The physical constraints of the GPU hardware fundamentally dictate algorithm design at the software layer:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph EXEC["Execution Pipeline Constraints"]
         A["SM has 4 Processing Blocks<br/>(1 issue/cycle each)"]:::exec --> B["Issue Ceiling:<br/>4 instr/SM/cycle"]:::exec

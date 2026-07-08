@@ -48,6 +48,7 @@ At training time, the model has only seen positions $m \in [0, L_{\text{train}})
 2. **Resolution loss.** Low-frequency dimensions ($\theta_i$ small) barely rotate within the training window, providing fine positional discrimination. Extrapolating naively stretches them to coarser-than-trained angular separations.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["RoPE at<br/>position m"] --> B{"m < L_train?"}
     B -->|"Yes"| C["Seen frequency<br/>Good attention"]
@@ -241,6 +242,7 @@ Full attention over $S$ tokens costs $O(S^2)$ per layer. At $S = 1\text{M}$, thi
 3. **Sliding window.** A local window of the most recent $W$ tokens (typically 256--512) always receives full attention, preserving local coherence.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Input["Input Sequence (S tokens)"]
         T["Token stream"]
@@ -316,6 +318,7 @@ where $\bar{k}_j$ is the mean key vector of block $b_j$. Critically, this gating
 ### 6.2 Block Structure
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph KV["KV Cache (1M tokens)"]
         B1["Block 1<br/>(0-2047)"]
@@ -382,6 +385,7 @@ Ring Attention (Liu et al. 2023) distributes the KV cache across $P$ devices arr
 3. Update the running attention output using the online softmax merge from FlashAttention.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph R0["Round 0"]
         G0["GPU 0<br/>Q0 x KV0"]
@@ -544,6 +548,7 @@ With 8-GPU tensor parallelism, the KV cache is distributed, and each GPU reads $
 ## 10. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Long context request<br/>S = 1M tokens"] --> B{"Positional encoding<br/>sufficient?"}
     B -->|"No"| C["Apply RoPE scaling<br/>YaRN / LongRoPE / iRoPE"]

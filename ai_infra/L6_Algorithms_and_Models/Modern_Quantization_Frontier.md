@@ -256,6 +256,7 @@ $D_s$ is chosen so that $X' = X D_s^{-1}$ has reduced outlier magnitude (smoothe
 NVIDIA's Transformer Engine (TE) is the software layer that manages precision selection at runtime. TE v2 (2024–2025) extends beyond FP8 to support FP6 and FP4:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     MODEL["PyTorch Model<br/>(FP32/BF16 weights)"] --> TE["TE.Linear wrapper"]
     TE --> QW["Quantize weights<br/>per-block FP4/FP8<br/>(one-time at load)"]
@@ -556,6 +557,7 @@ Both formats are in early-stage deployment (2025) and target the W4A4 regime whe
 ## 11. End-to-end cause and effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["FP4 has only 12 representable values<br/>and dynamic range of 2^3.6"] --> B["Per-tensor FP4 is unusable"]
     B --> C["Need per-block shared exponent<br/>(MX / NVFP4, K=16..32)"]

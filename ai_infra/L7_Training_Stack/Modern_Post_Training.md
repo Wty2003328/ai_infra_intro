@@ -34,6 +34,7 @@ This page covers the complete mathematical and engineering landscape of modern p
 The classical RLHF pipeline has three stages:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     SFT["SFT<br/>(Supervised Fine-Tuning)"] --> RM["Reward Model<br/>Training"]
     RM --> PPO["PPO / RL<br/>Optimization"]
@@ -478,6 +479,7 @@ The distillation paradigm (Section 11) has been dramatically scaled up in 2025â€
 ## 10. Comparison of all methods
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Classification
         RL["Online RL<br/>(requires sampling)"]
@@ -567,6 +569,7 @@ TRL integrates with HuggingFace Transformers. The PPO trainer manages the four-m
 OpenRLHF decouples rollout and training across separate GPU groups:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Rollout GPUs
         R1["vLLM<br/>Inference Engine"]
@@ -617,6 +620,7 @@ The teacher is a large reasoning model (e.g., DeepSeek-R1-671B). The student is 
 ### 12.2 Distillation data pipeline
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     PROMPT["Reasoning prompts<br/>(~100K math/code)"] --> TEACHER["Teacher model<br/>(R1-671B)"]
     TEACHER --> COT["Long CoT traces<br/>(avg 4K tokens)"]

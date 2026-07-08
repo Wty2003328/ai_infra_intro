@@ -26,6 +26,7 @@ Advanced packaging is the set of techniques that convert those four "impossible"
 The integration hierarchy nests three pitch regimes, each ~4× coarser than the next:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph PKG["AI accelerator package — three-tier interconnect"]
         direction TB
@@ -80,6 +81,7 @@ Doubling logic on the die roughly grows I/O by $2^p \approx 1.4$–$1.7\times$. 
 ## 2. Substrate options: the four real choices
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph ORG["Organic substrate (FCBGA)<br/>Cheap · low density · ≤4 Gb/s · ~1 pJ/bit"]
         direction TB
@@ -140,6 +142,7 @@ Replace the silicon interposer with organic redistribution layers (RDL). Cost pe
 Organic substrate with **embedded local silicon interconnect (LSI) bridges** placed exactly where high-density routing is needed (compute↔compute, compute↔HBM). Bypasses both the interposer reticle ceiling and the CTE-shear problem.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph TOP["Top view: 2-die B200 with 8× HBM3e (CoWoS-L 4×)"]
         direction LR
@@ -461,9 +464,23 @@ That is 3–5% of total GPU package power, just for the I/O PHY. At next-generat
 
 Co-Packaged Optics moves the **electrical-to-optical conversion** from the board-edge transceiver module onto the package itself (or onto a silicon photonics die adjacent to the compute die on the interposer). Instead of driving a 2 m PCB trace electrically, the signal traverses ~1 mm of electrical trace on-package, then converts to optical for the multi-meter link to the switch.
 
-```
-Traditional:  [GPU die] ──2 m PCB trace──> [QSFP module] ──fiber──> [switch]
-CPO:          [GPU die] ──1 mm on-pkg──> [photonic IC] ──fiber──> [switch]
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    subgraph T["Traditional pluggable optics"]
+        direction LR
+        G1["GPU die"] -->|"~2 m<br/>PCB trace"| Q["QSFP module"] -->|fiber| S1["Switch"]
+    end
+    subgraph C["Co-Packaged Optics (CPO)"]
+        direction LR
+        G2["GPU die"] -->|"~1 mm<br/>on-package"| P["Photonic IC"] -->|fiber| S2["Switch"]
+    end
+    classDef die fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef opt fill:#fde68a,stroke:#b45309,color:#000
+    classDef sw fill:#dcfce7,stroke:#15803d,color:#000
+    class G1,G2 die
+    class Q,P opt
+    class S1,S2 sw
 ```
 
 #### Technical approaches
@@ -548,6 +565,7 @@ Intel is the primary driver; TSMC and Samsung have also disclosed glass-substrat
 Heat path from the die junction to liquid coolant, modeled as a series of thermal resistances:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     J["T_junction<br/>silicon active layer"]:::hot
     DB[die back surface]:::warm
@@ -633,6 +651,7 @@ KGD adds a 4–6 week test cycle to every die *before* it can be packaged. This 
 ## 10. The full picture — from L0 substrate to L4 system
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[L0: 858 mm² reticle] --> B[Multi-die required]
     B --> C[CoWoS-S ceiling 2 800 mm²]
@@ -654,9 +673,9 @@ flowchart TD
 
     U[UCIe open chiplet std] --> V[Multi-vendor heterogeneous assembly]
     W[224G SerDes wall: 15-20 pJ/bit] --> X[CPO: 2-5 pJ/bit optical I/O]
-    X --> Y[2026-2028 production for AI clusters]
+    X --> Y[2026-2028 production for AI<br/>clusters]
 
-    G --> R[L3 microarchitecture: how to feed 16 TB/s]
+    G --> R[L3 microarchitecture: how to feed<br/>16 TB/s]
     Q --> R
     V --> R
 ```

@@ -572,6 +572,7 @@ DeepSeek-V3's MLA achieves **64x** KV cache reduction versus a hypothetical MHA 
 ## 8. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Token x ∈ R^D"] --> B{"Attention variant?"}
 

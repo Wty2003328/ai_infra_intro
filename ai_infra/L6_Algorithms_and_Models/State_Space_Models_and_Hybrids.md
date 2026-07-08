@@ -166,6 +166,7 @@ where $f_k(\mathbf{x}) = \bar{\mathbf{A}}_k\,\mathbf{x} + \bar{\mathbf{B}}_k\,u_
 A Mamba block replaces the Transformer's attention + FFN with a single integrated block:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     X["x ∈ R^{B×L×D}"] --> NX["RMSNorm"]
     NX --> LP["Linear → 2D expansion"]
@@ -368,6 +369,7 @@ Attention has no such bottleneck — the KV cache stores every past key-value pa
 AI21's Jamba (Lieber et al., 2024) is a 52B-parameter model with the following layer stack repeated $\times N$:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph BLOCK["Jamba block (repeated)"]
         direction TB
@@ -401,6 +403,7 @@ The weight-sharing trick works because the attention block's purpose in a hybrid
 ### 6.4 Design principles for hybrid placement
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Task analysis] --> B{Needle-in-haystack<br/>accuracy requirement?}
     B -->|"≥ 95%"| C[Attention every 4–6 layers]
@@ -470,6 +473,7 @@ At $S = 128K$, a pure Mamba-2 model prefills roughly 30x faster than a Transform
 ## 8. End-to-end cause and effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Attention costs O(N²)<br/>in sequence length"] --> B["KV cache grows linearly<br/>with context length"]
     B --> C["Decode becomes<br/>memory-bound at long context"]

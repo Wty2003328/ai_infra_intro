@@ -483,6 +483,7 @@ Notes: KV cache estimates assume FP16 and include all layers. Closed-model entri
 ## 12. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Arch["Architectural Decisions"]
         MLA["MLA compression<br/>(DeepSeek-V4 Pro)"]

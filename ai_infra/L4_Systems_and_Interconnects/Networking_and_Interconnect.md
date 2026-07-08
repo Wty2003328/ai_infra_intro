@@ -47,6 +47,7 @@ $$\ell_{max} \approx \frac{18}{5.24} \approx 3.4 \text{ inches} \approx 0.09 \te
 With better materials (Megtron-7G, $\alpha \approx 0.4$) and advanced equalization (up to ~35 dB budget), passive copper extends to ~0.5–1.0 m at 224 Gbps — but no further.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph TX["Transmitter"]
         FEC[FEC Encoder] --> DSP[DSP / FFE]
@@ -170,6 +171,7 @@ NVLink is NVIDIA's proprietary GPU-to-GPU interconnect. NVLink-5 (Blackwell gene
 - **NVLink protocol**: custom, cache-coherent within NVLink domain
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph GPUs["NVL72: 72 GPUs"]
         direction TB
@@ -345,6 +347,7 @@ A $k$-ary fat-tree is built from $k$-port switches arranged in three layers (cor
 For NDR with $k = 64$: $N = 64^3 / 4 = 65{,}536$ hosts. This is the canonical 65k-GPU cluster topology.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Core["Core Layer (k/2 = 32 switches)"]
         C1[Core SW 0]:::core
@@ -426,6 +429,7 @@ $$B_{bisect}^{torus} \approx 2 \cdot b \cdot (XY + XZ + YZ) \approx 2 \cdot b \c
 (for a cube $X = Y = Z = N^{1/3}$, bisection is along one cut plane: $6 \cdot N^{2/3} \cdot b$ total with 3 cuts, but only one plane at a time for any given cut).
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph XY_Plane["XY Plane (one Z-slice)"]
         direction TB
@@ -568,6 +572,7 @@ GPUDirect RDMA allows a NIC to DMA directly into GPU HBM without staging through
 **With GPUDirect**: NIC → GPU HBM (PCIe peer-to-peer DMA). One PCIe traversal, no CPU involvement.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Without_GPUDirect["Without GPUDirect"]
         NIC1[NIC]:::nic -->|"PCIe DMA"| RAM1[Host RAM]:::ram
@@ -731,16 +736,14 @@ In a standard AllReduce, each rank sends its data to other ranks, and the reduct
 
 The data volume reduction is dramatic: for an $N$-rank AllReduce, SHARP reduces the data that traverses the network by a factor of $N$. Instead of $N$ copies of the data flowing to each endpoint, only the reduced result is forwarded.
 
-```
-Without SHARP (Ring AllReduce, N ranks):
-  Each rank sends (N-1)/N of the data volume around the ring.
-  Total data transferred: 2 * (N-1)/N * D * N = 2(N-1)D
+**Without SHARP (Ring AllReduce, N ranks):**
+   - Each rank sends (N-1)/N of the data volume around the ring.
+   - Total data transferred: 2 * (N-1)/N * D * N = 2(N-1)D
 
-With SHARP:
-  Each rank sends D once to the switch.
-  Switch reduces and returns D once to each rank.
-  Total data transferred: 2 * D * N (but switch does the reduction in-network)
-```
+**With SHARP:**
+   - Each rank sends D once to the switch.
+   - Switch reduces and returns D once to each rank.
+   - Total data transferred: 2 * D * N (but switch does the reduction in-network)
 
 ### 5c.3 Performance
 
@@ -776,6 +779,7 @@ In production AI training clusters (e.g., NVIDIA DGX SuperPOD), SHARP is typical
 ## 6. End-to-end Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["224G PAM4 Nyquist = 56 GHz"] --> B["Passive Cu trace ≤ 1 m"]
     B --> C["Scale-up domain = single rack"]

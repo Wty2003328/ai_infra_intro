@@ -11,12 +11,13 @@
 Every AI accelerator picks one of three execution models. The choice cascades through compiler design, kernel ergonomics, latency-hiding strategy, and ultimately the achievable utilization on each workload.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     SIMT["SIMT (Single Instruction Multiple Thread)<br/>NVIDIA, AMD<br/>Hardware schedules warps; latency hidden by oversubscription"]:::simt
     VLIW["VLIW (Very Long Instruction Word)<br/>TPU, Trainium, Groq<br/>Compiler statically schedules every functional unit; no runtime stalls"]:::vliw
     SDF["Spatial Dataflow<br/>Cerebras, Tenstorrent, Tensix mesh<br/>Computation is a graph laid out in space; data flows tile-to-tile"]:::sdf
     SIMT --- A1[Programmable, flexible<br/>Lower utilization on dense GEMM<br/>Hides latency dynamically]
-    VLIW --- A2[Compiler does all work<br/>~95% utilization possible<br/>Brittle to dynamic shapes / unpredictable latency]
+    VLIW --- A2[Compiler does all work<br/>~95% utilization possible<br/>Brittle to dynamic shapes /<br/>unpredictable latency]
     SDF --- A3[Maps neural network as physical pipeline<br/>Excellent for fixed graphs<br/>Hard to reuse silicon across models]
     classDef simt fill:#fde68a,stroke:#b45309,color:#000
     classDef vliw fill:#bbf7d0,stroke:#15803d,color:#000
@@ -38,6 +39,7 @@ A **warp** (NVIDIA) or **wavefront** (AMD) is a group of threads that execute th
 Each thread has its own register set, program counter (since Volta), and stack pointer; they all share the SIMD instruction stream. When threads diverge (different control-flow branches), the hardware **serializes** the divergent paths via a divergence stack:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant Warp as 32-thread warp
@@ -72,6 +74,7 @@ Worked: $L_{\text{mem}} = 400$ cycles, $I_{\text{warp}} = 5$ (typical). $W_{\min
 NVIDIA's stack:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     SRC[CUDA C++ / Triton / Python]:::src
     NVCC[nvcc + ptxas]:::tool
@@ -136,7 +139,7 @@ VLIW packs multiple parallel operations into a single instruction word. There is
 
 A TPU "VLIW bundle" might contain:
 
-```
+```ascii-graph
 [ cycle k ]
   TensorEngine:  MAC (tile_addr_A, tile_addr_B, tile_addr_C)
   VectorEngine:  vec_exp (input_addr, output_addr)
@@ -181,6 +184,7 @@ GPUs (SIMT) handle this by scheduling more independent kernels in parallel; they
 Spatial dataflow lays the *graph* of a neural network onto the physical mesh of the chip: layer 0 occupies a region, layer 1 the adjacent region, etc. Activations stream from one region to the next via the on-chip NoC; weights live where they're used.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph CHIP["Spatial dataflow on a mesh"]
         direction TB
@@ -233,24 +237,25 @@ Spatial dataflow chips expose a **graph-level** API: you pass the framework a Te
 ## 5. The execution-model choice cascades up
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     EM[Execution model choice] --> A[SIMT]
     EM --> B[VLIW]
     EM --> C[Spatial dataflow]
 
     A --> A1[CUDA / Triton kernel ecosystem]
-    A --> A2[Warp-level primitives drive algorithm design]
+    A --> A2[Warp-level primitives drive<br/>algorithm design]
     A --> A3["FlashAttention exists because warps + SMEM exist"]
 
     B --> B1[XLA / JAX / Pallas frameworks]
-    B --> B2[Pjit + sharding for distributed training]
+    B --> B2[Pjit + sharding for distributed<br/>training]
     B --> B3["TPU pods up to 9216 chips because XLA handles partitioning"]
 
     C --> C1[Graph-level frameworks]
     C --> C2[Streaming inference pipelines]
     C --> C3["Cerebras MemoryX streams weights into wafer SRAM"]
 
-    A1 & B1 & C1 --> D[L5 kernels / L7 training / L8 serving differ per chip]
+    A1 & B1 & C1 --> D[L5 kernels / L7 training / L8<br/>serving differ per chip]
 ```
 
 This is why "just port CUDA to TPU" doesn't work — the abstraction levels are different. CUDA exposes warps, threads, blocks, grids; XLA exposes operators, sharding, replication. They're not refactorings of each other.

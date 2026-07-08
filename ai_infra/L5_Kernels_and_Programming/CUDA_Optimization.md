@@ -15,6 +15,7 @@ A working CUDA kernel is the starting point, not the end. The gap between a func
 ## 1. The optimization checklist — order matters
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["0. Correctness<br/>(unit tests, __syncthreads,<br/>race-free atomics)"] --> B
     B["1. Memory coalescing<br/>(contiguous 128B segments<br/>per warp)"] --> C
@@ -200,6 +201,7 @@ Effective occupancy = $\min(W_{\text{reg}}, W_{\text{smem}}, W_{\text{threads}})
 More registers per thread enables register tiling (faster per-thread compute) but reduces $W_{\text{reg}}$, lowering occupancy. The tradeoff is not monotonic: beyond a certain occupancy floor ($\sim$25-50%), additional warps provide diminishing returns because the kernel becomes compute-bound, not latency-bound.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "Occupancy vs. Throughput"
         A["Low occupancy<br/>(8-16 warps)<br/>→ latency stalls"] --> B["Sweet spot<br/>(24-40 warps)<br/>→ latency hidden"]
@@ -224,7 +226,7 @@ my_kernel(/* ... */) {
 
 Nsight Compute reports the occupancy limiters directly:
 
-```
+```bash
 ncu --section LaunchStats --section Occupancy ./my_kernel
 ```
 
@@ -475,7 +477,7 @@ The `tmem::reduce_add` operation is particularly important for cross-warp reduct
 
 The TMEM staging step changes the optimal pipeline structure for Blackwell GEMM kernels:
 
-```
+```ascii-graph
 Hopper:  TMA → SMEM → wgmma(SMEM) → RF accumulate
 Blackwell: TMA → SMEM → TMEM → wgmma(TMEM) → RF accumulate
 ```
@@ -547,13 +549,14 @@ TMA advantages:
 
 Without double buffering, a tiled kernel alternates between loading a tile and computing on it:
 
-```
+```ascii-graph
 Load tile 0 → Compute tile 0 → Load tile 1 → Compute tile 1 → ...
 ```
 
 The load latency (HBM round-trip: 200-800 cycles) is entirely exposed to the compute pipeline. Double buffering allocates two SMEM buffers: while the compute stage processes buffer $i$, the async copy stage fills buffer $i \oplus 1$.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title Double-Buffered Pipeline
     dateFormat X
@@ -612,6 +615,7 @@ Double buffering typically yields 20-40% speedup on memory-bound kernels by hidi
 On Hopper, `wgmma` is asynchronous and operates on SMEM-resident data. The optimal pipeline assigns one warp group (128 threads) to continuously issue `wgmma` instructions (consumer) and a second warp group to continuously issue TMA loads (producer). The two groups communicate through SMEM buffers with barrier synchronization.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant P as Producer warp group<br/>(TMA loads)
@@ -683,13 +687,13 @@ For small cross-block exchanges (a few KB of partial results), DSMEM's advantage
 The canonical cluster optimization is the **cluster-level reduction**, replacing the traditional two-kernel approach:
 
 **Without clusters (traditional):**
-```
+```ascii-graph
 Kernel 1: each block reduces its portion to 1 value → write to global memory
 Kernel 2: single block reads all partial sums → reduces to final result
 ```
 
 **With clusters:**
-```
+```ascii-graph
 Single kernel: blocks in a cluster reduce locally in SMEM,
                then exchange partial results via DSMEM,
                one block produces the cluster's final partial sum → atomicAdd to global total
@@ -728,7 +732,7 @@ cluster_reduce(float *input, float *output, int n) {
 
 ### 10.4 Decision flowchart
 
-```
+```ascii-graph
 Is cross-block data exchange needed within a single kernel?
   |
   +-- No  → Regular threadblocks (no cluster needed)
@@ -877,6 +881,7 @@ The **roofline plot** places the kernel on a chart with FLOPs on the y-axis and 
 ### 13.3 Iterative optimization workflow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Profile with<br/>Nsight Systems"] --> B{"Gap between<br/>kernels?"}
     B -->|Yes| C["Fuse kernels or<br/>use CUDA graphs"]
@@ -985,6 +990,7 @@ Warp shuffle (`__shfl_down_sync`) reads directly from the register file of the s
 ## 15. End-to-end optimization flow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START["Correct kernel<br/>(unit tests pass)"] --> COAL{"Coalesced?"}
     COAL -->|No| FIX_C["Restructure access pattern<br/>(SoA, transpose, vector loads)"]

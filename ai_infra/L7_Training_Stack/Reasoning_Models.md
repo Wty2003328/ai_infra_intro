@@ -70,6 +70,7 @@ OpenAI has not published architectural details of o1, o3, or o4-mini. What can b
 ### 2.2 The hidden reasoning token mechanism
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     P["User Prompt"] --> ENC["Tokenize prompt<br/>T_prompt tokens"]
     ENC --> THINK["Autoregressive Thinking Phase<br/>Generate T_think hidden tokens<br/>(not shown to user)"]
@@ -95,6 +96,7 @@ The thinking phase is pure autoregressive decoding. There is no beam search, no 
 The o-series training pipeline is believed to follow this structure:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph STAGE1["Stage 1: Pre-training"]
         PT["Standard next-token pretraining<br/>on large text/code corpus"]
@@ -141,6 +143,7 @@ DeepSeek-R1 uses the same base architecture as DeepSeek-V3: 671B total parameter
 DeepSeek-R1 is the most thoroughly documented reasoning model. Its training has three stages:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph STAGE1["Stage 1: Cold-Start SFT"]
         direction TB
@@ -204,6 +207,7 @@ where $A$ is the asymptotic accuracy ceiling, $B$ is a problem-difficulty consta
 ### 4.2 Scaling regimes
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph REGIME1["Regime 1: Linear Scaling<br/>(T_think < T_critical)"]
         L1["Each additional 1K tokens<br/>yields ~constant accuracy gain"]
@@ -299,6 +303,7 @@ Forced termination degrades accuracy by 5--15% compared to natural termination a
 The most impactful form of tool use during reasoning is code execution. The model writes code (typically Python) as part of its thinking trace, executes it, and incorporates the output back into reasoning.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant M as Model
     participant S as Sandbox
@@ -329,15 +334,15 @@ Some reasoning models can invoke web search or browse documents during reasoning
 
 The model may interleave multiple tool calls within a single reasoning trace:
 
-```
-[Think] Let me approach this physics problem...
-[Think] First, I'll look up the gravitational constant.
+```text
+[Think]  Let me approach this physics problem...
+[Think]  First, I'll look up the gravitational constant.
 [Search] "gravitational constant G value"
 [Result] G = 6.674 × 10^-11 N⋅m²/kg²
-[Think] Now let me compute the orbital velocity...
-[Code] import math; v = math.sqrt(G * M / r)
+[Think]  Now let me compute the orbital velocity...
+[Code]   import math; v = math.sqrt(G * M / r)
 [Output] 7714.2 m/s
-[Think] This matches the expected range for LEO...
+[Think]  This matches the expected range for LEO...
 [Answer] The orbital velocity is approximately 7.7 km/s.
 ```
 
@@ -444,6 +449,7 @@ For comparison, a non-reasoning 70B model answering the same prompt (no thinking
 ## 9. End-to-End Cause/Effect Flow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Reasoning model goal:<br/>higher accuracy via more inference compute"] --> B["Long chain-of-thought RL<br/>(GRPO / outcome RL)"]
     B --> C["Model learns to emit<br/>10K-100K thinking tokens"]

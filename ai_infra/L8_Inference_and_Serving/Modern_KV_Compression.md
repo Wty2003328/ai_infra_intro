@@ -43,6 +43,7 @@ For Llama-3-70B: $2 \times 80 \times 8 \times 128 \times 2 = 327{,}680$ bytes $\
 KV compression methods compose in layers. Each layer multiplies the compression ratio of the ones below it.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Full KV cache<br/>FP16, all tokens"] --> B{"Architectural?"}
     B -->|"MHA"| C1["2·H·d_h per token per layer"]
@@ -423,6 +424,7 @@ At INT4, DeepSeek-V3 at 128K context uses $\sim 2.2$ GB per request. Ten concurr
 ### 7.2 Accuracy vs Compression Pareto Front
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 quadrantChart
     title KV Compression: Accuracy vs Compression Ratio
     x-axis Low compression --> High compression
@@ -591,6 +593,7 @@ At H100's HBM bandwidth of 3.35 TB/s, this reduces the attention kernel's runtim
 ## 12. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Full KV cache<br/>MHA, FP16, S=128K"] --> B["Architectural layer"]
     B -->|"GQA"| B1["8x fewer KV heads<br/>~320 KB/token"]

@@ -33,6 +33,7 @@ The dataflow choice is which element type stays *resident* in the MAC array betw
 Each gives different memory traffic and is right for different shapes.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph WS["Weight-stationary (TPU MXU style)"]
         direction TB
@@ -81,8 +82,9 @@ A systolic array is a 2D mesh of MAC processing elements (PEs) where data **move
 ### 2.1 The canonical TPU MXU (weight-stationary)
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
-    subgraph MXU["MXU systolic array (4×4 illustration; real TPU is 128×128 or 256×256)"]
+    subgraph MXU["MXU systolic array (4×4 illustration; real TPU is<br/>128×128 or 256×256)"]
         direction TB
         subgraph ROW0[" "]
             direction LR
@@ -152,6 +154,7 @@ The flip side: systolic arrays add 2(D−1) cycles of fill+drain latency. For a 
 ### 3.1 The pre-load + stream cycle
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     autonumber
     participant HBM
@@ -199,6 +202,7 @@ This is the structural reason TPUs win on inference at scale (uniform GEMM workl
 Tenstorrent rejects the rigid systolic array. A Wormhole or Blackhole chip is a 2D mesh of ~120 **Tensix cores**, each containing a small 32×32 systolic-ish MAC engine, scratchpad, and a NoC router.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CHIP["Tenstorrent chip — 2D mesh of Tensix tiles"]
         direction TB
@@ -249,6 +253,7 @@ Dataflow philosophy: **chip-as-mesh**. A neural network is mapped as a *spatial 
 Cerebras pushes the mesh to its logical extreme: an **entire 300mm wafer** as one chip — 2.6 trillion transistors, ~900,000 PEs. No reticle stitching, no inter-die signaling — just on-wafer routing.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph WSE["Cerebras WSE — 7×12 reticle grid stitched into one piece"]
         direction LR
@@ -294,6 +299,7 @@ NVIDIA's GPU is *not* a pure systolic array but blends approaches:
 - **Cross-SM:** no spatial mesh; SMs communicate via L2 cache and global memory.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph SM["NVIDIA SM (Hopper / Blackwell)"]
         direction TB
@@ -320,6 +326,7 @@ This hybrid is the right answer when you need both GEMM efficiency (tensor cores
 Huawei Ascend 910B/910C uses a **DaVinci Cube** — a 16×16×16 3D systolic array (256 MACs per layer × 16 layers = 4 096 MACs per Cube), each cube weight-stationary.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CUBE["DaVinci Cube — 3D systolic, 16×16×16 = 4096 MACs"]
         direction TB
@@ -360,10 +367,11 @@ For random sparsity (e.g., LLM activations after ReLU/GELU, ~50% zeros), dense s
 Real systolic arrays are surrounded by buffers that decouple HBM latency from streaming cadence:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     HBM[HBM<br/>~10 TB/s · 300 cyc latency]:::off
     WBUF[Weight buffer<br/>~MB SRAM<br/>holds K×D weights for one tile]:::buf
-    ABUF[Activation buffer<br/>~MB SRAM<br/>holds D activations × pipeline depth]:::buf
+    ABUF[Activation buffer<br/>~MB SRAM<br/>holds D activations × pipeline<br/>depth]:::buf
     SYS[Systolic array<br/>D×D PEs]:::sys
     OBUF[Output / accumulator buffer<br/>holds D partial sums]:::buf
     HBM --> WBUF
@@ -401,26 +409,27 @@ For a 128×128 MXU at 1 GHz with K=512 per tile: tile compute time ≈ 512 + 254
 ## 11. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    A[Naïve MAC array reads operand from RF every cycle] --> B[Operand bandwidth ~ N_MAC × ops_per_cycle]
+    A[Naïve MAC array reads operand from<br/>RF every cycle] --> B[Operand bandwidth ~ N_MAC ×<br/>ops_per_cycle]
     B --> C[At FP4 demand: ~100 TB/s/SM]
-    C --> D[Required: dataflow that amortizes operand reads]
+    C --> D[Required: dataflow that amortizes<br/>operand reads]
 
-    E[Systolic WS: each weight reused M times] --> F[Weight bandwidth shrinks M×]
-    F --> G[TPU MXU: ~95% utilization on dense GEMM]
+    E[Systolic WS: each weight reused M<br/>times] --> F[Weight bandwidth shrinks M×]
+    F --> G[TPU MXU: ~95% utilization on dense<br/>GEMM]
 
     H[GPU general-purpose RF] --> I[Software tiling via wgmma + TMA]
-    I --> J[~70% utilization but flexible to any compute graph]
+    I --> J[~70% utilization but flexible to<br/>any compute graph]
 
     K[Sparsity-aware routing] --> L[1.3–1.6× speedup on random sparse]
     M[Structured 2:4 muxing] --> N[Free 2× speedup on trained sparse]
 
     O[Cerebras: chip = wafer] --> P[No HBM; weights live on-die]
-    P --> Q[Different bandwidth tradeoff: SRAM-only inference]
+    P --> Q[Different bandwidth tradeoff:<br/>SRAM-only inference]
 
-    R[Tenstorrent: 2D mesh + per-tile NoC] --> S[Activations route tile-to-tile, skip HBM]
+    R[Tenstorrent: 2D mesh + per-tile NoC] --> S[Activations route tile-to-tile,<br/>skip HBM]
 
-    G & J & N & Q & S --> T[L3: chip-microarchitecture choice = dataflow choice]
+    G & J & N & Q & S --> T[L3: chip-microarchitecture choice =<br/>dataflow choice]
 ```
 
 ---

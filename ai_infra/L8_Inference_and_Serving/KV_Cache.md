@@ -109,7 +109,7 @@ Given total GPU memory $M$, weight footprint $W$, and per-token cost $c$: $\text
 
 ### 3.1 Naive contiguous layout
 
-```
+```text
 kv_cache[layer][k_or_v][batch][head][seq][d_head]
 shape: (n_l, 2, B, n_kv, S_max, d_h)
 ```
@@ -171,12 +171,12 @@ For Llama-3 70B with $B_s = 16$: $16 \times 327{,}680 = 5.24$ MB per block.
 
 A global **block pool** holds all physical blocks. Each sequence maintains a **block table** mapping logical block indices to physical block IDs:
 
-```
+```text
 Sequence "Hello world, how are" (18 tokens, block_size=16):
 
-  Logical:   [Block 0]     [Block 1]
-  Tokens:    [0..15]       [16..17, pad..15]
-  Physical:  [Block #42]   [Block #781]
+  Logical:   [ Block 0 ]   [ Block 1         ]
+  Tokens:    [ 0..15   ]   [ 16..17, pad..15 ]
+  Physical:  [ Block #42 ] [ Block #781      ]
 
   block_table = [42, 781]
 ```
@@ -196,7 +196,7 @@ If the free list is exhausted mid-prefill, the scheduler either (a) triggers pre
 
 When a sequence is **forked** (parallel generation from the same prefix, as in beam search or multi-sample generation), the forked sequences initially share all prefix blocks:
 
-```
+```text
 Original sequence:  block_table = [42, 107, 203, ...]
 Forked sequence:    block_table = [42, 107, 203, ...]  (same physical blocks)
 
@@ -250,7 +250,7 @@ Block size 16 (vLLM default) is the sweet spot: indirection cost < 5% vs contigu
 
 ### 4.6 PagedAttention kernel sketch
 
-```python
+```text
 def paged_attention_decode(q, K_pool, V_pool, block_table, num_valid_in_last):
     """Decode-step attention via block-table indirection."""
     # q: (n_kv, d_h) -- query for the new token, possibly gathered for GQA
@@ -332,16 +332,16 @@ This is a global LRU across all sequences' unreferenced cached blocks. The LRU o
 
 A radix tree (compact trie) indexes the cache by token sequence. Each node represents a token subsequence of arbitrary length (not necessarily block-aligned) and owns the corresponding KV blocks.
 
-```
+```text
 Radix tree for prompts ["The cat sat", "The cat ran", "The dog sat"]:
 
           root
-         /
-       "The"  (node, owns KV for tokens 0-2)
-       /    \
-    "cat"   "dog"  (nodes, own KV for tokens 3-5)
-    /   \
- "sat"  "ran"     (leaf nodes, own KV for tokens 6-8)
+           |
+         "The"     (node, owns KV for tokens 0-2)
+        /     \
+     "cat"   "dog" (nodes, own KV for tokens 3-5)
+     /   \
+  "sat" "ran"      (leaf nodes, own KV for tokens 6-8)
 ```
 
 **Indexing and lookup.** The radix tree indexes KV blocks by their prefix hash at token granularity:
@@ -376,11 +376,11 @@ When HBM is exhausted, frameworks spill KV blocks to slower tiers. The fundament
 
 ### 6.1 Tier hierarchy
 
-```
-Tier 0: GPU HBM       ~3--8 TB/s     ~80--192 GB    [hot: active sequences]
-Tier 1: CPU DRAM      ~50--200 GB/s   ~256--2000 GB  [warm: idle sequences, prefix pool]
-Tier 2: NVMe SSD      ~10--25 GB/s    ~2--30 TB      [cold: long prefixes, RAG corpus]
-Tier 3: Remote GPU    ~100--900 GB/s  ~cluster-wide  [disaggregated pool]
+```text
+Tier 0: GPU HBM      ~3.0--8.0 TB/s   ~80--192 GB     [hot: active sequences]
+Tier 1: CPU DRAM     ~0.05-0.2 TB/s   ~256--2000 GB   [warm: idle sequences, prefix pool]
+Tier 2: NVMe SSD     ~0.01-0.03 TB/s  ~2000--30000 GB [cold: long prefixes, RAG corpus]
+Tier 3: Remote GPU   ~0.1--0.9 TB/s   ~cluster-wide   [disaggregated pool]
 ```
 
 Bandwidth ratios: HBM is 20--100x faster than CPU DRAM, which is 2--10x faster than NVMe. Every tier-crossing adds latency proportional to the bytes moved divided by the tier bandwidth.
@@ -574,6 +574,7 @@ vLLM distinguishes new requests (preempted via recomputation -- cheap, no prior 
 ## 9. End-to-End Cause and Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Decode step for B sequences"] --> B["Read weights: W_bytes"]
     A --> C["Read KV: B x S x c_token"]

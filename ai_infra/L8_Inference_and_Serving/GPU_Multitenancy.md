@@ -13,7 +13,8 @@ A B200 costs ~$30–40K and most inference workloads cannot saturate it alone: a
 ## 1. The sharing spectrum
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     TS[Time-slicing<br/>ctx switch whole GPU]:::soft --> MPS[MPS<br/>spatial co-run,<br/>shared everything]:::soft
     MPS --> GC[Green Contexts<br/>SM partition within process]:::mid
     GC --> MIG[MIG<br/>hardware slice:<br/>SMs+L2+HBM+DMA]:::hard

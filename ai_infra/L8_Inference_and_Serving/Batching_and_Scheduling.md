@@ -69,6 +69,7 @@ $$\text{Step time} = 224 / 3350 \approx 67\;\text{ms} \implies 64 / 0.067 = 955\
 The 67 ms step produces 64 tokens. Individual TPOT = 67 ms. Throughput scales nearly linearly because we are still bandwidth-bound and KV additions are small relative to weights. **Batching is nearly free in the bandwidth-bound regime** until KV reads dominate.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     A[Prefill Phase] --> B["Compute-bound<br/>Tensor cores saturated<br/>I >> I_ridge"]
     C[Decode Phase] --> D["Memory-bandwidth-bound<br/>Weights streamed every token<br/>I << I_ridge"]
@@ -93,6 +94,7 @@ $$\text{input\_ids}: (B, S_{\max}), \quad \text{KV}: (B, S_{\max}, L, 2, H_{kv},
 ### 2.2 Why it fails for online serving
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title Static Batch: 4 requests, varying output lengths
     dateFormat X
@@ -136,17 +138,17 @@ Introduced by Orca (Yu et al., OSDI 2022), now the standard in every production 
 
 ### 3.2 The step loop
 
-```
-loop forever:
-    1. ADMISSION: admit new requests from waiting queue if budget allows
-    2. SCHEDULING: select which sequences run this step
-       - All active decode sequences (1 token each)
-       - Some prefill chunks if token budget remains
-    3. BUILD INPUTS: pack tokens, position ids, KV block tables, slot mappings
-    4. FORWARD: model(inputs) -> logits
-    5. SAMPLING: per-sequence sampling (temperature, top-p, grammar, etc.)
-    6. UPDATE: append sampled tokens, check for EOS / max_tokens
-    7. CLEANUP: release KV blocks for finished sequences
+```text
+LOOP FOREVER:
+    1. ADMISSION:  Admit new requests from waiting queue if budget allows.
+    2. SCHEDULING: Select which sequences run this step.
+                   - All active decode sequences (1 token each).
+                   - Some prefill chunks if token budget remains.
+    3. BUILD:      Pack tokens, position IDs, KV block tables, slot mappings.
+    4. FORWARD:    Execute model(inputs) -> logits.
+    5. SAMPLING:   Apply per-sequence parameters (temperature, top-p, etc.).
+    6. UPDATE:     Append sampled tokens, check for EOS / max_tokens.
+    7. CLEANUP:    Release KV blocks for finished sequences.
 ```
 
 Each iteration of this loop is one GPU forward pass. The set of participating sequences changes across iterations; no two consecutive steps necessarily have the same batch.
@@ -161,58 +163,60 @@ The scheduler maintains three data structures:
 
 The per-iteration algorithm:
 
-```
-function schedule_step():
-    tokens_remaining = B_tok     # per-step token budget
-    num_seqs_remaining = B_seq   # per-step sequence budget
+```text
+FUNCTION schedule_step():
+    tokens_remaining   = B_tok    // Per-step token budget
+    num_seqs_remaining = B_seq    // Per-step sequence budget
 
-    # Phase 1: Swap in preempted sequences (if any)
-    for seq in swap_pool (sorted by priority desc):
-        if tokens_remaining < 1: break
-        if not enough_free_blocks(seq.kv_blocks): break
-        swap_in(seq)             # DMA KV from CPU to GPU
+    // Phase 1: Swap in preempted sequences (if any)
+    FOR seq IN swap_pool (sorted by priority desc):
+        IF tokens_remaining < 1: BREAK
+        IF NOT enough_free_blocks(seq.kv_blocks): BREAK
+        
+        swap_in(seq)              // DMA KV from CPU to GPU
         move seq to running_set
-        tokens_remaining -= 1    # will decode this step
+        tokens_remaining -= 1     // Will decode this step
 
-    # Phase 2: Schedule all active decode sequences
-    decode_seqs = [s for s in running_set if s.phase == DECODE]
+    // Phase 2: Schedule all active decode sequences
+    decode_seqs = [s FOR s IN running_set IF s.phase == DECODE]
     num_decodes = min(len(decode_seqs), num_seqs_remaining)
-    tokens_remaining -= num_decodes   # each decode costs 1 token
+    
+    tokens_remaining -= num_decodes // Each decode costs 1 token
 
-    # Phase 3: Admit new requests and schedule prefill chunks
-    for req in waiting_queue:
-        if tokens_remaining <= 0: break
-        if num_seqs_remaining <= 0: break
+    // Phase 3: Admit new requests and schedule prefill chunks
+    FOR req IN waiting_queue:
+        IF tokens_remaining <= 0: BREAK
+        IF num_seqs_remaining <= 0: BREAK
 
-        # Check admission: KV budget
+        // Check admission: KV budget
         needed_blocks = ceil(req.remaining_prompt_tokens / block_size)
-        if needed_blocks > free_block_count:
-            # Try preemption (Section 9)
-            if not preempt_victim(needed_blocks):
-                break   # cannot admit, stop
+        IF needed_blocks > free_block_count:
+            IF NOT preempt_victim(needed_blocks):
+                BREAK             // Cannot admit, stop
 
-        # Prefix cache lookup (reduce prefill work)
+        // Prefix cache lookup (reduce prefill work)
         cached_blocks = prefix_cache_lookup(req)
         req.cached_kv_blocks = cached_blocks
         remaining_prefill = req.prompt_length - cached_blocks * block_size
 
-        # Determine chunk size
+        // Determine chunk size
         chunk = min(remaining_prefill, tokens_remaining)
-        if chunk == 0: continue    # no budget left for this step
+        IF chunk == 0: CONTINUE   // No budget left for this step
 
         req.prefill_chunk = chunk
         move req to running_set
-        tokens_remaining -= chunk
+        tokens_remaining   -= chunk
         num_seqs_remaining -= 1
 
-    # Phase 4: Schedule continuation of partially-prefilled sequences
-    for seq in running_set where seq.phase == PREFILL_PARTIAL:
-        if tokens_remaining <= 0: break
+    // Phase 4: Schedule continuation of partially-prefilled sequences
+    FOR seq IN running_set WHERE seq.phase == PREFILL_PARTIAL:
+        IF tokens_remaining <= 0: BREAK
+        
         chunk = min(seq.remaining_prefill, tokens_remaining)
         seq.prefill_chunk = chunk
         tokens_remaining -= chunk
 
-    return build_model_input(running_set)
+    RETURN build_model_input(running_set)
 ```
 
 **Prefill vs decode budget balancing.** The key design choice is in Phase 2 vs Phase 3 ordering. The algorithm above prioritizes decodes (Phase 2) over prefills (Phase 3). This is called **decode-first scheduling**: every running decode sequence gets a slot before any new prefill is admitted. The rationale is that decode sequences have active users streaming tokens; a missed decode step is visible as a TPOT spike. Prefill sequences have not yet produced output; delaying their first token is less user-visible than stalling an in-progress stream.
@@ -287,6 +291,7 @@ where $b_w$ = bytes per weight element, $b_{kv}$ = bytes per KV token, $S$ = ave
 When $P$ is large, the compute term dominates and decode TPOT spikes. The interference is proportional to the prefill length in the step.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "Mixed Step (no chunking)"
         A["Prefill 4K tokens<br/>~600 ms compute"] --> C["Step time: 620 ms"]
@@ -751,7 +756,7 @@ Consider a server running Llama-3-70B on 2$\times$ H100 with:
 
 **Timeline:**
 
-```
+```text
 t=0ms   Request R1 arrives. Prompt=2048 tokens.
         KV needed: 2048×320KB = 640 MB. Pool has 30 GB. Admit.
         Prefill chunk 1: 1024 tokens. Step time ≈ 30ms.

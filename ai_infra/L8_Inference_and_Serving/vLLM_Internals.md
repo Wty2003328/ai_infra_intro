@@ -34,6 +34,7 @@ This page is a code-level architectural tour. It traces a single request from HT
 The V1 engine (shipped late 2024, default since v0.6) separates the scheduling critical path from the model execution path by placing them in different processes connected via shared-memory queues.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     CLIENT["Client<br/>HTTP / gRPC / SDK"] -->|"POST /v1/chat/completions"| FRONTEND["Frontend Process<br/>AsyncLLMEngine<br/>tokenization, request obj"]
     FRONTEND -->|"zmq push<br/>Request proto"| CORE["EngineCore Process<br/>scheduler + block manager"]
@@ -122,6 +123,7 @@ On subsequent steps, the scheduler includes the request in the decode batch (1 t
 When the sampler emits EOS or `max_tokens` is reached, the request moves to the **finished** state. Its block table is released: each block's reference count is decremented. Blocks with refcount zero return to the free list (or remain in the prefix cache if they are hash-registered). The final output is streamed to the client.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 stateDiagram-v2
     [*] --> Waiting : Request arrives
     Waiting --> Running : Scheduler admits<br/>(KV budget + token budget)
@@ -140,6 +142,7 @@ stateDiagram-v2
 The scheduler runs once per step and must decide: which waiting requests to admit, which running sequences to schedule, and whether any preemption is necessary. The decision is greedy and order-dependent.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START["Step begins"] --> SWAP_IN["Swap in preempted sequences<br/>if swap space available"]
     SWAP_IN --> ADMIT{"Waiting queue<br/>non-empty?"}
@@ -199,7 +202,7 @@ The V0 scheduler was a single Python class (`Scheduler`) that maintained separat
 
 **Unified scheduling in V1.** The V0 scheduler treated prefill and decode as distinct phases with separate code paths. In V1, the scheduler makes no explicit distinction: it simply iterates over all requests in the running set and checks each request's state:
 
-```
+```text
 for req in running_set:
     if req.num_computed_tokens < req.num_prompt_tokens:
         # This request still needs prefill
@@ -247,7 +250,7 @@ Reasoning models (e.g., DeepSeek-R1, o-series) interleave visible "thinking" tok
 
 The thinking budget ($T_{\text{budget}}$) is a new per-request scheduler parameter that caps the number of thinking tokens a request may generate:
 
-```python
+```text
 # API parameter
 "thinking_budget": 8192  # max thinking tokens before forced transition
 ```
@@ -388,7 +391,8 @@ The V2 redesign decomposes execution into a **prepare-compile-execute** pipeline
 **Key architectural change:** The V2 ModelRunner no longer owns scheduling logic or dynamic shape computation. Those responsibilities moved to the EngineCore's prepare phase. The Worker is now a pure execution engine -- receive plan, run kernels, return samples.
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     subgraph "EngineCore Process"
         PREP["prepare_inputs()<br/>flat ModelInput proto<br/>block tables, slot maps,<br/>seq metadata"]
     end
@@ -470,6 +474,7 @@ The original block manager operated on a single memory tier: GPU HBM. CPU DRAM e
 #### Tier topology
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph "Tier 0 — GPU HBM (hot)"
         HBM["Physical KV blocks<br/>latency: ~0 ns (on-chip)<br/>bandwidth: 3.35 TB/s (H100)<br/>capacity: ~60 GB"]
@@ -492,9 +497,9 @@ flowchart TB
 
 Each logical block can reside in any tier. The block table is extended with a tier tag:
 
-```python
+```text
 # Block table entry: (physical_block_id, tier)
-block_table[seq_id] = [(42, "hbm"), (107, "hbm"), (0, "dram"), (3, "dram"), ...]
+block_table[seq_id] = [ (42, "hbm"), (107, "hbm"), (0, "dram"), (3, "dram"), ... ]
 ```
 
 The PagedAttention kernel is tier-aware: it reads HBM blocks directly, issues asynchronous DMA prefetch for DRAM blocks (copying them into a temporary HBM staging buffer before the attention kernel launches), and signals the scheduler when all required blocks are in HBM. NVMe blocks are never read directly by the GPU -- they must be promoted to DRAM first, then to HBM.
@@ -575,11 +580,11 @@ The codebook overhead reduces the raw 8$\times$ compression (16 bit to 2 bit) to
 
 The block manager allows per-block KV dtype, enabling mixed precision:
 
-```python
+```text
 block_table[seq_id] = [
-    (42, "hbm", "fp16"),    # recent decode blocks: full precision
-    (107, "hbm", "tq2"),    # older decode blocks: compressed
-    (0, "dram", "tq2"),     # offloaded blocks: compressed
+    (42,  "hbm",  "fp16"),  # recent decode blocks: full precision
+    (107, "hbm",  "tq2" ),  # older decode blocks: compressed
+    (0,   "dram", "tq2" ),  # offloaded blocks: compressed
 ]
 ```
 
@@ -606,6 +611,7 @@ with $h_{-1} = 0$ (null seed). The hash chain ensures that identical tokens at d
 When a new request's prefix hash matches an existing cached block, the block manager does **not** copy the KV data. Instead, it increments the block's reference count and points the new sequence's block table entry at the shared physical block.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph "Request A (existing)"
         A0["Block 0<br/>hash: h₀<br/>refcount: 2"]
@@ -803,7 +809,8 @@ Previous disaggregated implementations supported only unidirectional KV movement
    - **Load-aware migration**: When a decode instance is overloaded, its KV blocks for selected sequences are migrated to a less-loaded decode instance via the prefill pool as intermediary, enabling dynamic load balancing without recomputation.
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     subgraph "Prefill Pool"
         P1["Prefill GPU 1"] --- P2["Prefill GPU 2"]
     end
@@ -855,7 +862,7 @@ Mooncake is a distributed KV cache store that uses SSD as the primary storage ti
 
 Mooncake provides a **shared SSD-backed KV store** that decouples producers from consumers:
 
-```
+```ascii-graph
 Prefill Instance → write KV blocks → Mooncake SSD Store → read KV blocks → Decode Instance
 ```
 
@@ -882,6 +889,7 @@ The transfer latency is amortized by batching: a decode instance pulls multiple 
 ## 10. Cause and Effect: Request Flow
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     ARR["Request arrives<br/>prompt = S tokens"] --> TOK["Tokenize<br/>→ token IDs"]
     TOK --> WAIT["Append to Waiting Queue"]
@@ -1062,6 +1070,7 @@ Total logical blocks across all 4 GPUs: 25{,}936 (each block is sharded across r
 The V1 codebase (approximate; rapidly evolving, as of v0.21.0):
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph vllm["vllm/"]
         subgraph eng["engine/"]
@@ -1259,7 +1268,8 @@ Once the IR is constructed, the compiler applies a sequence of optimization pass
 After optimization, the IR is lowered to an **execution plan**: an ordered list of kernel launches with pre-computed memory offsets. The execution plan is executed by the V2 ModelRunner's `execute_model()` method (Section 4.4).
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     MODEL["PyTorch<br/>Model Definition"] -->|"trace"| IR["vLLM IR<br/>(DAG of ops)"]
     IR -->|"optimize"| OPT_IR["Optimized IR<br/>(fused, planned)"]
     OPT_IR -->|"lower"| PLAN["Execution Plan<br/>(kernel launch schedule)"]

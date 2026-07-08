@@ -53,6 +53,7 @@ Driver upgrades are the most dangerous operation. The operator performs a rollin
 7. If validation fails, leave the node cordoned and alert.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START[Operator detects new driver version] --> CORDON[Cordon node]
     CORDON --> DRAIN[Drain GPU pods<br/>respect PDB]
@@ -246,7 +247,7 @@ An NVLink-connected group completes the all-reduce in $\sim$2 ms. A PCIe-split g
 
 Node Feature Discovery (NFD) labels each node with its GPU topology. Combined with NVIDIA's GPU Feature Discovery, nodes receive labels such as:
 
-```yaml
+```text
 labels:
   nvidia.com/gpu.count: "8"
   nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
@@ -257,10 +258,10 @@ labels:
 
 The `nvidia-smi topo -m` command reveals the actual topology:
 
-```
-GPU0  GPU1  GPU2  GPU3  GPU4  GPU5  GPU6  GPU7
-GPU0   X    NV12  NV12  NV12  NV12  NV12  NV12  NV12
-GPU1  NV12    X   NV12  NV12  NV12  NV12  NV12  NV12
+```text
+      GPU0   GPU1   GPU2   GPU3   GPU4   GPU5   GPU6   GPU7
+GPU0    X    NV12   NV12   NV12   NV12   NV12   NV12   NV12
+GPU1  NV12     X    NV12   NV12   NV12   NV12   NV12   NV12
 ...
 ```
 
@@ -632,6 +633,7 @@ where $C_i$ is the cost per replica of model $i$ and $R_i$ is the number of repl
 **Wide expert parallelism for MoE.** llm-d adds native support for wide expert parallelism (EP) in Mixture-of-Experts models. MoE models like Mixtral and DeepSeek-V3 have 128+ experts, and EP degrees of 64--256 are common. llm-d's scheduler understands the expert-to-GPU mapping and places pods to minimize the all-to-all communication overhead between expert groups. This is critical for MoE models where the expert all-to-all can dominate decode latency if pods are poorly placed.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph K8s["Kubernetes Cluster"]
         subgraph Scheduler["llm-d Scheduler Extender"]
@@ -711,6 +713,7 @@ where $R_m$ is the number of replicas for model $m$, $\text{HBM}_m$ is HBM per r
 ### 6.2 Decision Framework
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START[Choose orchestration] --> Q1{Single model<br/>or multi-model?}
     Q1 -->|Single| Q2{Need prefill/decode<br/>disaggregation?}
@@ -808,7 +811,7 @@ Istio/Envoy sidecars add 1–3 ms per-hop latency and 5–15% CPU overhead per p
 
 **Recommendation:** disable sidecar injection on inference pods and handle TLS at the ingress gateway:
 
-```yaml
+```text
 metadata:
   annotations:
     sidecar.istio.io/inject: "false"
@@ -919,6 +922,7 @@ Tenants who have used less than their fair share receive higher scheduling prior
 ## 11. End-to-End Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["GPU not in default K8s"] --> B["GPU Operator installs device plugin"]
     B --> C["Scheduler sees nvidia.com/gpu"]

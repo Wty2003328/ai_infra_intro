@@ -48,6 +48,7 @@ The split mirrors the broader 2026 trend (NVIDIA Rubin CPX, AWS Trainium vs Infe
 A TPU v5p chip has 1 TensorCore + 4 MXUs per TensorCore. Each MXU is a 128×128 weight-stationary systolic array.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph CHIP["TPU v5p chip"]
         direction TB
@@ -118,6 +119,7 @@ Each TPU chip has 4–6 ICI links (per generation). Each link: ~50 GB/s unidirec
 Topology: **3D torus** of $x \times y \times z$ chips. v5p pod = $20 \times 20 \times 22 = 8\,800$ chips (8 960 with redundancy). Ironwood = larger, similar topology.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph TORUS["3D torus topology — every chip has 6 neighbors (±X, ±Y, ±Z)"]
         direction TB
@@ -168,6 +170,7 @@ For comparison: NVL576 (Rubin) has ~1 PB/s bisection — **higher per-chip** but
 ## 5. The XLA / JAX / Pallas software stack
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     USER["User code<br/>(JAX, TensorFlow, PyTorch-XLA)"]:::user
     XLA[XLA HLO compiler]:::xla
@@ -288,18 +291,19 @@ Note: TPUs have **larger VMEM** (~96 MB on v5p) than GPU SMEM (~256 KB/SM × 128
 ## 9. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    A[VLIW + systolic = compiler-scheduled] --> B[No warp scheduler overhead]
+    A[VLIW + systolic =<br/>compiler-scheduled] --> B[No warp scheduler overhead]
     B --> C[~30% better W/FLOP]
 
-    D[128×128 MXU weight-stationary] --> E[~95% utilization on dense GEMM large K]
+    D[128×128 MXU weight-stationary] --> E[~95% utilization on dense GEMM<br/>large K]
     D --> F[~30% on small K — XLA must batch]
 
-    G[VMEM 96 MB] --> H[Larger operand staging than GPU SMEM]
+    G[VMEM 96 MB] --> H[Larger operand staging than GPU<br/>SMEM]
 
     I[3D torus ICI] --> J[Bisection scales with N²]
     K[OCS] --> L[Topology reconfigurable in seconds]
-    L --> M[Map exactly the shape your job needs]
+    L --> M[Map exactly the shape your job<br/>needs]
 
     N[XLA / JAX shape specialization] --> O[Recompile per shape]
     O --> P[Dynamic shapes painful]

@@ -269,6 +269,7 @@ The `sharding_strategy` parameter controls the ZeRO stage:
 ### 3.2 The forward-backward cycle
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant R as DP Rank
     participant P as Peer Ranks
@@ -309,6 +310,7 @@ sequenceDiagram
 The key performance optimization in FSDP is overlapping the all-gather of layer $i+1$ with the compute of layer $i$. The implementation prefetches parameters during the current layer's computation:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 gantt
     title FSDP forward pass — overlapped all-gather
     dateFormat X
@@ -402,6 +404,7 @@ $$T_{\text{sync}} = \frac{6{,}480}{128 \times 1} = 50.6 \;\text{s} \quad (1.4\% 
 PyTorch Distributed Checkpoint (DCP) decouples the write from training:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Training step completes"] --> B["Copy state to<br/>staging buffer"]
     B --> C["Training resumes<br/>immediately"]
@@ -417,7 +420,7 @@ The trade-off: if a failure occurs between the staging copy and the storage writ
 
 In a distributed checkpoint, each rank writes only its local shard. The checkpoint is a directory of per-rank files plus a metadata file recording the world size, TP/PP/DP decomposition, and shard map:
 
-```
+```text
 checkpoint/
   metadata.json          # world_size, dp_degree, tp_degree, pp_degree
   rank_00000.pt          # shard for rank 0
@@ -462,6 +465,7 @@ The composite MTBF across all failure types for a 10K-GPU cluster is approximate
 ### 5.2 Detecting failures
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["NCCL collective timeout<br/>(default 30 min)"] --> F["Rank failure detected"]
     B["Process exits with<br/>non-zero code"] --> F
@@ -644,6 +648,7 @@ where $\bar{n}_i$ is the recent average token count for expert $i$, $N_{\text{ta
 ### 6.3 EP communication optimization
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["MoE layer forward"] --> B{"EP degree = DP degree?"}
     B -->|Yes| C["Single all-to-all<br/>(tokens → experts)"]
@@ -748,6 +753,7 @@ NVIDIA's Megatron-Core (the library layer beneath Megatron-LM) received major up
 ### 8.2 Choosing a framework
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     Q1{"Model < 13B?"}
     Q1 -->|Yes| A["FSDP (ZeRO-3)<br/>Simplest setup"]
@@ -784,6 +790,7 @@ Note: FSDP total communication is higher than DDP's (two all-gathers + one reduc
 ## 9. Cause / effect — from memory wall to distributed training
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["16P bytes per GPU<br/>for mixed-precision AdamW"] --> B["70B = 1.12 TB<br/>does not fit on 80 GB GPU"]
     B --> C["Shard across DP dimension"]

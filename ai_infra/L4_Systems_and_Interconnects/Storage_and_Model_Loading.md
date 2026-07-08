@@ -82,7 +82,7 @@ GGUF is not typically used in data-center inference (where FP16/BF16 is loaded d
 
 Without GPUDirect, data traverses the following path:
 
-```
+```ascii-graph
 NVMe SSD → PCIe DMA → Host RAM (bounce buffer) → PCIe DMA → GPU HBM
 ```
 
@@ -98,7 +98,7 @@ Total (without GDS): $2.2 \text{ s (NVMe)} + 0.5 \text{ s (copy)} + 2.2 \text{ s
 
 GDS eliminates the host RAM bounce buffer:
 
-```
+```ascii-graph
 NVMe SSD → PCIe P2P DMA → GPU HBM
 ```
 
@@ -211,6 +211,7 @@ $$T_{ckpt, NVMe-oF} = \frac{6{,}000}{200} = 30 \text{ s}$$
 This is too slow for the 10 s target. The solution: **local NVMe + async replication**. Each node saves its shard to local NVMe (fast: ~0.5 s), then asynchronously replicates to the remote array over the network (30 s, but overlapped with training).
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Train["Training Cluster (NVL72)"]
         GPU0[GPU 0]:::gpu
@@ -273,21 +274,20 @@ At 400B scale, every checkpoint wastes over a minute of GPU time. In a 10,000-GP
 
 The core idea: **fork the training process** so that a child process handles the slow I/O while the parent continues training immediately.
 
-```
-Training Process (parent)
-    │
-    ├── step N complete
-    ├── fork()                          ← ~1-2 ms overhead
-    │       │
-    │       ├── Parent: resumes step N+1 immediately
-    │       │
-    │       └── Child (COW snapshot):
-    │               ├── GPU memory is COW-shared with parent
-    │               ├── Serializes state dict to CPU buffers
-    │               ├── Writes checkpoint to local NVMe / network storage
-    │               └── exits() when done
-    │
-    ├── step N+1, N+2, ...
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    N["Step N complete"] --> FK["fork()<br/>~1-2 ms overhead"]
+    FK --> P["Parent: resumes step N+1<br/>immediately"] --> More["step N+1, N+2, ..."]
+    FK --> Csnap["Child: COW snapshot"]
+    Csnap --> C1["GPU memory COW-shared<br/>with parent"]
+    C1 --> C2["Serialize state dict<br/>to CPU buffers"]
+    C2 --> C3["Write checkpoint to<br/>local NVMe / network storage"]
+    C3 --> C4["exit() when done"]
+    classDef parent fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef child fill:#fde68a,stroke:#b45309,color:#000
+    class N,FK,P,More parent
+    class Csnap,C1,C2,C3,C4 child
 ```
 
 **How copy-on-write works here**: After `fork()`, parent and child share the same physical memory pages (GPU memory mapped via `cudaMallocManaged` or similar unified-memory APIs, plus host-side state). The OS marks these pages as read-only. When the parent modifies a page during continued training, the kernel intercepts the write, allocates a fresh page, copies the original data, and lets the parent write to the new page. The child retains the unmodified snapshot.
@@ -302,7 +302,7 @@ PyTorch provides two complementary async-checkpoint pathways:
 
 **`torch.distributed.checkpoint` (DCP) async save**:
 
-```python
+```text
 import torch.distributed.checkpoint as dcp
 
 # Inside training loop, at checkpoint boundary:
@@ -346,11 +346,26 @@ In distributed training, all ranks must checkpoint a mutually consistent global 
 
 **Barrier-then-fork**: Before forking, all ranks execute a `torch.distributed.barrier()`. This ensures every rank has completed the same training step. After the barrier, each rank forks independently. The checkpoints are consistent because they all capture the same step.
 
-```
-Rank 0 ── step N ── barrier ── fork ── resume step N+1
-Rank 1 ── step N ── barrier ── fork ── resume step N+1
-Rank 2 ── step N ── barrier ── fork ── resume step N+1
-  ...
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    subgraph R0["Rank 0"]
+        direction LR
+        a0["step N"] --> b0["barrier"] --> c0["fork"] --> d0["resume N+1"]
+    end
+    subgraph R1["Rank 1"]
+        direction LR
+        a1["step N"] --> b1["barrier"] --> c1["fork"] --> d1["resume N+1"]
+    end
+    subgraph R2["Rank 2"]
+        direction LR
+        a2["step N"] --> b2["barrier"] --> c2["fork"] --> d2["resume N+1"]
+    end
+    b0 -.->|"collective sync"| b1 -.-> b2
+    classDef step fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef bar fill:#fee2e2,stroke:#b91c1c,color:#000
+    class a0,a1,a2,c0,c1,c2,d0,d1,d2 step
+    class b0,b1,b2 bar
 ```
 
 **Distributed Checkpoint Protocol (DCP) for sharded async saves**: DCP handles the coordination internally. Each rank saves its FSDP/ZeRO shard asynchronously. DCP writes a metadata file after all ranks confirm completion, ensuring the checkpoint directory is only marked "valid" when every shard is on disk. This prevents torn checkpoints (some ranks written, others not) from being loaded.
@@ -375,7 +390,7 @@ The overhead is ~10–20% of model size during the checkpoint window. This is ac
 
 In production, checkpoints must be durably stored in object storage (S3, GCS) for disaster recovery and cross-region access. The async pipeline has two stages:
 
-```
+```ascii-graph
 Stage 1: GPU → local NVMe (fast, ~seconds)
 Stage 2: local NVMe → S3/GCS (slow, ~tens of seconds to minutes)
 ```
@@ -420,6 +435,7 @@ This exceeds the HBM of a single GPU (192 GB on B300). The solution is a tiered 
 ### 4.2 The KV Cache Tier Stack
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph Tiers["KV Cache Storage Tiers"]
         direction TB
@@ -472,6 +488,7 @@ In disaggregated serving architectures (Mooncake, DistServe), the KV cache is st
 ## 5. End-to-end Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["1T model + Adam = 6 TB checkpoint"] --> B["600 GB/s write BW for 10 s save"]
     B --> C["Local NVMe + async replication"]

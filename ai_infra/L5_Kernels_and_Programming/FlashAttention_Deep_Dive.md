@@ -52,6 +52,7 @@ $$AI_{\text{ridge}} = \frac{989 \;\text{TFLOPS}}{3.35 \;\text{TB/s}} \approx 295
 The naive kernel at $AI \approx 62 \ll 295$ is **memory-bound**, achieving only $\sim 21\%$ of peak compute.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     A[Naive Attention Kernel] --> B["Materialize S, P in HBM"]
     B --> C["HBM traffic ~8N² bytes"]
@@ -108,6 +109,7 @@ $$\frac{\mathbf{o}^{(T)}}{\ell^{(T)}} = \frac{\sum_k e^{s_k - m^{(T)}} v_k}{\sum
 FlashAttention v1 (Dao et al., 2022) partitions $Q$ into blocks of $B_r$ rows and $K, V$ into blocks of $B_c$ rows. Each query block iterates over all key/value blocks, accumulating output in SRAM.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Outer["Outer Loop: iterate over Q blocks"]
         direction TB
@@ -168,6 +170,7 @@ $$AI_{\text{FA1}} = \frac{4N^2 d}{\Theta(N^2 d^2 / M)} = \Theta\!\left(\frac{M}{
 This far exceeds the ridge point of 295, placing FlashAttention firmly in the **compute-bound regime**.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     A["FA1 tiled kernel"] --> B["No S/P materialization; K/V in L2 cache"]
     B --> C["Effective HBM ≈ 4Nd ≈ 4 MB"]
@@ -190,6 +193,7 @@ v1 parallelizes over Q-blocks. v2 swaps the loops so each thread block iterates 
 ### 4.2 Warp-Level Tiling: Split-Q vs. Split-K
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph SplitQ["Split-Q (v2 default)"]
         W1["Warp 0: Q rows 0..Br/4"]
@@ -241,6 +245,7 @@ FlashAttention v3 (Dao & Shah, 2024) exploits three Hopper-exclusive features.
 ### 5.2 Producer-Consumer Pipeline
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant P as Producer Warps (0-1)
     participant SMEM as Shared Memory
@@ -358,6 +363,7 @@ Try $B_r = 128$, $B_c = 128$: $5 \times (128 \times 128 \times 2) + 512 = 164{,}
 $S_{ij}$ masked when $j > i$. In the tiled kernel: skip blocks where $j_{\text{start}} > i_{\text{end}}$; no mask needed when $j_{\text{end}} \leq i_{\text{start}}$; element-wise mask only on diagonal tiles.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 graph TD
     subgraph "Causal Tile Classification"
         A["j_end <= i_start"] --> B["Fully visible: no mask"]
@@ -387,6 +393,7 @@ During autoregressive inference, each step processes $N_q = 1$ query token again
 FlashDecoding splits the KV cache into chunks along the key dimension, assigning each to a thread block:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph "FlashDecoding Split-K"
         TB1["TB 0: K 0:Bc"]
@@ -448,6 +455,7 @@ FlashDecoding aligns split boundaries with page boundaries ($B_c$ is a multiple 
 ## 12. End-to-End Pipeline Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Input: Q, K, V in HBM"] --> B{"Mode?"}
     B -->|"Training / Prefill"| C["FA v2/v3 Forward"]

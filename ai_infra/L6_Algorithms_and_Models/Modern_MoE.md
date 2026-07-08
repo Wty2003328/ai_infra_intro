@@ -53,6 +53,7 @@ where $\mathcal{T}(x)$ is the set of top-$k$ experts selected for token $x$, $g_
 ### 1.2 The MoE layer anatomy
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     X["Input hidden state x<br/>(B × d)"] --> G["Gate / Router<br/>W_gate: d × E"]
     G --> S["Softmax → top-k selection"]
@@ -345,6 +346,7 @@ The ratio $d_{\text{ff}} / d = 1792 / 7168 = 0.25$, much smaller than the standa
 Expert parallelism assigns different experts to different GPUs. For $P$ GPUs and $E$ routed experts, each GPU hosts $E/P$ experts (assuming $E \mod P = 0$). The forward pass requires two all-to-all communications per MoE layer:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant GPU0 as GPU 0
     participant GPU1 as GPU 1
@@ -761,6 +763,7 @@ The crucial insight: MoE decode reads *active* parameters, not total. The 671 B 
 ## 11. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["MoE design goal:<br/>decouple capacity from compute"] --> B["Fine-grained experts:<br/>E=256, k=8, small d_ff"]
     B --> C["18:1 capacity/compute ratio"]

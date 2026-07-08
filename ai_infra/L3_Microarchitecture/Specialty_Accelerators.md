@@ -32,6 +32,7 @@ Each chip flips the roofline in a way GPUs/TPUs cannot. None has GPU-class ecosy
 ### 1.2 The roofline inversion
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 xychart-beta
     title "Ridge points compared (log-scale conceptual)"
     x-axis "Chip" ["Cerebras WSE-3", "TPU v7", "B200 (FP4)", "B200 (FP8)", "MI355X (FP4)"]
@@ -44,6 +45,7 @@ A ridge point of **6 FLOP/B** means almost every AI kernel is compute-bound. Dec
 ### 1.3 Memory hierarchy
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph WSE["WSE-3 wafer"]
         direction TB
@@ -193,6 +195,7 @@ Tenstorrent's chips (Wormhole, Blackhole, Quasar) are **2D meshes of Tensix tile
 - **4 directional NoC links** (1.6 TB/s aggregate per tile).
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph BH["Blackhole — ~120 Tensix tiles in 2D mesh"]
         direction TB
@@ -292,23 +295,24 @@ FPGAs fill the niche between GPU flexibility and ASIC efficiency: lower volume d
 ## 6. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    A[Eliminate one structural GPU constraint] --> B[Cerebras: no inter-die signaling]
+    A[Eliminate one structural GPU<br/>constraint] --> B[Cerebras: no inter-die signaling]
     A --> C[Groq: no HBM, no scheduler]
     A --> D[Tenstorrent: no warp scheduler]
 
     B --> B1[21 PB/s on-die BW]
     B --> B2[Ridge point ~6 FLOP/B]
     B --> B3[Compute-bound on every workload]
-    B3 --> B4[Long-context inference uniquely viable]
+    B3 --> B4[Long-context inference uniquely<br/>viable]
 
     C --> C1[Sub-ms TTFT, 0% variance]
     C --> C2[Need ~600 chips per 70B replica]
-    C --> C3[Cost-effective only for latency-sensitive workloads]
+    C --> C3[Cost-effective only for<br/>latency-sensitive workloads]
 
     D --> D1[NoC + RISC-V baby cores]
-    D --> D2[Lower per-watt for irregular workloads]
-    D --> D3[Smaller per-chip throughput than GPU]
+    D --> D2[Lower per-watt for irregular<br/>workloads]
+    D --> D3[Smaller per-chip throughput than<br/>GPU]
 
     B4 & C1 & D2 --> E["Each fills a niche GPU/TPU structurally cannot"]
     B4 & C3 & D3 --> F["None has GPU-class ecosystem; specialty deployments only"]

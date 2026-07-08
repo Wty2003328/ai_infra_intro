@@ -42,6 +42,7 @@ At FP16 the memory halves and tensor-core throughput doubles (FP16 tensor cores:
 AMP (Micikevicius et al., 2017) maintains a **master copy** of weights in FP32 while computing forward and backward passes in FP16. The key insight: FP32 accumulation inside the FMA unit preserves enough precision even when inputs are FP16, provided that gradient magnitudes are protected from underflow.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     W32["Master weights<br/>(FP32, kept across steps)"] --> CAST_F["Cast to FP16"]
     CAST_F --> FWD["Forward pass<br/>(FP16 activations + FP16 weights,<br/>FP32 accumulation in FMA)"]
@@ -282,6 +283,7 @@ For $N_{\text{DP}} = 64$: $280 / 64 \approx 4.4$ GB per GPU — manageable along
 In distributed training, the AllReduce of gradients across data-parallel ranks is a communication bottleneck. Gradient accumulation provides a natural opportunity for overlap: reduce-scatter gradients from micro-batch $i$ while computing micro-batch $i+1$.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     MB1["Micro-batch 1<br/>FWD + BWD"] --> ACC1["Accumulate g₁"]
     ACC1 --> COMM1["Reduce-scatter g₁<br/>(overlapped)"]
@@ -379,6 +381,7 @@ $$
 Transformer Engine (TE) is NVIDIA's software library that manages mixed-precision GEMM operations, automatic precision selection, and fused kernels for Transformer training. TE wraps standard PyTorch modules (Linear, LayerNorm, softmax) and transparently handles precision management.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     MODEL["PyTorch Model<br/>(BF16 or FP32 weights)"] --> TE["TE.Linear / TE.LayerNorm"]
     TE --> QW["Quantize weights to FP8<br/>(per-block scaling, one-time at load)"]
@@ -540,6 +543,7 @@ A major trend in 2025–2026 training is using LLM-generated reasoning traces as
 ## 7. End-to-end cause and effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["FP16 has 5 exponent bits<br/>V_max = 65,504"] --> B["Gradients underflow<br/>below 2^-14"]
     B --> C["Loss scaling required<br/>S = 2^16 to 2^24"]

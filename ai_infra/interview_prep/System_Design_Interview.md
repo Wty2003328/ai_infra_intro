@@ -53,14 +53,15 @@ For full derivations see [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture
 ## 3. Worked Design 1: "Design an LLM API Service"
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     classDef edge fill:#f9f,stroke:#333,stroke-width:1px
     classDef router fill:#bbf,stroke:#333,stroke-width:1px
     classDef engine fill:#bfb,stroke:#333,stroke-width:1px
     classDef storage fill:#fbb,stroke:#333,stroke-width:1px
 
     Client((Client)):::edge --> LB[Load Balancer / TLS]:::edge
-    LB --> Router[Frontend Router\nprefix-cache lookup\ntokenize]:::router
+    LB --> Router[Frontend Router\nprefix-cache<br/>lookup\ntokenize]:::router
     Router --> PP[Prefill Pool\nvLLM / TRT-LLM]:::engine
     Router --> DP[Decode Pool\ncontinuous batching]:::engine
     PP -->|KV transfer| DP
@@ -125,6 +126,7 @@ User → TLS → auth → rate limit → router (prefix-cache lookup, choose rep
 ## 4. Worked Design 2: "Train a 70B Model on 1024 GPUs"
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     classDef compute fill:#bfb,stroke:#333,stroke-width:1px
     classDef network fill:#bbf,stroke:#333,stroke-width:1px
@@ -142,10 +144,10 @@ flowchart TB
         Node --- IB
     end
 
-    DP[Data Parallel\nFSDP / ZeRO-3\nDP=128]:::compute
+    DP[Data Parallel\nFSDP /<br/>ZeRO-3\nDP=128]:::compute
     IB --- DP
 
-    Lustre[Lustre / WekaFS\n30 TB dataset\n200 TB checkpoints]:::storage
+    Lustre[Lustre / WekaFS\n30 TB dataset\n200<br/>TB checkpoints]:::storage
     DP ---|stream shards| Lustre
 
     DCP[Async Checkpoint\nto S3 / GCS]:::storage
@@ -204,7 +206,8 @@ flowchart TB
 ## 5. Worked Design 3: "Build a RAG System"
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     classDef user fill:#f9f,stroke:#333,stroke-width:1px
     classDef embed fill:#bbf,stroke:#333,stroke-width:1px
     classDef search fill:#bfb,stroke:#333,stroke-width:1px
@@ -230,7 +233,7 @@ flowchart LR
 
 ### Architecture
 
-```
+```ascii-graph
 query → embed (1ms) → vector search (10ms) → rerank (20ms) →
         retrieve docs → prompt template → LLM (TTFT 500ms) → stream
 ```
@@ -269,6 +272,7 @@ query → embed (1ms) → vector search (10ms) → rerank (20ms) →
 ## 6. Worked Design 4: "Agent Orchestration Platform"
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     classDef llm fill:#bbf,stroke:#333,stroke-width:1px
     classDef tool fill:#bfb,stroke:#333,stroke-width:1px
@@ -338,20 +342,21 @@ flowchart TB
 ## 7. Worked Design 5: "Multi-Modal Inference Pipeline"
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
     classDef vision fill:#bbf,stroke:#333,stroke-width:1px
     classDef llm fill:#bfb,stroke:#333,stroke-width:1px
     classDef cache fill:#fbb,stroke:#333,stroke-width:1px
 
-    Img[Image Input]:::vision --> ViT[ViT Encoder\n~50 GFLOPs/image\n576 tokens × 24 layers]:::vision
-    ViT --> Proj[Linear Projection\n→ LLM token space]:::vision
+    Img[Image Input]:::vision --> ViT[ViT Encoder\n~50 GFLOPs/image\n576<br/>tokens × 24 layers]:::vision
+    ViT --> Proj[Linear Projection\n→ LLM token<br/>space]:::vision
     Txt[Text Input]:::llm --> Tok[Tokenizer]:::llm
     Proj --> Ctx[LLM Context\nimage + text tokens]:::llm
     Tok --> Ctx
     Ctx --> Dec[LLM Decoder\nvLLM / TRT-LLM]:::llm
     Dec --> Out((Text Output)):::llm
 
-    ImgCache[(Image Token Cache\nhash → encoded tokens)]:::cache -.-> Proj
+    ImgCache[(Image Token Cache\nhash → encoded<br/>tokens)]:::cache -.-> Proj
     KVCache[(KV Prefix Cache\nimage-prefix)]:::cache -.-> Dec
 ```
 
@@ -364,7 +369,7 @@ flowchart LR
 
 ### Architecture
 
-```
+```ascii-graph
 Input image → ViT encoder → image tokens →
                                           --> LLM context --> text out
 Input text → tokenizer → text tokens   →
@@ -399,19 +404,20 @@ For VLM (Llava-style): vision encoder runs on the image, projects into LLM token
 ## 8. Worked Design 6: "Eval Harness for LLM Quality"
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     classDef runner fill:#bbf,stroke:#333,stroke-width:1px
     classDef data fill:#bfb,stroke:#333,stroke-width:1px
     classDef score fill:#fbb,stroke:#333,stroke-width:1px
 
-    Scheduler[Eval Scheduler\ncommit-triggered / periodic]:::runner
+    Scheduler[Eval Scheduler\ncommit-triggered /<br/>periodic]:::runner
     Scheduler --> MU[Model Under Test\nvLLM / TRT-LLM]:::runner
-    Scheduler --> DL[Dataset Loader\nMMLU / GSM8K / custom]:::data
+    Scheduler --> DL[Dataset Loader\nMMLU / GSM8K /<br/>custom]:::data
     DL -->|stream prompts| MU
-    MU -->|completions| Judge[Scoring Engine\nexact-match / LLM-as-judge]:::score
+    MU -->|completions| Judge[Scoring Engine\nexact-match /<br/>LLM-as-judge]:::score
     Judge --> Agg[Metric Aggregator\nper-bench scores]:::score
     Agg --> Dash[Dashboard / Regression Alert]:::score
-    Cache[(Result Cache\nprompt-hash → completion)]:::data -.-> DL
+    Cache[(Result Cache\nprompt-hash →<br/>completion)]:::data -.-> DL
 ```
 
 ### Clarify
@@ -423,15 +429,13 @@ flowchart TB
 
 ### Architecture
 
-```
 Eval runner →
-   - Loads model under test (vLLM/TRT-LLM).
-   - For each benchmark dataset:
-        - Streams prompts.
-        - Records completions.
-        - Scores via reference / judge.
-   - Aggregates scores; logs to dashboard.
-```
+- Loads model under test (vLLM/TRT-LLM).
+- For each benchmark dataset:
+- Streams prompts.
+- Records completions.
+- Scores via reference / judge.
+- Aggregates scores; logs to dashboard.
 
 ### Capacity
 
@@ -467,6 +471,7 @@ Eval runner →
 ## 9. Worked Design 7: "RLHF/GRPO Training Infrastructure"
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     classDef policy fill:#bbf,stroke:#333,stroke-width:1px
     classDef reward fill:#bfb,stroke:#333,stroke-width:1px
@@ -479,8 +484,8 @@ flowchart TB
 
     subgraph RewardCluster["Reward + Training Cluster (FP8)"]
         RM[Reward Model\n8-70B]:::reward
-        RM -->|per-response score| Adv[Advantage Computation\nGRPO group stats]:::reward
-        Adv --> PG[Policy Gradient Update\nPPO / GRPO loss]:::train
+        RM -->|per-response score| Adv[Advantage Computation\nGRPO group<br/>stats]:::reward
+        Adv --> PG[Policy Gradient Update\nPPO / GRPO<br/>loss]:::train
         Ref[Reference Model\nfrozen]:::policy
         Ref -->|KL penalty| PG
     end
@@ -489,7 +494,7 @@ flowchart TB
     Responses --> RM
     PG -->|weight sync| PM
 
-    WS[Fast Weight Sync\nNVLink / IB\n~seconds]:::train -.->|updated weights| PM
+    WS[Fast Weight Sync\nNVLink /<br/>IB\n~seconds]:::train -.->|updated weights| PM
 ```
 
 ### Clarify

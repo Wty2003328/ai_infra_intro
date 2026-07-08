@@ -70,6 +70,7 @@ $$
 with $\eta$ the DIBL coefficient and $\delta(L)$ a length-dependent rolloff. Below ~20 nm physical gate length, planar bulk MOSFETs lose so much electrostatic control that V_th becomes a *function of operating point*, not a constant. This is what killed planar at 22 nm and what's killing FinFET below 3 nm — the gate simply cannot dominate the channel from one face.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph PLANAR["Planar (≤22 nm)<br/>Gate controls 1 face<br/>High I_off, severe DIBL"]
         direction TB
@@ -303,8 +304,9 @@ Effective yield jumps from 51% (zero defects, no redundancy) to ~99% (any defect
 Dies that retain fewer than the full 128 working SMs are sold as a lower SKU (e.g., "B200A"). The economics work because foundry cost is per-wafer, not per-good-die; binning recovers revenue from dies that would otherwise be scrap.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 pie showData
-    title Wafer-yield breakdown (B200-class on TSMC N4P, illustrative)
+    title Wafer-yield breakdown (B200-class on TSMC N4P,<br/>illustrative)
     "Full B200 (128 SMs working)" : 64
     "B200A bin (partial SMs)" : 19
     "Deep bin / scrap" : 10
@@ -360,6 +362,7 @@ NVIDIA sells the H100 for $25{,}000–40{,}000. The 5–10× markup reflects sof
 The reticle wall forces multi-die packaging. The three CoWoS variants matter at L0 only insofar as they bound *what kinds of dies you can build*:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph S["CoWoS-S (silicon interposer)<br/>Reticle-stitched ≤3.3× (~2 800 mm²)"]
         direction TB
@@ -387,7 +390,7 @@ flowchart TB
         L2[Die]:::die
         L3[Die]:::die
         L4[HBM]:::hbm
-        LB[Embedded LSI bridges in organic substrate]:::bridge
+        LB[Embedded LSI bridges in organic<br/>substrate]:::bridge
         L1 & L2 & L3 & L4 --- LB
     end
     classDef hbm fill:#bae6fd,stroke:#0369a1,color:#000
@@ -462,13 +465,14 @@ $$
 Stack on top of the 71 mV IR droop and the supply collapses to $700 - 71 - 50 = 579$ mV. If the cell library's $V_{dd,\min}$ is 600 mV, **the chip silently fails timing on that cycle** — manifesting as an XID error or, worse, silent data corruption.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 xychart-beta
     title "Voltage at transistor during a wgmma current burst"
     x-axis "Time (ns)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
     y-axis "V_dd at transistor (V)" 0.55 --> 0.72
-    line "V_dd nominal (0.70 V)" [0.70, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70, 0.70]
-    line "V_dd_min floor (0.60 V)" [0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60]
-    line "Actual transistor V (IR + di/dt)" [0.70, 0.70, 0.63, 0.58, 0.59, 0.62, 0.65, 0.68, 0.70]
+    line "V_dd nominal (0.70 V)" [0.70, 0.70, 0.70, 0.70, 0.70, 0.70,<br/>0.70, 0.70, 0.70]
+    line "V_dd_min floor (0.60 V)" [0.60, 0.60, 0.60, 0.60, 0.60, 0.60,<br/>0.60, 0.60, 0.60]
+    line "Actual transistor V (IR + di/dt)" [0.70, 0.70, 0.63, 0.58, 0.59, 0.62,<br/>0.65, 0.68, 0.70]
 ```
 
 Below `V_dd_min`, flip-flops fail to latch — silent data corruption or hard XID error.
@@ -494,6 +498,7 @@ Several hundred nanofarads of on-die capacitance, distributed across the floor p
 Up to and including TSMC N3, both signals and power share the front-side metal stack (M0 through M14). Power rails compete with signal routing, and tiny power vias become the bottleneck:
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph FS["Front-side PDN (≤ N3)<br/>Power and signals share metal stack"]
         direction TB
@@ -570,6 +575,7 @@ $$
 The dominant term at this power density is $\theta_{\text{TIM}}$ (thermal-interface material).
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     J["Silicon junction (T_j target ≤105 °C)"]:::hot
     DB[Die back surface]:::warm
@@ -714,13 +720,14 @@ This is why the Blackwell B200 uses two ~800 mm² dies on CoWoS-L rather than on
 ## 10. Bringing it together: cross-layer cause-and-effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Boltzmann: 60 mV/dec limit] --> B[V_th can't drop further]
     B --> C[V_dd scaling slows]
     C --> D[Dynamic power per FLOP plateaus]
 
     E[EUV reticle: 858 mm²] --> F[Multi-die packaging mandatory]
-    F --> G[Inter-die signaling tax: 0.2-1 pJ/bit]
+    F --> G[Inter-die signaling tax: 0.2-1<br/>pJ/bit]
     G --> H[NVLink/NVSwitch energy budget]
 
     I[Defect density D₀] --> J[Negative-binomial yield]
@@ -737,7 +744,7 @@ flowchart TD
     H --> S
     L --> S
     O --> S
-    R --> T[Why rack-scale design is now part of the chip spec]
+    R --> T[Why rack-scale design is now part<br/>of the chip spec]
     S --> T
 ```
 

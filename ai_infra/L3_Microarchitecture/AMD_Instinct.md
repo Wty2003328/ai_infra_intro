@@ -35,6 +35,7 @@ This page covers CDNA 3 (MI300X), CDNA 4 (MI355X), and the rack-scale Helios arc
 ## 2. The chiplet architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph PKG["MI300X — 8 XCDs / 4 IODs / CoWoS-S"]
         direction TB
@@ -115,6 +116,7 @@ Per XCD: 40 CUs. Per CU:
 AMD's tensor-core equivalent. CDNA 3 supports FP16/BF16/INT8/FP8. CDNA 4 adds FP6/FP4/MXFP4.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph CU["CDNA-4 Compute Unit"]
         direction TB
@@ -274,6 +276,7 @@ MFMA throughput is highest when LDS is used for input staging. The same tiling p
 ## 8. Helios rack architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TB
     subgraph HELIOS["Helios rack — MI430X / MI455X class (Altair)"]
         direction TB
@@ -309,25 +312,26 @@ Confirmed Helios rack configurations: **64, 72, or 128 GPUs** per rack. The UALo
 ## 9. End-to-end cause / effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[8 XCD chiplets] --> B[Yield + cost win vs monolithic]
     A --> C[NUMA penalty 10–15%]
     C --> D[ROCm runtime topology affinity]
 
     E[3D SoIC bond XCD↔IOD] --> F[~0.05 pJ/bit, lower than NV-HBI]
-    F --> G[Energy advantage on intra-chiplet ops]
+    F --> G[Energy advantage on intra-chiplet<br/>ops]
 
     H[Infinity Cache 256 MB] --> I[L3-class shared layer]
-    I --> J[Better for transient reductions; L2 is too small on NVIDIA for some workloads]
+    I --> J[Better for transient reductions; L2<br/>is too small on NVIDIA for some<br/>workloads]
 
     K[xGMI 8-GPU domain] --> L[MoE expert-parallel limited]
     L --> M[Helios + UALink scales to 72]
 
     N[CDNA-4 FP4 MFMA] --> O[20 PFLOPS FP4 dense per package]
-    O --> P[Higher peak than B200; lower than B300/Rubin]
+    O --> P[Higher peak than B200; lower than<br/>B300/Rubin]
 
-    Q[ROCm 7 maturity] --> R[Major frameworks within 80–95% of CUDA perf]
-    R --> S[Real production AMD deployments at scale]
+    Q[ROCm 7 maturity] --> R[Major frameworks within 80–95% of<br/>CUDA perf]
+    R --> S[Real production AMD deployments at<br/>scale]
 ```
 
 ---

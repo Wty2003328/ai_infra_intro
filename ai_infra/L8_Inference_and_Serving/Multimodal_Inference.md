@@ -24,6 +24,7 @@ This page specifies the architectures, the serving math, and the systems tricks 
 Three coupling patterns dominate. The choice determines training cost, inference latency, modality extensibility, and KV cache geometry.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph Late["Late Fusion"]
         direction TB
@@ -177,6 +178,7 @@ A batch of 8 concurrent requests each carrying one 1080p image requires ~2 GB of
 ### 3.1 Two-stage forward pass
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 sequenceDiagram
     participant C as Client
     participant FE as Frontend
@@ -252,6 +254,7 @@ Document understanding and video QA push context lengths into the hundreds of th
 ### 4.3 Video understanding pipeline
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     VID["Video file"] --> DEC["Decode frames<br/>(FFmpeg)"]
     DEC --> SMP["Sample N frames<br/>(fps strategy)"]
@@ -300,6 +303,7 @@ Moshi (Kyutai, 2024) achieves full-duplex voice interaction through interleaved 
 ### 5.4 Real-time voice agent stack
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     MIC["Microphone<br/>(16 kHz PCM)"] --> VAD["VAD"]
     VAD -->|"speech detected"| ASR["ASR<br/>(Whisper / streaming)"]
@@ -343,6 +347,7 @@ where $\epsilon_\theta$ is the denoiser network, $t$ is the timestep, and $\math
 Video diffusion models extend image diffusion by adding temporal attention across frames. The latent representation is $\mathbf{z} \in \mathbb{R}^{F \times C \times H' \times W'}$ where $F$ is the number of frames.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     LAT["Latent video z<br/>[F x C x H' x W']"] --> SPA["Spatial attention<br/>(per-frame, 2D)"]
     SPA --> TMP["Temporal attention<br/>(cross-frame, 1D)"]
@@ -467,6 +472,7 @@ On H100 with FP8, a 72B model achieves ~30K tokens/sec prefill throughput. Proce
 ### 8.4 Multimodal-aware scheduling
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     REQ["Incoming requests<br/>(mixed modalities)"] --> CLS["Classify by<br/>token budget"]
     CLS --> SHORT["Short context<br/>(< 4K tokens)"]
@@ -475,7 +481,7 @@ flowchart TD
 
     SHORT --> POOL1["GPU Pool A<br/>(standard KV budget)"]
     MED --> POOL2["GPU Pool B<br/>(2x KV budget)"]
-    LONG --> POOL3["GPU Pool C<br/>(8x KV budget, or disaggregated prefill)"]
+    LONG --> POOL3["GPU Pool C<br/>(8x KV budget, or disaggregated<br/>prefill)"]
 
     POOL1 --> OUT["Response"]
     POOL2 --> OUT

@@ -38,6 +38,7 @@ Triton's key insight: most GPU kernels are tile-based — load a tile, compute, 
 ### 1.2 Compilation Pipeline
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     PY["Python + @triton.jit"] --> TTIR["TTIR (block-level ops)"]
     TTIR --> TTGIR["TTGIR (shared mem + warp sched)"]
@@ -160,6 +161,7 @@ The compiler handles register allocation, shared memory swizzling, and async loa
 For a row-major $M \times K$ matrix $A$: $\text{ptr}(i, k) = \text{base} + i \cdot \text{stride\_am} + k \cdot \text{stride\_ak}$ where $\text{stride\_am} = K$ and $\text{stride\_ak} = 1$. Triton uses broadcasting: `offs_m[:, None] + offs_k[None, :]` creates a $BLOCK_M \times BLOCK_K$ pointer matrix with a single vector expression.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["A tile [BM×BK] from HBM"] --> DOT["tl.dot(a, b) → tensor core"]
     B["B tile [BK×BN] from HBM"] --> DOT
@@ -329,6 +331,7 @@ Triton covers 80-90% of custom kernel needs. The remaining cases require CUTLASS
 CUTLASS 3.x (targeting Hopper/Blackwell) restructured around three concepts: (1) **Collective operations** — a `CollectiveMma` encapsulates the entire GEMM tiling strategy (TMA loads, MMA scheduling, epilogue). (2) **TMA descriptors** — the Tensor Memory Accelerator on Hopper allows a single thread to describe a tile, which hardware asynchronously loads from global memory. (3) **Warp specialization** — one warp group acts as DMA engine (loads tiles via TMA), others as MMA engines (compute tiles), overlapping load and compute.
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     subgraph CUTLASS3["CUTLASS 3.x Kernel"]
         TMA["TMA Descriptor (async load)"] --> SMEM["Shared Memory (swizzled)"]
@@ -356,6 +359,7 @@ CuTe (ships with CUTLASS) provides a layout algebra for describing how multi-dim
 ### 7.4 CUTLASS vs Triton Decision Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     START["Custom kernel needed"] --> Q1{"Standard or fused GEMM?"}
     Q1 -->|Yes| TRITON["Triton + autotune"]
@@ -419,7 +423,7 @@ Each block is a fixed-size page (typically $16 \times head\_dim$). The Triton im
 
 FP8 (E4M3 forward, E5M2 backward) doubles tensor core throughput. Production kernels handle: (1) per-tensor or per-channel scaling to manage FP8's limited dynamic range ($\pm 448$ for E4M3), (2) FP32 accumulation for numerical stability, (3) sub-channel scaling with 128-element sub-tiles for large matrices. In Triton, `tl.dot` with FP8 inputs automatically accumulates in FP32:
 
-```python
+```text
 # Inside the K loop (same structure as FP16 matmul)
 acc += tl.dot(a_fp8, b_fp8)  # auto FP8→FP32 tensor core MMA
 # After K loop: apply scaling and convert
@@ -492,6 +496,7 @@ With 58 MoE layers (DeepSeek-V3), this saves ~232 MB of HBM traffic per forward 
 ## 12. End-to-End Cause / Effect
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A["Block-SPMD model"] --> B["30-50 line kernel"]
     B --> C["TTIR → TTGIR → PTX lowering"]

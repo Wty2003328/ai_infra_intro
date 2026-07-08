@@ -20,9 +20,25 @@ git clone https://github.com/Wty2003328/silicon-to-serving.git
 
 Start at [ai_infra/Index.md](ai_infra/Index.md) or [hardware_design/Index.md](hardware_design/Index.md), or jump into a reading path below.
 
+## Dependencies & Setup
+
+To view this notebook exactly as intended, the following Obsidian configurations are required:
+
+1. **Custom CSS Snippets (Code & Math Formatting)**
+   * This project includes a custom CSS snippet (`snippet-formatting.css`) located in `.obsidian/snippets/`.
+   * **Why it's needed:** It wraps long code lines and LaTeX equations (preventing ugly horizontal scrollbars), applies Mac-style UI headers to code blocks, and correctly sizes ASCII-art architectures.
+   * **Setup:** Go to Obsidian Settings -> Appearance -> CSS snippets, and ensure `snippet-formatting` is enabled.
+
+2. **Mermaid Zoom Plugin (Architecture Diagrams)**
+   * It is **highly recommended** to install the [mermaid-zoom](https://github.com/xiaozhuang0433/mermaid-zoom) community plugin.
+   * **Why it's needed:** The repository contains massive, highly dense hardware architecture diagrams. This plugin allows you to click any Mermaid diagram to open it in a full-screen, scrollable modal overlay, letting you fluidly pan across complex architectures without text squishing.
+   * **Setup:** Go to Obsidian Settings -> Community Plugins -> Browse, search for `mermaid-zoom`, and install/enable it.
+
+*(Note: If you opened this repository directly as an Obsidian vault by cloning the `.obsidian` folder, both the CSS snippet and the plugin are already installed and enabled for you. Just hit `Ctrl+R` / `Cmd+R` to ensure they load).*
+
 ## Structure
 
-```
+```ascii-graph
 silicon-to-serving/
 ├── ai_infra/                         AI infrastructure (silicon → inference serving)
 │   ├── L0_Silicon_and_Process/
@@ -36,12 +52,14 @@ silicon-to-serving/
 │   ├── L8_Inference_and_Serving/
 │   └── interview_prep/
 └── hardware_design/                  Digital IC design & verification
-    ├── Fundamentals/
-    ├── Architecture/
-    ├── Implementation/
-    ├── Clocking_and_Signals/
-    ├── Power/
-    ├── SystemVerilog/
+    ├── 00_Fundamentals/
+    ├── 01_Architecture_and_PPA/
+    ├── 02_Power_and_Low_Power/
+    ├── 03_Frontend_RTL_and_Verification/
+    ├── 04_Synthesis/
+    ├── 05_Backend_Physical_Design/
+    ├── 06_Signoff/
+    ├── 07_Manufacturing_and_Bringup/
     └── interview_prep/
 ```
 
