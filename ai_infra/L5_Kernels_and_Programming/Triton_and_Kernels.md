@@ -546,49 +546,7 @@ flowchart TD
 
 ---
 
-## 14. Worked Interview Problems
-
-**Q1.** *A Triton matmul kernel uses BLOCK_M=128, BLOCK_N=128, BLOCK_K=64, num_stages=3 with FP16 inputs. Calculate the shared memory per block. Is this feasible on SM90 (227 KB)?*
-
-Per stage: $S_{stage} = (128 \times 64 + 64 \times 128) \times 2 = 32{,}768$ bytes. Total: $3 \times 32{,}768 = 98{,}304$ bytes $\approx 96$ KB. The FP32 accumulator ($128 \times 128 \times 4 = 64$ KB) lives in registers, not shared memory. 96 KB is well within 227 KB; remaining budget allows up to $\lfloor 131{,}072 / 32{,}768 \rfloor = 4$ more stages. In practice, 4 stages total is optimal — beyond that, register pressure reduces occupancy.
-
-**Q2.** *A softmax kernel processes rows of length N=4096 with BLOCK_SIZE=4096. How many program instances are needed for a batch of B=128 sequences, each with H=32 attention heads?*
-
-Each row is handled by one program instance (BLOCK_SIZE = N). Total rows: $B \times H = 128 \times 32 = 4096$. Total program instances: 4096. Each instance performs 1 `tl.load` (the row) and 1 `tl.store` (the output), plus internal reductions (`tl.max`, `tl.sum`) that operate in registers/shared memory without additional global memory traffic.
-
-If BLOCK_SIZE = 2048 instead, each row requires $\lceil 4096/2048 \rceil = 2$ blocks with a cross-block reduction, doubling the number of instances to 8192 and requiring additional synchronization — demonstrating why setting BLOCK_SIZE = N is the idiomatic approach.
-
-**Q3.** *A Triton FlashAttention kernel processes Q=[B, H, M, D] and K,V=[B, H, N, D] with BLOCK_M=64, BLOCK_N=64, D=128. For B=1, H=1, M=N=8192, how many tl.dot calls does each program instance make?*
-
-FlashAttention uses a 1D grid over query tiles: grid = $(\lceil 8192 / 64 \rceil,) = (128,)$. Each program instance iterates over $\lceil 8192 / 64 \rceil = 128$ key/value tiles. Per iteration: one `tl.dot(Q, K^T)` for attention scores and one `tl.dot(scores, V)` for value accumulation. Total per instance: $128 \times 2 = 256$ `tl.dot` calls. Total across all instances: $128 \times 256 = 32{,}768$.
-
-Verification: each `tl.dot` performs $2 \times 64 \times 64 \times 128 = 1{,}048{,}576$ FLOPs (multiply-add). Total FLOPs: $32{,}768 \times 1{,}048{,}576 = 34{,}359{,}738{,}368 \approx 34.4$ GFLOPs. Theoretical attention compute: $4 \times N^2 \times D = 4 \times 8192^2 \times 128 = 34.4$ GFLOPs. Matches.
-
-**Q4.** *A 65,536-GPU cluster trains an MoE model with 256 experts and 58 MoE layers. Each router produces a [B, 256] logits tensor. With B=4096 tokens per GPU, compare HBM traffic for: (a) materializing full logits then top-K, vs (b) fused router.*
-
-(a) Full logits: $4096 \times 256 \times 4 = 4$ MB write + 4 MB read = 8 MB/layer. Total: $58 \times 8 = 464$ MB per GPU.
-
-(b) Fused: only top-K=8 indices+weights written: $4096 \times 8 \times 8 = 0.26$ MB/layer. Total: $58 \times 0.26 = 15$ MB per GPU.
-
-Savings: $(464 - 15)/464 = 96.8\%$. Across 65,536 GPUs: $\approx 29.4$ TB per forward pass.
-
-**Q5.** *Design an autotune config space for a Triton FP8 GEMM kernel targeting SM90 (227 KB shared memory). BLOCK_M, BLOCK_N, BLOCK_K must be multiples of 64. Enumerate feasible tuples.*
-
-FP8 is 1 byte per element. $S_{stage} = (BM \times BK + BK \times BN) \times 1$. Constraint: $num\_stages \times S_{stage} \le 232{,}448$.
-
-| BLOCK_M | BLOCK_N | BLOCK_K | S_stage | Max stages | Good configs |
-|---|---|---|---|---|---|
-| 128 | 128 | 64 | 16,384 | 14 | (w4,s3), (w8,s4) |
-| 128 | 128 | 128 | 32,768 | 7 | (w4,s3), (w4,s4) |
-| 128 | 64 | 64 | 12,288 | 18 | (w4,s4), (w8,s5) |
-| 256 | 128 | 64 | 24,576 | 9 | (w8,s3) |
-| 128 | 256 | 64 | 24,576 | 9 | (w8,s3) |
-
-Recommended 8 configs with `num_warps` in {4, 8} cover the most promising combinations. Autotune time: ~10-30 seconds (one-time cost, cached per M/N/K triple).
-
----
-
-## 15. References
+## 14. References
 
 **Foundational**
 - P. Tillet et al., "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations," *MAPL 2019*.

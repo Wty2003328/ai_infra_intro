@@ -238,15 +238,6 @@ Production engines treat the compiler as **a tool applied to regions**, not a wh
 
 ---
 
-## 10. Interview snap answers
-
-- **"What does torch.compile do?"** → Dynamo captures bytecode into FX graphs with guards; AOTAutograd traces joint fwd/bwd and decomposes to a core op set; Inductor fuses and emits Triton/C++; optional CUDA-graph wrapping. Falls back per-fragment via graph breaks.
-- **"Why is XLA fine without hand kernels but PyTorch isn't?"** → TPU: one vendor, regular systolic hardware, whole-program AOT with layout assignment; XLA fusion ≈ the kernel. GPU: irregular SKU zoo + peak tensor-core kernels (attention/GEMM) still human-won; compiler handles the glue.
-- **"Compiler vs FlashAttention?"** → fusion can't change memory complexity; online-softmax tiling is an algorithmic identity a compiler won't discover. Compile the glue, hand-write the hot loop.
-- **"Why does vLLM pad batches?"** → CUDA graphs need static shapes; padding to captured buckets trades ≤ one bucket of wasted compute for ms-scale launch savings.
-
----
-
 ## Cross-references
 
 - Upstream: [Triton_and_Kernels](Triton_and_Kernels.md) (the codegen target), [CUDA_Optimization](CUDA_Optimization.md) (what good output looks like), [Google_TPU](../L3_Microarchitecture/Google_TPU.md) (XLA's hardware).

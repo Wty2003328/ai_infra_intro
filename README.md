@@ -68,7 +68,7 @@ ai_infra_intro/
 | L6 — Algorithms & Models | 7 | 5,608 | Transformers, MLA, MoE, quantization, SSMs |
 | L7 — Training Stack | 6 | 4,689 | 3D parallelism, NCCL, FSDP, GRPO, reasoning models |
 | L8 — Inference & Serving | 15 | 10,580 | vLLM, SGLang, KV cache, disaggregation, agentic serving, GPU multi-tenancy, K8s, prod |
-| Interview Prep | — | — | See [ai_infra/interview_prep](ai_infra/interview_prep) — reorganized per-layer, in progress |
+| Interview Prep | 11 | — | See [ai_infra/interview_prep](ai_infra/interview_prep) — per-layer Q&A (L0-L8) plus system design, common Q&A, and coding patterns |
 
 **Topics:** GPU/TPU/ASIC architectures, CUDA/Triton kernels, ML compilers (torch.compile, CUDA Graphs, XLA/GSPMD, MLIR), transformer internals, MoE, quantization (FP8/FP4/MX), distributed training (FSDP/ZeRO/3D parallelism), KV cache, continuous batching, speculative decoding, prefill-decode disaggregation, agentic/tool-calling inference, GPU multi-tenancy (MIG/MPS/DRA), vLLM/SGLang/TRT-LLM internals, Kubernetes orchestration, production serving.
 

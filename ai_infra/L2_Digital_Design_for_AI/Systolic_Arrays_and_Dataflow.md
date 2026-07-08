@@ -460,31 +460,7 @@ flowchart TD
 
 ---
 
-## 13. Worked interview problems
-
-**Q1.** *A 128×128 systolic array does $C = A \cdot B$ where $A \in \mathbb{R}^{128 \times 1024}$, $B \in \mathbb{R}^{1024 \times 128}$. How many cycles total? Effective utilization?*
-
-Pre-load weights: 128 cycles. Stream activations: K = 1024 cycles. Drain output: 127 cycles. Total: ≈ 1 280 cycles. Useful work: $128 \cdot 128 \cdot 1024 = 16.78$ M FMAs across $128^2 = 16\,384$ MACs. Each MAC averages ~$16.78\text{ M}/(16\,384 \cdot 1\,280) \approx 80\%$ utilization. The 20% loss is the fill+drain — amortizable by tiling.
-
-**Q2.** *Why does a TPU MXU outperform a GPU SM on dense GEMM despite having fewer total MACs?*
-
-Three reasons: (a) Weight-stationary dataflow reuses each weight 128 times before eviction → ~128× lower weight bandwidth. (b) Operands flow PE-to-PE through register-style pipelined links — no SMEM/RF round-trips. (c) The systolic array is uniformly utilized (no operand-collector arbitration losses). The GPU pays for general-purpose flexibility with operand-fetch bandwidth.
-
-**Q3.** *Why is output-stationary preferred for FlashAttention's per-tile inner loop?*
-
-Within an FA tile, $K = $ tile-dim × head-dim, which is small (~64–128). Weight-stationary's fill/drain cost is large relative to K — wastes cycles. Output-stationary keeps the partial sums of $S = QK^T$ in registers; both Q and K stream through. K dominates so this minimizes shifts and updates — the OS choice gives ~2× higher utilization than WS at this granularity.
-
-**Q4.** *Cerebras has no HBM. How does it serve a 70 B-parameter LLM at 8-bit?*
-
-70 GB at FP8 doesn't fit on the wafer's 40 GB on-die SRAM. Cerebras streams weights from external MemoryX nodes via SwarmX (~1.2 TB/s aggregate). The wafer holds activations + KV cache + a sliding window of weights. For inference, this works because each layer's weights are touched once per token — streaming throughput suffices. For training, MemoryX bandwidth limits batch size; Cerebras typically uses batch parallelism across multiple wafers.
-
-**Q5.** *Estimate the operand-bandwidth saving of weight-stationary 128×128 systolic vs equivalent throughput general-purpose MAC array.*
-
-Systolic at 1 GHz × 16 384 FMAs/cycle = 16 K FMAs/ns. Operand bandwidth at array boundary: 128 in + 128 out = 256 B/cycle × 1 GHz = 256 GB/s. General-purpose: 16 K FMAs × 2 inputs × 2 B = 64 KB/cycle = 64 TB/s. Ratio: 256× lower for systolic. This is the structural energy advantage of TPUs over GPUs on pure GEMM workloads.
-
----
-
-## 14. References
+## 13. References
 
 **Foundational**
 - H.T. Kung, *Why Systolic Architectures?*, IEEE Computer 1982. The seminal paper.

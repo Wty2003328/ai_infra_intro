@@ -280,31 +280,7 @@ This is why "just port CUDA to TPU" doesn't work — the abstraction levels are 
 
 ---
 
-## 7. Worked interview problems
-
-**Q1.** *A CUDA kernel achieves 30% occupancy. Diagnose three possible causes.*
-
-(a) **Register pressure**: kernel uses too many registers per thread → fewer threads fit → fewer warps → low occupancy. Check via `nvcc --ptxas-options=-v`. (b) **SMEM allocation**: per-block SMEM exceeds 1/3 of total SMEM, capping resident blocks at 3. (c) **Block size**: kernel launches with very small blocks (e.g., 32 threads), preventing the SM from filling its 64-warp slots even at full block count.
-
-**Q2.** *Why is divergence less of a problem in AI workloads than in graphics?*
-
-AI tensor ops (matmul, conv, attention) are **uniform across threads** — every thread does the same work on different data. The divergence cases (e.g., softmax masking, loss computation) are localized to small kernels and easy to refactor into branchless code (predicated execution, mask-based gating). Graphics has frequent per-pixel branching (different shaders, different materials), which is much harder to make uniform.
-
-**Q3.** *A Trainium kernel needs to run with sequence length 1024 today and 2048 next week. What changes?*
-
-The Neuron compiler must **re-compile** for the new shape because VLIW schedules every cycle. The new schedule has different unroll factors, different SRAM tile layouts, possibly different DMA patterns. There is no "dynamic shape" support without compilation. Production teams pre-compile per common shape and ship a shape catalog. CUDA, by contrast, can ingest dynamic shapes at runtime because the warp scheduler adapts.
-
-**Q4.** *Why does Cerebras claim "no kernel API" as a feature?*
-
-Spatial-dataflow execution is graph-defined — the chip is a physical pipeline shaped like the model. There's no equivalent of a CUDA kernel to write because there's no warp/thread to write code for. The compiler partitions the graph onto tiles. Selling point: data scientists never need to drop into CUDA. Cost: ML systems engineers can't squeeze 5% more out of Cerebras the way they can on a GPU; you get what the compiler gives you.
-
-**Q5.** *Why is SASS undocumented while PTX is public?*
-
-PTX is the forward-compatible interface contract — published so third-party tooling (CUDA libraries, compilers) can target NVIDIA hardware across generations. SASS is generation-specific and changes radically (e.g., Hopper added wgmma, Blackwell added new tile-loading instructions). NVIDIA reserves the right to change SASS without notice; documenting it would be a contract that constrains future hardware choices. Reverse-engineering tools (CUDA-MEMCHECK, cuobjdump) expose SASS, but only NVIDIA-internal compilers know its full semantics.
-
----
-
-## 8. References
+## 7. References
 
 - Lindholm et al., *NVIDIA Tesla: A Unified Graphics and Computing Architecture*, IEEE Micro 2008 — the original SIMT paper.
 - Jouppi et al., *In-Datacenter Performance Analysis of a TPU*, ISCA 2017 — VLIW + systolic for AI.

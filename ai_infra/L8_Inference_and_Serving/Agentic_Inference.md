@@ -172,15 +172,6 @@ With $n = 50$, shaving 200 ms off mean $t_s$ saves 10 s per task — per-step la
 
 ---
 
-## 9. Interview snap answers
-
-- **"How is agent serving different from chat?"** → sessions not requests: monotone context, 10–100:1 input:output, per-step SLO compounding, KV reuse as the #1 cost lever, task-level admission control.
-- **"Design the KV story."** → paged KV + radix prefix cache → cache-aware routing (overlap−load score) → async tiered offload (DRAM/NVMe) sized so restore hides in tool latency → compaction when context approaches the limit.
-- **"Why Rubin CPX / TPU 8i?"** → agentic steps are incremental-prefill-heavy + small-decode; prefill wants cheap dense FLOPs (GDDR7 CPX), decode wants KV residency (HBM/big SRAM). Hardware now mirrors the disaggregation software already proved.
-- **"Structured output at scale?"** → grammar → compressed token FSM, compiled per schema-hash off the hot path, masks overlapped with forward pass, jump-forward through forced tokens.
-
----
-
 ## Cross-references
 
 - Prerequisites: [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md), [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md).

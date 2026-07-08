@@ -755,41 +755,7 @@ Even with short prompts on IB, the layer-pipelined transfer is hidden. The only 
 
 ---
 
-## 14. Common interview questions
-
-**Q: Why does prefill/decode disaggregation improve throughput?**
-A: Prefill is compute-bound (arithmetic intensity above the roofline ridge point), decode is memory-bandwidth-bound (arithmetic intensity far below). On a single pool, mixing them wastes tensor cores during decode and stalls decodes during prefill. Separate pools let each operate at its own optimum.
-
-**Q: What is the cost of disaggregation?**
-A: KV transfer latency (0.5–25 ms depending on fabric), routing complexity, two capacity-planning problems instead of one, more failure domains, and a minimum viable scale of ~4 GPUs. The benefit must exceed these costs, which it does at scale with bursty workloads.
-
-**Q: How do you size the prefill and decode pools?**
-A: Prefill: $\lambda \cdot 2N \cdot S_p / (\eta_p \cdot \pi)$. Decode: $\lambda \cdot S_d \cdot \bar{Q}_d / (\eta_d \cdot \beta)$. The ratio depends entirely on the workload: short-prompt long-output (reasoning) is decode-heavy; long-prompt short-output (RAG) is prefill-heavy.
-
-**Q: What is NIXL?**
-A: NVIDIA Inference Xfer Library. A unified API for GPU-to-GPU/CPU/storage data movement that selects the optimal transport (NVLink, GPUDirect RDMA, PCIe) at runtime. Used to ship KV between pools without per-transport code.
-
-**Q: How does layer-pipelined KV transfer work?**
-A: Transfer each layer's KV to the decode side as soon as prefill of that layer completes, overlapping transfer of layer $l$ with compute of layer $l+1$. The decoder starts its forward pass as each layer's KV arrives, hiding nearly all transfer latency behind prefill compute.
-
-**Q: When would you NOT disaggregate?**
-A: Small fleets (< 4 GPUs), uniform short prompts (chunked prefill suffices), poor network fabric (TCP only), or applications requiring sub-10ms TTFT where even 1 ms of transfer overhead is unacceptable.
-
-**Q: How does disaggregation interact with speculative decoding?**
-A: Orthogonally. The decode pool runs both draft and verifier models. Disaggregation removes prefill interference from the decode pool but does not change speculative decoding mechanics. They compose well.
-
-**Q: What happens when a decode instance fails mid-generation?**
-A: KV is lost. The client sees a truncated response. Recovery requires re-prefilling from the original prompt. Most production systems accept this loss rate and rely on client retries. Buddy replication doubles cost and is rarely justified.
-
-**Q: How do you maintain prefix cache hit rate across a prefill pool?**
-A: Affinity routing (hash the prefix to a fixed instance), replicate hot prefixes across instances, or use a global KV pool (Mooncake approach). Tradeoff: simplicity vs. hit rate vs. memory overhead.
-
-**Q: What does Splitwise propose?**
-A: A research design (ISCA 2024) showing that disaggregated prefill/decode across heterogeneous GPUs (high-$\pi$ for prefill, high-$\beta$ or cheaper for decode) reduces cost-per-token by 1.4–1.8×. The key insight is matching GPU capabilities to phase bottlenecks.
-
----
-
-## 15. Numbers to Memorize
+## 14. Numbers to Memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|

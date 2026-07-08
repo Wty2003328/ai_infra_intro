@@ -107,6 +107,17 @@ Three layers of preparation are interwoven:
 56. [Common Interview Questions](interview_prep/Common_Interview_Questions.md) — conceptual Q&A across all topics, updated for 2026 frontier models and hardware.
 57. [Coding Patterns](interview_prep/Coding_Patterns.md) — CUDA kernel patterns, parallel reduction, scheduler algorithms, numerical algorithms, systems C++, BitNet kernel patterns.
 
+Per-layer Q&A consolidated out of the L0–L8 topic pages above (worked interview problems + snap answers, moved here to keep topic pages focused on concepts):
+
+58. [L0 Questions](interview_prep/L0_Silicon_and_Process_Questions.md) — silicon physics, process nodes, yield, packaging preview.
+59. [L1 Questions](interview_prep/L1_Packaging_and_Memory_Questions.md) — advanced packaging, HBM.
+60. [L2 Questions](interview_prep/L2_Digital_Design_for_AI_Questions.md) — pipelining/CDC, FP units, on-chip memory, systolic arrays.
+61. [L3 Questions](interview_prep/L3_Microarchitecture_Questions.md) — GPU/TPU/ASIC microarchitecture (AMD, NVIDIA, Google, cloud ASICs, ISA models, roofline, specialty accelerators).
+62. [L4 Questions](interview_prep/L4_Systems_and_Interconnects_Questions.md) — networking/interconnect, rack-scale design, storage and model loading.
+63. [L5 Questions](interview_prep/L5_Kernels_and_Programming_Questions.md) — CUDA programming/optimization, cutting-edge kernels, FlashAttention, ML compilers, Triton.
+64. [L6 Questions](interview_prep/L6_Algorithms_and_Models_Questions.md) — transformer internals.
+65. [L8 Questions](interview_prep/L8_Inference_and_Serving_Questions.md) — batching/scheduling, multi-tenancy, inference frameworks, disaggregation, production architecture.
+
 ---
 
 ## Cross-Cutting Themes

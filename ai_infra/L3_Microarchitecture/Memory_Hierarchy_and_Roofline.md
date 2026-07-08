@@ -526,31 +526,7 @@ flowchart TD
 
 ---
 
-## 9. Worked interview problems
-
-**Q1.** *A kernel reports 2 TFLOPS on B200 (peak 4 500 TFLOPS FP8). Memory-bound or compute-bound? How do you tell?*
-
-Achieved P = 2 TF; π = 4.5 PF. Way below peak ⇒ **suspected memory-bound**. To confirm, measure $Q$ (bytes moved). If $Q$ corresponds to ~0.25 TB/s of HBM (2 TF / 8 ridge ≈), and $\beta_{\text{HBM}} = 8$ TB/s, then BW utilization is only 3% → **neither bound** — kernel has issue/scheduling overhead. If $Q$ shows 7+ TB/s of HBM traffic → bw-bound, peak in this regime. Use Nsight Compute to get $Q$.
-
-**Q2.** *Compute decode tokens/sec for a 405B FP8 model on B200 with 192 GB HBM.*
-
-Weights = 405 GB → doesn't fit on one B200. Need 3+ B200 in TP. Tokens/sec per replica: $\beta / N\text{bytes} = 8 \text{ TB/s} / 405 \text{ GB} = 19.7$ tok/s. With TP=4 (one B200 holds ~100 GB of weights), each B200 reads ~100 GB/token but bandwidth scales: tokens/sec = 8 / 101 = ~79 tok/s. Per-replica throughput ~79 tok/s; at batch 64: 5 056 tok/s aggregate.
-
-**Q3.** *Why doesn't doubling HBM bandwidth from 8 TB/s to 16 TB/s double prefill throughput?*
-
-Prefill is compute-bound (AI = 8 192 ≫ ridge 562). Bandwidth is not the bottleneck. $P = \pi$ regardless of $\beta$. Doubling β shifts the ridge from 562 to 281 — a kernel formerly at AI = 400 (memory-bound) becomes compute-bound, but a kernel at AI = 8 192 was already compute-bound and gets nothing. Bandwidth doubling helps decode (linear gain) and short-context attention; doesn't help prefill or large GEMM.
-
-**Q4.** *What's the AI of FlashAttention v2 forward on Hopper for $S = 4096$, $d = 128$?*
-
-FA-2 keeps Q, K, V, O in HBM; everything else in SMEM. Per-block: load $B_r d$ Q + $S d$ K + $S d$ V; compute attention. Across whole sequence: load $S d$ Q (1×), full K and V $S/B_r$ times. Total Q ≈ $3 S d$ bytes loaded, vs $W \approx 4 S^2 d$ FLOPs. AI ≈ $4 S^2 d / (3 S d \cdot 2) = 2 S / 3$ ≈ 2 730. Way above H100 ridge → compute-bound. Hence FA-2 hits 70%+ utilization on H100.
-
-**Q5.** *On Cerebras WSE-3 with ridge 6, why is utilization still not 100% on every kernel?*
-
-Three reasons: (a) **inter-PE communication overhead** — even SRAM-only ops require routing across the 2D mesh, adding NoC cycles. (b) **Tile size mismatch** — fixed PE granularity wastes cycles when the kernel doesn't divide evenly. (c) **MemoryX streaming** — large models exceed on-die 44 GB; weights must stream from external MemoryX nodes, reintroducing a slower memory tier. Achieved utilization on 70B inference: ~50–70%, very impressive for the workload but not "all kernels at 100%".
-
----
-
-## 10. References
+## 9. References
 
 - Williams, Waterman, Patterson, *Roofline: An Insightful Visual Performance Model for Multicore Architectures*, CACM 2009 — original paper.
 - *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*, Dao et al., NeurIPS 2022 — applied roofline.

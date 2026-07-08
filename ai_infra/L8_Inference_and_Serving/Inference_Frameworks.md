@@ -878,55 +878,7 @@ Dynamo 1.0's Multimodal E/P/D (encode/prefill/decode disaggregation) takes this 
 
 ---
 
-## 21. Common Interview Questions
-
-**Q: Compare vLLM and TensorRT-LLM. When would you pick each?**
-
-A: vLLM is open-source Python+CUDA with the broadest model coverage, fast community-driven feature uptake, and simple deployment. TRT-LLM is NVIDIA's compiled C++ engine with the best peak latency and throughput on NVIDIA GPUs but requires per-configuration build pipelines and lags on new architectures. Pick vLLM for general-purpose serving and rapid iteration; TRT-LLM for latency-critical NVIDIA-only deployments where you can amortize the build cost.
-
-**Q: What is RadixAttention and why does it matter?**
-
-A: A token-granularity prefix-sharing scheme implemented as a radix tree over KV cache blocks. Unlike hash-based prefix caching (block-aligned, no sub-block sharing), RadixAttention matches arbitrary-length prefixes and supports branching (multiple requests sharing a common prefix then diverging). It produces 10–30 percentage-point higher cache hit rates on chat and agentic workloads.
-
-**Q: How does PagedAttention enable continuous batching?**
-
-A: Each sequence has an independent block table over a global block pool. Sequences of different lengths grow independently without padding. The scheduler admits and evicts sequences without reshaping tensors. Without paging, ragged batching requires expensive padding or per-request memory regions.
-
-**Q: What is NVIDIA Dynamo's role in the inference stack?**
-
-A: Dynamo 1.0 (successor to Triton Inference Server for LLM serving) is a multi-node orchestration layer built in Rust + Python, not a per-GPU engine. It disaggregates prefill and decode across separate GPU pools, manages KV transfer with tiered eviction (GPU → CPU → SSD → remote storage) via NIXL, routes requests with prefix-locality awareness, and uses SGLang, TRT-LLM, or vLLM as pluggable engine backends. Key additions in 1.0 include the Planner (SLA-driven autoscaler), Grove (K8s operator for NVL72 topology-aware scheduling), ModelExpress (7x faster cold starts), and AIConfigurator (automated deployment configuration). It sits above the engine in the stack hierarchy.
-
-**Q: What does "structured output" mean and how is it implemented?**
-
-A: Constraining generation to match a JSON schema, regex, or grammar. Implementation: at each decode step, a logit mask sets the probability of tokens that would violate the constraint to $-\infty$. Libraries: Outlines, xgrammar, lm-format-enforcer. The per-step masking cost is amortized by GPU-parallel constraint evaluation.
-
-**Q: Why is multi-LoRA serving non-trivial?**
-
-A: Each LoRA adapter modifies projection weights differently. Naive per-request weight loading is slow. Fused multi-LoRA kernels (Punica, S-LoRA) handle a batch with mixed adapter IDs in one matmul by routing rows to the correct adapter weights. The engine must track adapter IDs per row and manage adapter caching.
-
-**Q: How does the inference engine handle EOS?**
-
-A: The sampler outputs the EOS token ID; the scheduler marks the sequence finished, emits the final output to the client, decrements refcounts on shared prefix blocks, frees the sequence's exclusive blocks, and opens the slot for a new request from the waiting queue.
-
-**Q: What is the build-vs-interpret tradeoff in inference engines?**
-
-A: Compiled engines (TRT-LLM) fuse operators and auto-tune kernels at build time, yielding 5–15% better peak performance. The cost is per-configuration build time (minutes to hours), operational complexity (engine versioning, CI), and slower support for new models. Interpreted engines (vLLM, SGLang) load weights dynamically, deploy in seconds, and iterate faster at the cost of slightly lower peak performance.
-
-**Q: How would you debug a sudden TPOT regression in production?**
-
-A: (1) Check if input distribution changed (longer prompts, bigger batch). (2) Inspect KV occupancy and prefix-cache hit rate. (3) GPU utilization from DCGM or Nsight — is the GPU compute-bound or memory-bound? (4) Compare engine version against the known-good baseline. (5) Check NCCL bus bandwidth (inter-node degradation). (6) Look for failure-mode regressions (NaN handling, synchronization barriers, sampling-path changes).
-
-**Q: What is BitNet and how does it differ from quantization-based approaches?**
-
-A: BitNet uses ternary weights ($\{-1, 0, +1\}$) trained natively from scratch rather than post-training quantization of a floating-point model. This eliminates almost all floating-point multiplications — matmul becomes conditional addition/subtraction. The result is 1.37x–6.17x CPU speedup and 55–82% energy reduction versus FP16. However, only BitNet-trained models work; you cannot run standard Llama or Qwen models. The quality gap with FP16 is measurable but narrows at scale. BitNet is best for CPU-only, edge, or power-constrained deployments where GPU inference is not feasible.
-
-**Q: When would you NOT use a data-center inference framework?**
-
-A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM compiled for the target). CPU-only or power-constrained deployment (BitNet/bitnet.cpp runs 100B models on a single CPU at 5–7 tok/s with 55–82% energy reduction). Apple Silicon (SGLang's MLX backend). Research requiring full execution control (raw PyTorch with custom kernels). CPU-only inference where the overhead of GPU-oriented frameworks is wasted.
-
----
-
-## 22. Numbers to Memorize
+## 21. Numbers to Memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|
@@ -940,7 +892,7 @@ A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM c
 
 ---
 
-## 23. Further Reading
+## 22. Further Reading
 
 - Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) — the vLLM paper.
 - Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) — RadixAttention and the SGLang engine.

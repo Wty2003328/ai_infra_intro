@@ -141,15 +141,6 @@ Utilization math that justifies the complexity: small-model endpoints at low tra
 
 ---
 
-## 10. Interview snap answers
-
-- **"MIG vs MPS?"** → MIG: hardware partition (SMs+L2+HBM BW+faults), 7 slices max, true QoS, coarse and static. MPS: concurrent kernels in shared context, soft SM caps, no memory/BW/fault isolation, maximal density.
-- **"Can two MIG slices serve one model with TP?"** → effectively no — slices are isolated devices without NVLink peering as one domain; TP wants whole GPUs in one NVLink domain.
-- **"Fractional GPUs on K8s?"** → three real backings: time-slice (fiction), MPS (soft), MIG (hard); DRA makes the claims expressive but the isolation is whatever the backing gives.
-- **"Latency SLO + batch on one GPU?"** → MIG fence (or green contexts within one engine), batch under preemption, never naked MPS — bandwidth interference hits ITL directly.
-
----
-
 ## Cross-references
 
 - Up: [Kubernetes_and_Orchestration](Kubernetes_and_Orchestration.md), [Production_Architecture](Production_Architecture.md), [Observability_and_Debugging](Observability_and_Debugging.md) (interference debugging).

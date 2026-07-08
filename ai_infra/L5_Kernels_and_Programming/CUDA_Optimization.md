@@ -1062,87 +1062,7 @@ flowchart TD
 
 ---
 
-## 17. Worked interview problems
-
-### Problem 1: Coalescing diagnosis
-
-**Question.** A kernel has threads reading `data[tid * 3]` where `data` is `float*` and `tid` is `threadIdx.x`. The kernel achieves 200 GB/s on an A100. Diagnose and fix.
-
-**Solution.**
-
-Stride-3 access means thread 0 reads byte 0, thread 1 reads byte 12, thread 2 reads byte 24, etc. A warp's 32 threads span bytes 0 through $31 \times 12 = 372$. This requires $\lceil 372 / 128 \rceil = 3$ cache-line transactions per warp instead of the ideal 1. Efficiency = 33%.
-
-Fix: convert from AoS to SoA. Instead of `struct { float x, y, z; } data[N]`, use three arrays `float data_x[N], data_y[N], data_z[N]`. Now `data_x[tid]` is stride-1, fully coalesced (1 transaction per warp).
-
-Expected improvement: from 200 GB/s to ~1 800 GB/s (9x).
-
-### Problem 2: Occupancy calculation
-
-**Question.** A kernel uses 128 registers per thread, 48 KB of shared memory per block, and 256 threads per block. How many blocks can run concurrently on a Hopper SM? What is the occupancy?
-
-**Solution.**
-
-Three limiters:
-
-1. **Registers.** $W_{\text{reg}} = \lfloor 65\,536 / (128 \cdot 32) \rfloor = \lfloor 65\,536 / 4\,096 \rfloor = 16$ warps per SM. At 256 threads/block = 8 warps/block: $B_{\text{reg}} = \lfloor 16 / 8 \rfloor = 2$ blocks.
-
-2. **Shared memory.** $W_{\text{smem}} = \lfloor 228\,608 / 49\,152 \rfloor = \lfloor 4.65 \rfloor = 4$ blocks (48 KB = 49 152 bytes, SM budget 228 KB usable). $B_{\text{smem}} = 4$ blocks.
-
-3. **Threads.** Max 2 048 threads / SM. At 256/block: $B_{\text{threads}} = 8$ blocks.
-
-The register limiter binds: $B = \min(2, 4, 8) = 2$ blocks. Occupancy = $2 \cdot 8 / 64 = 16 / 64 = 25\%$.
-
-To improve: reduce registers to 64 with `-maxrregcount=64`, which gives $W_{\text{reg}} = 32$ warps, $B_{\text{reg}} = 4$ blocks. New occupancy = $4 \cdot 8 / 64 = 50\%$. The cost is potential register spills; profile to confirm net gain.
-
-### Problem 3: Tile sizing for matmul
-
-**Question.** Design the SMEM tile sizes for an FP16 matmul kernel targeting Hopper's wgmma. The kernel should use 2 SMEM buffers (double buffering) for both A and B tiles. Constraints: stay under 200 KB SMEM per SM, target 4 blocks/SM.
-
-**Solution.**
-
-Available SMEM per block: $200\,000 / 4 = 50\,000$ bytes $\approx 48$ KB.
-
-Four buffers total (2 for A, 2 for B): each buffer gets $\approx 12$ KB.
-
-For wgmma with $M = 64$, $K = 16$ (FP16): tile A is $64 \times 16 = 1\,024$ elements = 2 KB (FP16). Tile B is $16 \times N$ elements.
-
-Buffer B size = 12 KB = 12 288 bytes = 6 144 FP16 elements. So $N = 6\,144 / 16 = 384$. But wgmma max $N = 256$. So tile B = $16 \times 256 = 4$ KB per buffer.
-
-Total per block: $2 \times 2\text{KB} + 2 \times 4\text{KB} = 12$ KB per block. Four blocks = 48 KB. Well under the 200 KB limit.
-
-This is the CUTLASS 3.x default tiling for Hopper FP16: $64 \times 256 \times 16$ with double buffering.
-
-### Problem 4: Bank conflict analysis
-
-**Question.** A kernel has `__shared__ float tile[32][32];`. Each thread in a warp reads `tile[threadIdx.x][col]` for a fixed `col`. Analyze the bank conflicts.
-
-**Solution.**
-
-SMEM bank assignment: word at address $a$ is in bank $a \mod 32$. For `tile[row][col]`, the address of element `tile[r][c]` is $(r \cdot 32 + c) \cdot 4$ bytes. Bank = $(r \cdot 32 + c) \mod 32 = c \mod 32 = c$ (since $c < 32$).
-
-Wait — the question says each thread reads `tile[threadIdx.x][col]`, i.e., thread $t$ reads row $t$, column `col`. Since column is fixed, all 32 threads access the same column index, meaning they all access different rows but the same column. The address for thread $t$ is $(t \cdot 32 + col) \cdot 4$, so bank = $(t \cdot 32 + col) \mod 32 = col \mod 32 = col$.
-
-All 32 threads hit the **same bank** (bank $= col$). This is a **32-way bank conflict**, serializing into 32 separate accesses. The single read value is broadcast, so only 1 cycle is actually needed (broadcast exception applies — all threads read the same address). Wait, no: each thread reads a *different* address (`tile[0][col]`, `tile[1][col]`, ...) but they all land in the same bank. The broadcast exception only applies when multiple threads read the *same address*. Here they read different addresses in the same bank, so it is a genuine 32-way conflict.
-
-Fix: pad the row dimension. `__shared__ float tile[32][33];` changes stride to 33. Now thread $t$ accesses bank $(t \cdot 33 + col) \mod 32 = (t + col) \mod 32$, which is distinct for each $t$. Zero-way conflict.
-
-### Problem 5: Double-buffering speedup estimate
-
-**Question.** A tiled matmul kernel has compute time $T_c = 500$ ns per tile and load time $T_l = 600$ ns per tile (HBM round-trip). Without double buffering, total time for $K$ tiles is $K \cdot (T_c + T_l)$. With double buffering, estimate the speedup.
-
-**Solution.**
-
-Without double buffering: $T_{\text{total}} = K \cdot (500 + 600) = 1100K$ ns.
-
-With double buffering: the first tile loads in $T_l = 600$ ns. Subsequently, load and compute overlap. Since $T_l > T_c$ (memory-bound regime), the load dominates: $T_{\text{total}} = T_l + K \cdot \max(T_c, T_l) = 600 + K \cdot 600 = 600(K + 1)$ ns.
-
-Speedup $= \frac{1100K}{600(K+1)}$. For large $K$: speedup $\to 1100 / 600 = 1.83\times$.
-
-If the kernel is compute-bound ($T_c > T_l$), the speedup converges to $(T_c + T_l) / T_c$. In the balanced case ($T_c = T_l$), speedup = 2x (ideal overlap).
-
----
-
-## 18. References
+## 17. References
 
 1. NVIDIA. *CUDA C++ Programming Guide*, v12.6. 2024. Sections on memory coalescing, shared memory, tensor cores, async copy.
 2. NVIDIA. *CUDA Best Practices Guide*, v12.6. 2024. Occupancy calculator, optimization checklist.
@@ -1157,7 +1077,7 @@ If the kernel is compute-bound ($T_c > T_l$), the speedup converges to $(T_c + T
 
 ---
 
-## 19. Up/down stack links
+## 18. Up/down stack links
 
 **Depends on (this page assumes you know):**
 - [CUDA_Programming](CUDA_Programming.md) — thread hierarchy, memory model, synchronization primitives.

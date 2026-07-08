@@ -688,31 +688,7 @@ flowchart TB
 
 ---
 
-## 14. Common Interview Questions
-
-**Q: Design an inference platform for 100K RPS serving 70B.**
-
-A: 70B FP8 at TP=8 = ~60 RPS/replica. Need ~1 700 replicas = 13 600 H100s across 3 regions (~5 700 each). Disaggregated PD for top-traffic region. Edge: anycast TLS, per-tenant rate limiting. Frontend routers: ~200 instances. KV pool: HBM + RAM + NVMe tiering. Autoscaling with 20% warm buffer. Cost at $3.50/GPU-hr: ~$47K/hr (~$1.1M/day).
-
-**Q: GPU OOM just fired. Walk through your response.**
-
-A: (1) Identify replica from alert. (2) Check `kv_cache_utilization` — if > 95%, KV is the cause. (3) Immediate: reduce `max_num_seqs` 25%. (4) Check for tenant sending unusually long prompts. (5) Apply per-tenant `max_model_len` cap if needed. (6) Medium-term: enable KV offloading or add replicas. (7) Post-incident: update capacity model.
-
-**Q: Rollback with zero downtime?**
-
-A: Blue/green with feature flags. New version deploys to green pool while blue serves. Flip flag 0% → 5% (canary) → 100%. Regression at any step: flip back to 0% (instant). No downtime.
-
-**Q: Most cost-efficient 405B serving?**
-
-A: FP8 (2x over BF16), speculative decoding with 70B draft (~2x), PD disaggregation (30% less HW), prefix caching. Combined ~4x throughput: ~$3.60/Mtok → ~$0.90/Mtok on B200.
-
-**Q: Prevent noisy tenant from degrading SLO for others?**
-
-A: (1) Edge rate limiting: per-tenant tokens/min cap, 429 on excess. (2) Router: weighted fair queueing proportional to tier. (3) Engine: priority preemption — low-priority sequences evicted for high-priority arrivals.
-
----
-
-## 15. Numbers to Memorize
+## 14. Numbers to Memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|

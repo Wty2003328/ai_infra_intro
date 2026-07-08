@@ -347,38 +347,7 @@ flowchart TD
 
 ---
 
-## 8. Worked interview problems
-
-**Q1.** *Why does Cerebras "invert the roofline"?*
-
-GPU ridge: π/β ≈ 1 000 FLOP/B (FP4 B200) — most workloads are far below ridge → memory-bound. Cerebras ridge: 125 PFLOPS / 21 PB/s ≈ 6 FLOP/B — every workload above 6 FLOP/B (which is essentially everything: matmul has ~K, attention ~$d$, even decode at FP16 is 1 FLOP/B → just barely below). Compute-bound regime → tensor cores stay full → ~95% silicon utilization vs ~30% on a GPU running decode.
-
-**Q2.** *Estimate per-token cost on a Groq 70 B inference vs B200.*
-
-Groq: ~600 chips × $20K capex / 5-year amortization / 86 400 s/day / 365 days = ~$0.075 per chip-hour aggregate ⇒ ~$45/hr for the 600-chip pod. Throughput: ~500 tok/s → $0.025 per 1K tokens.
-
-B200: $30K / 5 yr / hr → $0.7/hr. With batching, single B200 serves ~2 000 tok/s aggregate at FP8 70B. → ~$0.0001 per 1K tokens.
-
-Groq is **250× more expensive per token but offers <1ms TTFT vs B200's 200 ms**. For latency-sensitive use cases, Groq wins; for cost-sensitive, B200.
-
-**Q3.** *Why doesn't Cerebras dominate frontier-model training?*
-
-Three reasons: (a) **per-system cost** — $3 M per CS-3, similar to 10 B200s. For a 100 K-chip equivalent training cluster, Cerebras is ~10 K wafers = $30 B, vs ~$3 B for GPU equivalent. (b) **weight streaming bottleneck** for >44 GB models — MemoryX is fast (~1.2 TB/s) but constrained vs HBM aggregate; large dense models bottleneck on weight load. (c) **ecosystem** — frontier-model researchers iterate on PyTorch + CUDA. Cerebras requires graph-level rewrites that slow R&D.
-
-**Q4.** *Why is Tenstorrent Blackhole not a Cerebras competitor despite having a similar mesh structure?*
-
-Tenstorrent uses HBM (chip + memory boards), so it's a normal accelerator with NoC dataflow. Cerebras eliminates HBM entirely. Tenstorrent inherits HBM's bandwidth ceiling (~10 TB/s) → same memory wall as a GPU. Cerebras beats the ceiling by going to on-die SRAM. Different architectural philosophies despite both using meshes.
-
-**Q5.** *What workload would convince you to deploy specialty silicon over GPUs in production?*
-
-(a) **Realtime trading or robotics inference** — sub-ms TTFT requirement → Groq.
-(b) **Pharmaceutical sequence modeling** — long-context (1M+ tokens) on a small model → Cerebras.
-(c) **Inference-only DLRM at <10K-chip scale where you can't justify MTIA NRE** — Tenstorrent.
-For typical LLM serving, GPUs win on $/inference at any scale where ecosystem maturity matters more than architectural niche optimization.
-
----
-
-## 9. References
+## 8. References
 
 - Lie, *Scaling Deep Learning to Wafer Scale*, Hot Chips 2024 (Cerebras WSE-3).
 - Abts et al., *Think Fast: A Tensor Streaming Processor (TSP)*, ISCA 2020 (Groq).

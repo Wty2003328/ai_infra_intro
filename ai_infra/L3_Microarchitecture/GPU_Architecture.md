@@ -557,31 +557,7 @@ flowchart TD
 
 ---
 
-## 9. Worked interview problems
-
-**Q1.** *A kernel uses 80 registers/thread on Blackwell. What's the max occupancy?*
-
-Per-SM RF = 65 536 regs. Threads = 65 536 / 80 = 819 threads. Warp count = ⌊819/32⌋ = 25 warps. Out of 64 warp slots → ~39% occupancy. Whether this is acceptable depends on $W_{\min}$ for the kernel's HBM dependency pattern. If the kernel is compute-bound (dense GEMM) then 25 warps is plenty (independent wgmmas hide each other). If memory-bound, occupancy is the limit.
-
-**Q2.** *Why does Blackwell add TMEM as a *new* memory tier instead of just doubling SMEM?*
-
-SMEM bandwidth varies by generation: ~19 TB/s/SM on A100 (164 KB SMEM), ~30 TB/s/SM on H100/B200 (228 KB SMEM). The ~30 TB/s/SM figure here is for Hopper/Blackwell. FP4 wgmma operand demand on Blackwell is ~50 TB/s/SM. Doubling SMEM doubles capacity, not port count, so it doesn't help. TMEM has wide read ports (1 024 b each) geometrically matched to wgmma tile rows, and is accessible only by tensor cores → no contention with general SMEM ops. Two separate memory tiers ≠ doubling one.
-
-**Q3.** *Estimate the dense BF16 GEMM throughput on B200 for $M=N=K=8192$.*
-
-$2 \cdot M \cdot N \cdot K = 1.1 \times 10^{12}$ FLOPs. Bytes loaded ≈ $2(MK + KN) + 4 MN = 2.4 \times 10^9$ bytes. AI = 458 FLOP/B. B200 FP16/BF16 ridge ≈ 280 FLOP/B → compute-bound. At 70% utilization of the ~4 500 TFLOPS peak: 3.1 PFLOPS effective. Elapsed: $1.1 \text{ TFLOPs} / 3.1 \text{ PFLOPS} = 0.35$ ms.
-
-**Q4.** *Why does GPU decode (bs=1, 70B model) get <5% utilization regardless of generation?*
-
-Decode reads all 70 GB of weights per token. AI = $2 \cdot 70\text{B} / (70\text{B} \cdot 2 B) = 1$ FLOP/B. Ridge point on B200 FP4 = 1 125 FLOP/B. Operating at AI = 1 means **1/1 125 ≈ 0.09%** of compute used. Throughput = $2 \cdot 70\text{B} / 8\text{TB/s} = 17.5$ ms/token = 57 tok/s. Compute-FLOPS-utilization is meaningless here; HBM-BW utilization is the meaningful metric and approaches 100%.
-
-**Q5.** *How does TMA improve decode throughput when decode is HBM-bound, not issue-bound?*
-
-It mostly doesn't. TMA helps prefill (compute-bound) by freeing scheduler issue slots for wgmma. In decode, the bottleneck is HBM reads of weights — TMA does the same number of HBM reads as a manual loop, just packaged into one descriptor. The marginal gain on decode is the small overhead of warp-issue-side address calculation, which is ~2% of total decode time. Decode-bound kernels can use TMA but it's not a step-function speedup.
-
----
-
-## 10. References
+## 9. References
 
 - NVIDIA H100 / Hopper / Blackwell Tuning Guides — official ISA + microarch docs.
 - Choquette et al., *NVIDIA Hopper Architecture*, IEEE Micro 2023.

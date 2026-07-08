@@ -366,31 +366,7 @@ flowchart TD
 
 ---
 
-## 11. Worked interview problems
-
-**Q1.** *Why does AMD's chiplet approach work despite the NUMA penalty?*
-
-Yield economics. An 800 mm² monolithic die at TSMC N5 with $D_0 = 0.1 / cm²$ yields ~50% (negative-binomial). 8 × 100 mm² chiplets at the same defect density yield ~95% per chiplet → ~67% combined good packages (any chiplet bad → reject). But wafer cost amortization across many small dies plus binning gives ~30% lower per-package cost than monolithic. Combined with 3D-SoIC bonding eliminating most of the inter-chiplet latency, NUMA cost is small enough to be worth the silicon savings.
-
-**Q2.** *MI355X has higher peak FP4 (20 PFLOPS) than B200 (9 PFLOPS). Why isn't it dominating in production?*
-
-Three reasons: (a) **Software** — ROCm has caught up but lags CUDA in obscure-kernel optimization; many production fp4 kernels aren't yet co-tuned for AMD. (b) **Scale-up** — xGMI tops out at 8 GPUs vs NVL72's 72; MoE / large TP workloads need the wider domain. (c) **Ecosystem** — vLLM, SGLang, TensorRT-LLM all ship CUDA-first; AMD ports come with delay. Helios/UALink+ROCm 7 closes the scale-up and software gaps; expect AMD's market share to rise through 2026–2027.
-
-**Q3.** *Estimate cross-chiplet bandwidth available on MI300X for an 8-way tensor parallel within one package.*
-
-Each XCD has Infinity Fabric to the IOD layer. Aggregate intra-package BW (XCD↔IOD): ~10 TB/s (matches Infinity Cache BW). Spread across 8 XCDs in TP: ~1.25 TB/s/XCD bidirectional. For TP all-reduce of activations (~8 GB activation matrix), reduce time ~6.4 ms — comparable to NVL72 NVLink for the same operation but without NVSwitch hop overhead.
-
-**Q4.** *Why does AMD prefer 64-thread wavefronts when NVIDIA chose 32?*
-
-Historical: AMD's GCN ISA used 64-lane SIMD; CDNA inherited it. Pros of wave64: amortizes scheduler overhead (one issue per cycle drives twice the threads), better for graphics-style large pixel groups. Cons: divergence cost is twice as bad (a 50/50 if-else stalls 32 lanes instead of 16); harder to occupy fully on small kernels. CDNA-3 added wave32 support to address this; modern AMD code paths choose width per kernel.
-
-**Q5.** *Compare ROCm RCCL with NCCL for AllReduce performance.*
-
-Both implement ring + tree algorithms. RCCL's bandwidth in xGMI domain (8 GPUs, MI300X) reaches ~85% of peak (~380 GB/s out of 448). NCCL on NVL8 (H100) reaches ~95% (~850 GB/s out of 900). NVIDIA's edge: lower-overhead algorithm-selector that switches ring/tree/recursive halving by message size dynamically. RCCL ships with similar logic but less battle-tested. At rack scale (NVL72 vs Helios), the gap narrows because both fabrics are limited by the same physics.
-
----
-
-## 12. References
+## 11. References
 
 - AMD Instinct MI300X / MI350X / MI355X Architecture Briefs.
 - ROCm Documentation — ROCm 7 release notes.

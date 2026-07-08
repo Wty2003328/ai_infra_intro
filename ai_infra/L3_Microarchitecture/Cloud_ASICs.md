@@ -249,36 +249,7 @@ flowchart TD
 
 ---
 
-## 7. Worked interview problems
-
-**Q1.** *Why does AWS use SRD instead of RoCE for EFA?*
-
-RoCE assumes a near-lossless Ethernet (PFC, ECN). At AWS-scale (hundreds of thousands of nodes, commodity hardware), packet loss is statistically inevitable. RoCE responds badly to loss (TCP-style retransmit timers in the millisecond range). SRD (a) sprays packets across multiple ECMP paths simultaneously, randomizing congestion; (b) detects loss via packet sequence numbers and retransmits in microseconds; (c) doesn't require lossless network configuration. For 100 K-chip training, this is the difference between "training runs" and "training stalls every 10 minutes".
-
-**Q2.** *Estimate Trainium 3's per-package training throughput on a 70 B-parameter model.*
-
-For tensor-parallel TP=8 across the 16-chip UltraServer, each chip holds ~9 GB of weights at FP8. Forward pass: $2 \cdot 70\text{ B}$ FLOPs per token = 140 GFLOPS per token at 1.3 PFLOPS FP8 effective (50% utilization typical) → 9.3 ns/token. Tokens/sec/server = $1 / 9.3$ ns × 8 chips = ~860 M tok/s aggregate forward (ignoring backward pass cost). Real numbers are lower due to communication overhead but the order is right.
-
-**Q3.** *Why is MTIA's DDR5-based design considered ASIC-good rather than legacy?*
-
-For DLRM, $I = 0.1$ FLOP/B. Ridge point $\pi/\beta$ — for MTIA v2: 4 TFLOPS / 200 GB/s = 20 FLOP/B. **Even at 20 FLOP/B ridge, DLRM is memory-bound**. Adding HBM (10 TB/s) wouldn't help because the bottleneck is the *random* access pattern, not aggregate bandwidth. MTIA's many small DDR5 channels have higher effective utilization on small random accesses than HBM's wide-bus design. Cheaper too.
-
-**Q4.** *When does Trainium beat GPU and when does it lose?*
-
-Beats: (a) steady-state inference of mainstream models (Claude, Llama-3) at >10 K chip scale — wins ~30% on $/inference; (b) pre-training of fixed-architecture models — Project Rainier serves Anthropic at scale.
-Loses: (a) novel architectures requiring custom CUDA kernels; (b) interactive R&D where iteration speed matters more than per-chip cost; (c) exotic data types not in the Neuron Compiler's library; (d) workloads that can't be statically scheduled (RL with dynamic exploration loops).
-
-**Q5.** *How does Triton-MTIA differ from upstream Triton?*
-
-Same DSL syntax. Different backend: instead of emitting PTX, it emits Neuron VLIW. The kernel writer doesn't see the difference for most kernels. The differences leak through when:
-(a) **Tile shapes** — Trainium's systolic dim is 512×128, not 32×16 like Hopper wgmma; tile sizing must change.
-(b) **Synchronization primitives** — `tl.atomic` works differently (no warp-level shuffles).
-(c) **Numerical formats** — MXFP8 is native; FP4 isn't supported as of 2026.
-For ~80% of kernels, a CUDA-Triton kernel ports to Triton-MTIA with minor tile-size changes. The other 20% need rewrites.
-
----
-
-## 8. References
+## 7. References
 
 - *AWS re:Invent 2024* — Trainium 3 disclosure, Project Rainier.
 - *Hot Chips 2023* — Meta MTIA v1 paper.

@@ -840,41 +840,7 @@ t=1200ms R4 finishes prefill. TTFT = 1200-560 = 640ms. Under SLO.
 
 ---
 
-## 16. Common Interview Questions
-
-**Q: Static vs continuous batching -- what is the difference and why does it matter?**
-A: Static batching forms a fixed cohort of requests, pads to max length, runs until the slowest finishes, then returns all results together. Continuous batching re-selects participants every step: sequences join when admitted and leave when finished without disrupting others. Under realistic length variance, continuous batching achieves 2--10$\times$ higher throughput by eliminating padding waste and head-of-line blocking.
-
-**Q: What is prefill--decode interference?**
-A: Prefill is compute-bound (tensor cores saturated); decode is bandwidth-bound (HBM streaming). Mixing a large prefill with decodes in one step makes the step take the prefill's compute time, causing a TPOT spike for every active decode sequence. Mitigated by chunked prefill, disaggregation, or prefill budget caps.
-
-**Q: How does chunked prefill work and what does it cost?**
-A: A prompt of length $S$ is split into chunks of $C$ tokens (typically 512--2048). Each chunk is a small prefill processed in its own step, interleaved with ongoing decodes. Total FLOPs are identical to a single-pass prefill (chunking spreads but does not add work). The cost is increased TTFT (the prompt is processed across $\lceil S/C \rceil$ steps instead of one) traded for dramatically smoother TPOT.
-
-**Q: How would you determine max-batch for a 70B model on 8$\times$ H100?**
-A: Compute TPOT$(B)$ from the decode-step HBM-read model: $(N \cdot b_w + B \cdot \bar{S} \cdot b_{kv}) / (\text{aggregate } \beta)$. Solve for $B$ where TPOT = TPOT\_SLO. Then check KV capacity: $B_{\max} = M_{\text{KV}} / (\bar{S} \cdot b_{kv})$. The binding constraint is the smaller of the two. With 8$\times$ H100, aggregate bandwidth is ~27 TB/s; for TPOT SLO of 50ms, the TPOT constraint gives $B \approx 600$, but KV capacity at $\bar{S} = 4K$ gives $B \approx 90$ on 80 GB GPUs. KV capacity binds.
-
-**Q: What is preemption and when do you choose recompute vs swap?**
-A: Preemption evicts an active sequence's KV blocks to free memory for higher-priority requests. Recompute drops the blocks; on resume, the prompt is re-prefilled (cheap if prefix cache hits). Swap copies blocks to host RAM via PCIe and restores them on resume (cheaper for long sequences with valuable KV). Default heuristic: recompute for new requests that haven't started decoding; swap for in-flight decode sequences.
-
-**Q: How does admission control work?**
-A: At each step, the scheduler evaluates whether a waiting request can be admitted by checking: (1) sufficient KV pool capacity for the prompt + expected output, (2) room in the per-step token budget for at least one prefill chunk, and (3) the TTFT deadline is achievable given current queue depth. If any check fails, the request is rejected (429), queued, or degraded.
-
-**Q: Why is TPOT nearly flat as batch grows in the bandwidth-bound regime?**
-A: Decode reads model weights once per step (fixed cost $\propto N$) plus per-sequence KV (grows linearly with $B$). At small $B$, weights dominate the read. Adding sequences adds KV bytes that are small relative to weights, so step time grows slowly. Batching is "nearly free" until KV reads approach the weight read volume.
-
-**Q: What metrics belong on a serving dashboard?**
-A: TTFT p50/p95/p99, TPOT p50/p95/p99, end-to-end latency by output-length bucket, throughput (req/s and tok/s), KV cache occupancy %, prefix cache hit rate, queue depth, admission rate, preemption rate, per-step token budget utilization, GPU SM utilization, HBM bandwidth utilization.
-
-**Q: How would you handle a noisy neighbor sending 32K-prompt requests?**
-A: (1) Cap per-step prefill budget so the prompt spreads across many steps. (2) Assign lower priority tier. (3) Apply per-tenant KV quota so one tenant cannot consume more than their share. (4) Isolate prefill to dedicated GPUs (disaggregation). (5) Rate-limit the tenant.
-
-**Q: How does speculative decoding interact with scheduling?**
-A: Each sequence in a spec-step produces 1--$K+1$ accepted tokens, creating a ragged batch. The scheduler must account for variable token counts in the per-step budget and handle variable KV write sizes. Prefill sequences are unaffected. Production schedulers fold speculation into the same step loop with dynamic budget adjustment.
-
----
-
-## 17. Numbers to Memorize
+## 16. Numbers to Memorize
 
 | Quantity | Value | Why it matters |
 |---|---|---|
@@ -889,7 +855,7 @@ A: Each sequence in a spec-step produces 1--$K+1$ accepted tokens, creating a ra
 
 ---
 
-## 18. Further Reading
+## 17. Further Reading
 
 - Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022) -- origin of continuous batching.
 - Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) -- vLLM, paging, and iteration-level scheduling.

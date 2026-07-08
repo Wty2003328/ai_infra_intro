@@ -516,31 +516,7 @@ flowchart TD
 
 ---
 
-## 12. Worked interview problems
-
-**Q1.** *Why does Blackwell need TMEM but Hopper doesn't?*
-
-Hopper's tensor cores operate on FP8 (1 byte/operand). FP8 wgmma operand demand ≈ 25 TB/s/SM, fitting within SMEM's ~30 TB/s budget. Blackwell adds FP4 (½ byte/operand) which doubles the *effective* operand throughput requirement to ~50 TB/s/SM — exceeding SMEM. Doubling SMEM doesn't help (port count, not capacity, is the bottleneck). TMEM is a separate SRAM with wide ports geometrically matched to wgmma tile shapes.
-
-**Q2.** *Estimate the cross-die latency penalty for accessing remote HBM on B200.*
-
-Local HBM access: ~250 ns (DRAM activation + return). Cross-die: + NV-HBI traversal (~10–20 ns) + remote-die NoC (~6 cycles ≈ 4 ns at 1.6 GHz). Total ~270 ns, or ~8% slower. Well within HBM's normal latency variance — usually invisible. For L2-resident data the penalty is bigger (30 ns local vs 80 ns cross-die ≈ 2.7×) but L2 hits are rare in LLM workloads.
-
-**Q3.** *NVL72 is non-blocking with 130 TB/s switch capacity matching GPU aggregate. What workload does this enable that NVL8 (Hopper) couldn't?*
-
-MoE expert-parallel all-to-all. For a 16-expert MoE with 16 GPUs, each GPU sends ~1/16 of its activation to every other GPU. Bandwidth required: $N \cdot d \cdot \text{bytes} \cdot (E-1)/E$ where N is batch tokens, d is hidden, E is expert count. At rack scale (E = 32, N = 4 K, d = 8 K), this is ~10 TB/s of all-to-all per second. NVL72 sustains this; NVL8 saturates the inter-rack network (~400 Gb/s IB) and prefill stalls. NVL72 brings expert-parallel MoE training "into the rack".
-
-**Q4.** *How does NVLink-C2C change long-context decode economics?*
-
-KV cache for 1M tokens at 70 B FP16 model with GQA = ~140 GB → exceeds B200's 192 GB HBM (after weights). Without C2C, swapping to host PCIe (64 GB/s) means each KV read costs 100× HBM time → decode collapses. With C2C (900 GB/s), KV bytes from Grace LPDDR cost ~10× HBM time but stays workable. Effective context length per GB200 superchip rises from ~512 K to ~4 M tokens.
-
-**Q5.** *Why does Blackwell's FP4 throughput reach only ~70% in real benchmarks despite the 2× theoretical advantage?*
-
-Three factors: (a) FP4 wgmma's K dimension doubles to 64 — more partial-product accumulation in a single instruction lengthens the tensor-core pipeline, increasing per-issue latency; (b) MX shared-exponent decode adds ~1 extra cycle of overhead per block; (c) operand-fetch from TMEM is at the bandwidth ceiling already, so any cache miss into SMEM costs a full HBM round-trip. In aggregate, sustained FP4 throughput is ~2/3 of theoretical 2× peak — still a huge speedup, just not the marketing number.
-
----
-
-## 13. References
+## 12. References
 
 - NVIDIA Blackwell Architecture white paper (2024).
 - Choquette et al., *NVIDIA Hopper Architecture*, IEEE Micro 2023 — for what Blackwell extends.

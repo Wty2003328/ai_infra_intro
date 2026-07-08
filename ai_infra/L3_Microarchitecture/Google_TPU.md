@@ -342,31 +342,7 @@ flowchart TD
 
 ---
 
-## 11. Worked interview problems
-
-**Q1.** *Why does TPU OCS matter for production AI?*
-
-OCS lets Google reconfigure the inter-rack interconnect to give each job a contiguous, dedicated torus slice. Three benefits: (a) **predictable performance** — no inter-job network contention; (b) **fault tolerance** — a failed link just gets routed around; (c) **flexible topology** — small jobs get $4×4×4$, big jobs get $32×32×32$, on the same physical hardware. NVIDIA's electrical-switched IB cannot do this — every job sees the same fabric and shares bandwidth with neighbors.
-
-**Q2.** *Estimate TPU v5p performance on a per-head attention with $S=2048$, $d=128$.*
-
-Per-head $Q \cdot K^T$: shape $S \times S$. Compute = $2 S^2 d = 1.07 \times 10^9$ FLOPs. With $M = S = 2048$, $K = 128$, $N = S = 2048$ → systolic K is 128, fits the MXU once with no fill loss; 2 048 / 128 = 16 sub-tiles in M, similar in N. Utilization should be ~85% on the array. Actual measured: ~50% because XLA softmax fusion adds non-MXU cycles. Pallas-based FlashAttention-equivalent recovers the gap.
-
-**Q3.** *Why are TPUs commonly chosen for LLM pretraining but not for inference?*
-
-Pretraining = dense GEMM over fixed shapes on long batches. Plays to TPU strengths: 95% MXU utilization, predictable, OCS scales to 9 K chips. Inference = variable batch + variable sequence + small batches at low TTFT. TPU loses on (a) small-shape MXU underutilization, (b) recompilation per dynamic shape, (c) lack of NVL72-style fabric for MoE EP at scale, (d) inference-engine ecosystem (vLLM/SGLang/TRT-LLM are CUDA-first).
-
-**Q4.** *Why does Pallas exist when XLA already targets TPU?*
-
-XLA is operator-level — it fuses + tiles known patterns (matmul, conv, softmax). For non-standard kernels (FlashAttention, custom MoE routing, exotic quantization), XLA underperforms because it can't match a hand-tuned algorithm. Pallas exposes a kernel-level Python DSL that compiles to direct VLIW bundles, letting users write FlashAttention-equivalent kernels at GPU-Triton-style productivity. As of 2026, Pallas is mainstream for advanced TPU users.
-
-**Q5.** *Why is TPU's v5e ("Efficient") TF32 throughput much lower than v5p ("Performance")?*
-
-v5e is cost-optimized for inference: smaller MXU count per chip, no OCS, smaller HBM. Per-chip throughput is ~½ of v5p. The bet: at ~½ price, $/TFLOP is comparable, and inference doesn't need the OCS-scale topology. v5e is what hosts most Google production inference today; v5p/v7 are reserved for training.
-
----
-
-## 12. References
+## 11. References
 
 - Jouppi et al., *In-Datacenter Performance Analysis of a Tensor Processing Unit*, ISCA 2017.
 - Jouppi et al., *Ten Lessons From Three Generations Shaped Google's TPUv4i*, ISCA 2021.

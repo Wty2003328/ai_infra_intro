@@ -236,31 +236,7 @@ flowchart TD
 
 ---
 
-## 8. Worked interview problems
-
-**Q1.** *Why does the DaVinci 3D Cube help on SMIC 7nm specifically?*
-
-SMIC's 7 nm has ~1.6× higher wire capacitance vs TSMC N4. Dynamic power = $\alpha C V^2 f$ — wire capacitance dominates at high frequency. The 3D Cube reduces operand-routing distance by ~30% relative to a 2D systolic array of equivalent throughput. Result: ~30% lower dynamic power for the same FLOPS, fitting within thermal budget. On TSMC N4, this effect is smaller and the 2D approach (NVIDIA, AMD, TPU) is fine; on SMIC 7nm, 3D is necessary.
-
-**Q2.** *Estimate CM-384's aggregate FP8 throughput vs an NVL72 B200 rack.*
-
-CM-384: 384 × ~600 TFLOPS FP8 (estimated, given 910C lacks native FP8) ≈ 230 PFLOPS. NVL72 B200: 72 × 4 500 = 324 PFLOPS. NVL72 wins ~40% on raw FP8 throughput, but CM-384 has ~3.5× the HBM (50 TB vs 14 TB). For inference (memory-bound), CM-384 can serve more concurrent requests; for training (compute-bound), NVL72 is faster.
-
-**Q3.** *Why is the 910C's per-package throughput so much lower than B200's?*
-
-Three multiplicative factors: (a) **process** — SMIC 7 nm has ~½ the transistor density of TSMC N4 → fewer Cubes fit per die; (b) **frequency** — 910C runs ~1.2 GHz vs B200's ~1.6 GHz, ~25% throughput delta; (c) **format** — 910C native is BF16; B200's FP4 doubles peak again. Combined: ~3× throughput gap at iso-precision, ~6× at FP4.
-
-**Q4.** *What's the path forward for Ascend if SMIC can't access EUV?*
-
-Two paths: (1) **Multi-patterning DUV all the way** — SMIC has demonstrated 5 nm-class via aggressive double-patterning, at lower yield. Ascend 910D is built on this. Cost is yield economics worse than TSMC by ~3×. (2) **Architectural innovation** — bigger packages (more dies stitched), more aggressive 3D stacking (logic-on-logic via SoIC equivalents), spatial-dataflow techniques. Long-term: SMIC EUV indigenization (5+ year horizon) or moving to non-CMOS (carbon nanotubes, tunnel FETs — research only).
-
-**Q5.** *Why does CANN's PyTorch performance lag CUDA by 10–25%?*
-
-Three reasons: (a) **Compiler maturity** — Huawei's CCE compiler is ~5 years behind nvcc in optimization passes; common patterns work, exotic kernels lose; (b) **Library coverage** — TBE has ~80% of cuDNN's primitive coverage; missing primitives fall back to slower vector-engine paths; (c) **Hardware** — DaVinci's 3D Cube is best for square matmuls; non-square shapes need padding or kernel restructuring.
-
----
-
-## 9. References
+## 8. References
 
 - Liao, Bai et al., *Ascend Native AI Software Stack*, Hot Chips 2023.
 - *Ascend 910 Architecture Overview*, Huawei white papers (2019–2024).

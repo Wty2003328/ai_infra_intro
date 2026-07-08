@@ -469,31 +469,7 @@ flowchart TD
 
 ---
 
-## 11. Worked interview problems
-
-**Q1.** *Derive why the Wallace tree depth is logarithmic in $N$ but not in base 2.*
-
-A 3:2 compressor takes 3 input rows and produces 2 output rows. Per level, row count is multiplied by 2/3. After $L$ levels, $N \cdot (2/3)^L = 2$ (so a final CPA can sum the last 2 rows). $L = \log_{3/2}(N/2)$. Base 1.5, not 2, because each level's compression is a factor of 1.5×, not 2×.
-
-**Q2.** *MXFP4 has 4.25 bits/element amortized but uses 4-bit elements. Explain the discrepancy.*
-
-The shared exponent is 8 bits per 32 elements = 0.25 bits/element. Total: 4 + 0.25 = 4.25 bits/element. The "4-bit element" is just the mantissa+sign storage; the exponent overhead is amortized.
-
-**Q3.** *A Blackwell SM provides 9000 TFLOPS FP4 = 4500 TFLOPS FP8. The mantissa multiplier shrinks 4×. Why isn't the throughput 4× as well?*
-
-Because (a) the FP32 accumulator is shared between FP4 and FP8 and represents a fixed area cost (~half the MAC), so MAC area shrinks only ~1.5×, and (b) operand-fetch bandwidth is the second factor: FP4 packs 2 per byte, halving operand traffic and letting the same SMEM port feed 2× more MACs. Multiply: 1.5 × (2/1.5) = 2.0 exactly.
-
-**Q4.** *Why is the LZA used instead of computing leading zeros after the CPA?*
-
-If you waited for the CPA, the leading-zero count and the subsequent shift would add ~6–8 FO4 to the critical path, blowing the 50 ps budget per FMA stage and forcing $f_{\max}$ down ~25%. The LZA is a parallel boolean network that predicts the LZ count in ~3.5 FO4, completing before or at the same time as the CPA. The shifter starts immediately.
-
-**Q5.** *Why does FP6 underperform what mantissa-area math predicts?*
-
-FP6 has M=3, so a 3×3 = 9 partial-product multiplier — much smaller than FP8's 16. By the area-only argument, FP6 should give ~1.4× FP8 throughput. In practice it gives ~1.1×. Two reasons: (a) the 6-bit datapath doesn't divide evenly into power-of-two byte-addressable memory (8 ÷ 6 = 1.33 elements/byte → packing wastes 25% of bits or requires complex unpacking logic), and (b) 6-bit operands need an additional MUX layer to share the multiplier with the 4 / 8 / 16-bit pathways, eating most of the area win. Architects therefore prefer pure powers of two; FP6 only makes sense as a research format.
-
----
-
-## 12. References
+## 11. References
 
 **Foundational arithmetic**
 - Parhami, *Computer Arithmetic: Algorithms and Hardware Designs*, 2nd ed. — Wallace, Booth, LZA, CPA topology.

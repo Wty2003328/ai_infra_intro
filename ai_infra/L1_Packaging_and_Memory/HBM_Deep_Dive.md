@@ -473,37 +473,7 @@ Full coverage in [L3 Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memo
 
 ---
 
-## 12. Worked interview problems
-
-**Q1.** *A B200 8-HBM3e package serves 64 concurrent requests of a 70 B FP8 model. How many tokens/sec aggregate? Identify the bottleneck.*
-
-Effective BW ≈ 0.85 × 9.83 = 8.36 TB/s. Per-step weight read = 70 GB. Tokens/step = 64 (one per request). So tokens/sec = $\frac{8.36\,\text{TB/s} \cdot 64}{70\,\text{GB}} \approx 7 640$ tok/s aggregate. Bottleneck: HBM bandwidth (decode-bound). Compute is barely touched at this batch size; FP8 tensor-core capacity is ~10× idle.
-
-**Q2.** *Why can't HBM raise per-pin to 20 Gbps to double bandwidth without doubling pin count?*
-
-Three compounding reasons: (a) eye opening collapses — single-ended USR signaling at 20 Gbps requires equalization (DFE/CTLE) that quintuples PHY power; (b) the TSV-stack acts as a lossy bus with skin-effect attenuation rising as √f, so 4× higher loss at 4× the Nyquist; (c) the protocol overhead (training, refresh) becomes a larger fraction of throughput. Total energy per bit at 20 Gbps would rise 2.5×, defeating the purpose. Doubling pin count via hybrid bonding stays linear in pJ/bit.
-
-**Q3.** *Estimate the HBM stack power that pushes a stack from refresh zone 1 to zone 2.*
-
-In the steady state, $T_j = T_{\text{ambient}} + P \cdot \theta_{\text{stack}}$. With $T_{\text{ambient}} = 35\,°$C (cold-plate inlet), zone 2 at 85 °C, and $\theta_{\text{stack}} \approx 8\,°$C/W (typical 12-Hi):
-
-$$
-P_{\text{zone2}} \;=\; \frac{85 - 35}{8} \;=\; 6.25\ \text{W}
-$$
-
-So a 12-Hi HBM3e stack hits zone-2 at roughly steady ~6 W. A peak workload putting >6 W per stack will halve refresh interval and cost ~9% of bandwidth. Realistic ops budget: hold each stack to ≤5 W average.
-
-**Q4.** *Why does HBM4 require a logic-node base die?*
-
-Three reasons stacking: (a) PHY power per bit must drop ~30% to keep total package signaling power flat as bus width doubles; only logic-node transistors get there; (b) on-die ECC scoring at 16 TB/s requires nontrivial error-correction circuits, which need logic-density transistors; (c) the optionality of putting GPU memory-controller fragments and PIM in the base die is unlocked, reducing inter-package data movement.
-
-**Q5.** *A kernel does fully random 64 B reads from a 70 B model. Estimate effective HBM bandwidth on B200.*
-
-Random access destroys row-buffer locality. Each access pays ~30 ns. 64 B per access ⇒ effective per-channel BW = 64 / (30 ns) = 2.13 GB/s. With 8 stacks × 16 channels × 2 PCs = 256 independent channels: 256 × 2.13 = 545 GB/s. Versus 9.8 TB/s peak: **5.5% of peak**. This is why prefix-cached / structured attention patterns dominate decode-time access in production engines.
-
----
-
-## 13. References
+## 12. References
 
 **Standards**
 - JEDEC JESD238 (HBM3), JESD270 (HBM4), JESD235D (HBM2e legacy).

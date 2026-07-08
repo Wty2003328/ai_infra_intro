@@ -552,33 +552,7 @@ flowchart TD
 
 ---
 
-## 10. Worked interview problems
-
-**Q1.** *Why can't NVIDIA push tensor cores to 4 GHz on Blackwell?*
-
-Three compounding limits: (a) The 5-stage FMA pipeline already has only ~80 ps per stage; halving to 2 GHz → 4 GHz target would need ~10 stages, doubling pipeline-FF area (which already approaches the multiplier area). (b) Voltage scaling: $V_{dd}$ would need to rise ~100 mV to maintain noise margin at the higher frequency, blowing up dynamic power as $V^2$. (c) di/dt droop becomes uncontrollable — the L0 deep-trench caps can't supply 2× the burst current without physically more cap area. Net: 4 GHz is achievable only at TDP that exceeds the 1 000 W package budget by ~2×.
-
-**Q2.** *Estimate the cost in cycles of accessing memory on the "other die" of a B200 dual-die GPU.*
-
-NV-HBI mesochronous CDC: 2–4 cycles. Local NoC hops on remote die: ~6 cycles. L2 access on remote slice: ~50 cycles. HBM access if miss: 300+ cycles. If the request is satisfied at the remote die's L2: ~60 cycles total vs ~50 on local L2 — ~20% penalty. If it goes to HBM: ~310 vs ~300 — <4% penalty. This is why two-die GPUs work despite the geometry: at HBM granularity the cross-die hop is invisible.
-
-**Q3.** *Why does the TMA + wgmma combination give a step-function in achievable utilization?*
-
-Pre-TMA: warp issues 32 individual loads per tile → ~50 cycles of issue overhead per tile × scheduler resource starved. Effective utilization on memory-bound kernels: ~30%.
-Post-TMA: warp issues 1 TMA descriptor per tile → 2 cycles of overhead, async completion. Scheduler freed to issue compute. Effective utilization: 70%+.
-The step function is because TMA *removes* a quadratic scaling problem (issue × tile count) and replaces it with constant overhead.
-
-**Q4.** *What happens if a designer omits the latch in the ICG cell?*
-
-The enable signal can glitch (briefly toggle) due to combinational hazards in the controller. Without the latch, glitches pass through the AND gate → spurious rising clock edges → flip-flops in the gated cluster sample mid-cycle → state corruption that's nearly impossible to debug because it depends on signal-arrival timing. The latch holds EN stable across a clock period, eliminating the glitch path. This is one of the canonical "if you remember nothing else about clock gating, remember the latch" rules.
-
-**Q5.** *Why is dimension-order routing provably deadlock-free?*
-
-Cycles in routing dependency graph require packets that route in non-monotonic dimension orderings (e.g., one packet routes X-then-Y while another routes Y-then-X, creating a hold-and-wait cycle). DOR forces every packet to traverse X first, then Y — eliminates the cycle by construction. Tradeoff: bandwidth utilization drops because some long X+Y trips can't shortcut through alternative routes. VCs let you have BOTH adaptive routing AND deadlock freedom by giving certain traffic classes their own dedicated channels that can't be blocked by congestion in the other classes.
-
----
-
-## 11. References
+## 10. References
 
 **Foundational**
 - Dally & Towles, *Principles and Practices of Interconnection Networks* — NoC topology, deadlock, VCs.

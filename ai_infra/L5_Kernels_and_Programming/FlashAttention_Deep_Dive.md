@@ -512,41 +512,7 @@ flowchart TD
 
 ---
 
-## 14. Worked Interview Problems
-
-### Problem 1: Arithmetic Intensity Comparison
-
-**Q:** Training with $N=8192$, $d=256$, FP16 on H100 SXM. Is naive attention compute- or memory-bound? What about FlashAttention with 228 KB SRAM?
-
-**A:** Naive: $AI \approx d/2 = 128 < 295$ (ridge) $\Rightarrow$ memory-bound. FlashAttention: $AI \approx M/d = 228 \times 1024 / 256 = 912 \gg 295 \Rightarrow$ compute-bound. FA achieves $912/295 \approx 3.1\times$ the throughput ceiling of naive.
-
-### Problem 2: Tile Budget Verification
-
-**Q:** $d=64$, FP16, 164 KB SRAM/block (A100, 2 blocks/SM). Maximum $B_r, B_c$ (powers of 2)?
-
-**A:** Try $B_r=128, B_c=256$: $Q(16\text{K}) + K(32\text{K}) + V(32\text{K}) + S(65.5\text{K}) + O(16\text{K}) + m{+}\ell(512) = 164{,}352$ bytes $= 160.5$ KB $\leq 164$ KB. Fits. $B_r=256, B_c=256$ fails ($S$ alone = 131 KB + 98 KB > 229 KB). Answer: $B_r=128, B_c=256$.
-
-### Problem 3: HBM Traffic Savings
-
-**Q:** Derive the FA-to-naive traffic ratio for $N=2048$, $d=128$, $B_r=64$, $B_c=128$, $M=164$ KB.
-
-**A:** Naive: $\text{HBM} = 8N^2 + 8Nd = 33.55\text{M} + 2.10\text{M} = 35.65$ MB. FA concrete traffic ($T_r = N/B_r = 32$): $Q$ reads + $O$ writes $= 2 \times 2Nd = 2.10$ MB; $K{+}V$ re-reads $= 2 \times T_r \times 2Nd = 32.0$ MB; total $\approx 34.1$ MB. Raw ratio: $35.65/34.1 \approx 1.05$x (comparable when $B_r \approx d$). With L2 caching of $K, V$ ($2Nd = 0.5$ MB, fits in L2): FA effective traffic $\approx 4Nd = 2.10$ MB, giving $35.65/2.10 \approx$ **17x less traffic**.
-
-### Problem 4: FlashDecoding Split Count
-
-**Q:** Decode with $N_{kv}=65536$, $d=128$, batch=1, H100 (132 SMs). How many KV splits?
-
-**A:** $\text{Splits} = \min(\lfloor N_{kv}/B_c \rfloor, 4 \times \text{SMs}) = \min(\lfloor 65536/128 \rfloor, 528) = \min(512, 528) = 512$. Each SM processes ~4 blocks, high occupancy. Final reduction over 512 partials is lightweight (single warp).
-
-### Problem 5: FP8 Throughput
-
-**Q:** FA v3 on H100 uses FP8 E4M3. Theoretical max and achieved TFLOPS?
-
-**A:** H100 FP8 dense peak = 1,979 TFLOPS. v3 achieves 75%: $0.75 \times 1{,}979 = 1{,}484$ TFLOPS — 1.5x the entire FP16 peak of the chip.
-
----
-
-## 15. References
+## 14. References
 
 1. Dao, T. et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS*. [arXiv:2205.14135](https://arxiv.org/abs/2205.14135)
 2. Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning." [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
@@ -558,7 +524,7 @@ flowchart TD
 
 ---
 
-## 16. Stack Links
+## 15. Stack Links
 
 **Up (deeper):**
 - [CUDA Optimization](CUDA_Optimization.md) — shared memory banking, warp-level primitives

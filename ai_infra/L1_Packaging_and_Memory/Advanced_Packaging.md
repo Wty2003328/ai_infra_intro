@@ -715,37 +715,7 @@ flowchart TD
 
 ---
 
-## 12. Worked interview problems
-
-**Q1.** *A new accelerator wants 4 compute dies + 12 HBM4 stacks on one package. HBM4 footprint with margin is ~140 mm²; compute die is ~700 mm² each. Will it fit on CoWoS-L 6× (3 500 mm²)? What about CoWoS-L 9× (5 800 mm²)?*
-
-Active-die area: $4 \cdot 700 + 12 \cdot 140 = 2 800 + 1 680 = 4 480\,\text{mm}^2$. Add ~15% for routing/power-fanout perimeter: $\sim 5 150\,\text{mm}^2$. Doesn't fit on CoWoS-L 6×; fits on CoWoS-L 9× with little margin. The "9× by 2027" roadmap is exactly to enable this geometry.
-
-**Q2.** *Why is hybrid bonding mandatory for HBM4 but optional for HBM3e?*
-
-HBM3e is 1 024 bits @ 40 µm bump pitch — fits within the SnAg microbump regime. HBM4 doubles the bus to 2 048 bits within roughly the same base-die footprint, halving per-pin pitch into the 20–25 µm region where SnAg bridging and IMC-fatigue defects spike. Hybrid bonding's <10 µm pitch handles this, plus drops energy/bit ~10× — critical because doubling pin count doubles the PHY power budget unless energy/bit is cut.
-
-**Q3.** *A package draws 600 A in 0.5 ns from idle. Substrate inductance is 25 pH; on-die deep-trench cap is 1.2 µF. Is the di/dt droop survivable?*
-
-$di/dt = 1.2 \times 10^{12}$ A/s. $\Delta V = 25\times 10^{-12} \cdot 1.2\times 10^{12} = 30$ mV. The DTC absorbs the sub-ns transient (its impedance at 1 GHz is $1/(2\pi f C) \approx 0.13$ mΩ — vanishing). So the 30 mV droop appears at the package level; with ~50 mV IR droop on top, total is ~80 mV. On a 0.7 V rail with V_dd_min ~0.6 V, margin ~20 mV. Tight but survivable; engineers would likely add LSCs to absorb the longer-tail of the transient, leaving more headroom.
-
-**Q4.** *Estimate B200 package-level signaling power assuming 8 HBM3e stacks at 1.23 TB/s each + 10 TB/s NV-HBI, both at 0.2 pJ/bit.*
-
-Total signaling BW: $8 \cdot 1.23 + 10 = 19.84$ TB/s = $1.587 \times 10^{14}$ bits/s. At 0.2 pJ/bit:
-
-$$
-P \;=\; 1.587\times 10^{14} \cdot 0.2\times 10^{-12} \;=\; 31.7\ \text{W}
-$$
-
-About 3% of the 1 000 W package — non-trivial, and the reason silicon-bridge (not organic) routing is a forced choice. On organic at 1 pJ/bit it'd be 158 W, ~16% of TDP.
-
-**Q5.** *Why does AMD's IF-AP architecture have a NUMA penalty NVIDIA's NV-HBI doesn't? Estimate the latency difference.*
-
-NV-HBI: ~10–20 ns die-to-die (cache-coherent, single GPU view). IF-AP across the IOD: every cross-XCD memory access traverses XCD→IOD fabric (~10 ns) → IOD routing (~10 ns) → IOD→destination XCD (~10 ns) → HBM access (~80 ns). Local: ~80 ns. Remote: ~110 ns. The runtime must place tensor blocks on the local XCD or pay a 30%+ access-latency tax — exactly what NCCL+ROCm topology-aware scheduling tries to do.
-
----
-
-## 13. References
+## 12. References
 
 **Standards & primary sources**
 - TSMC Technology Symposium proceedings, CoWoS-S/L disclosures (annual).

@@ -533,31 +533,7 @@ flowchart TD
 
 ---
 
-## 12. Worked interview problems
-
-**Q1.** *A B200 SM at FP8 needs ~50 TB/s of operand bandwidth. SMEM provides only ~6.5 TB/s. Why doesn't the SM stall?*
-
-Two reasons. (a) Not every cycle is a wgmma — about 60–70% of cycles execute tensor ops; the rest are scheduling, address calc, etc. Effective demand is lower than the raw peak. (b) Register-file reuse: each operand fetched into RF is reused across multiple wgmma instructions in the same tile. The RF (with wider per-bank ports and the operand collector) supplies the high-bandwidth path (~30 TB/s), while SMEM only stages data into RF/TMEM at tile boundaries — its ~6.5 TB/s is sufficient for inter-tile prefetch. With FP4 (B300), even this two-tier scheme falls short and TMEM becomes mandatory.
-
-**Q2.** *You're allocating a 64×64 tile in SMEM as `__shared__ float A[64][64]` and 32 threads in a warp transpose-load column-major (each thread reads `A[k][threadIdx.x]` for k∈[0,63]). What's the bank conflict?*
-
-Stride per thread is 64 * 4 = 256 B = stride 64 in 4-B words. Bank = 64·i mod 32 = 0 for all i. **32-way conflict** on every load. Fix: pad to `A[64][65]` — stride becomes 260 B = 65 in words, bank = 65i mod 32 = (i + 32i) mod 32 = i mod 32 → 0-way conflict. Cost: ~1.6% extra SMEM. Speedup: ~32×.
-
-**Q3.** *Why isn't TMEM just a renamed bigger SMEM?*
-
-Three reasons. (a) Read-port topology: TMEM has wide (1024-bit) read ports geometrically matched to wgmma tile rows; SMEM has 32 narrow (32-bit) banks for arbitrary thread-pattern access. (b) Isolation: SMEM can be touched by any CUDA thread instruction, creating probabilistic conflict with wgmma. TMEM is addressable only by tensor-core ops — zero contention. (c) Address mapping: SMEM is byte-addressed and bank-interleaved; TMEM uses tensor-tile addressing matched to mma matrix layout. Effectively, TMEM is an *operand cache* for the tensor core, not a general scratchpad.
-
-**Q4.** *Estimate the bitcell area cost of a true 6R/2W register file vs 1R/1W banked + operand collector, both for 256 KB.*
-
-Multi-port: $A_{cell} \propto (P+W)^2 = 64$. So 64× the area-per-bit of a single-port cell. 256 KB at 64× ≈ 16 MB-equivalent of 1R/1W bitcell area — about 200 mm² at frontier nodes, larger than a whole SM. Banked + collector: 256 KB at 1× = ~3 mm². The operand collector itself adds maybe 0.1 mm² of FFs and arbitration logic. Total: ~50× area savings, comparable bandwidth. This is why the GPU industry universally chose the second path.
-
-**Q5.** *Why does an LLM with a 70 GB working set still benefit from L2 at all?*
-
-The full working set doesn't fit, but *transient* working sets do: FlashAttention's row sums and exp-max statistics live entirely in L2 across tile passes (~MB scale); KV-cache pages just fetched from HBM are reused once (in fmha epilogue) before being evicted; activations from forward pass are re-read by the next layer's backward pass within microseconds. L2 catches these short-lived high-reuse buffers. Without L2, every reduction would round-trip through HBM and decode would slow ~3×.
-
----
-
-## 13. References
+## 12. References
 
 **Foundational**
 - Weste & Harris, *CMOS VLSI Design*, 4th ed. — SNM derivation, β-ratios.
