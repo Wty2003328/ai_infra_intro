@@ -650,4 +650,19 @@ Alert if effective TPOT exceeds baseline for more than a few minutes. This indic
 
 - Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (ICML 2023).
 - Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (arXiv 2023).
-- Cai et al., "Medusa: S
+- Cai et al., "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads" (ICML 2024).
+- Li et al., "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty" (ICML 2024).
+- Li et al., "EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees" (arXiv 2024).
+- Fu et al., "Break the Sequential Dependency of LLM Inference Using Lookahead Decoding" (arXiv 2024).
+- DeepSeek-AI, "DeepSeek-V3 Technical Report" (arXiv 2024) --- multi-token prediction.
+- Spectral et al., "Prompt Lookup Decoding" (blog, 2024).
+- SGLang v0.5.12 release notes --- DFLASH speculative decoding (2025).
+- NVIDIA TensorRT-LLM v1.3.0 release notes --- DFLASH and suffix automaton speculative decoding (2025).
+- Google DeepMind, "Gemma 4 Technical Report" (2025) --- native multi-token prediction heads.
+- Moonshot AI, "Kimi K2.5 Technical Report" (2025) --- EAGLE-3 with Multi-head Latent Attention.
+- vLLM documentation --- Adaptive Speculative Decoding V2 (2025).
+
+---
+
+**Next:** [Inference_Frameworks](Inference_Frameworks.md).
+**See also:** [Batching_and_Scheduling](Batching_and_Scheduling.md), [KV_Cache](KV_Cache.md), [Production_Architecture](Production_Architecture.md).

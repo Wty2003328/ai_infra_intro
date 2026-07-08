@@ -891,4 +891,14 @@ A: Each sequence in a spec-step produces 1--$K+1$ accepted tokens, creating a ra
 
 ## 18. Further Reading
 
-- Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OS
+- Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022) -- origin of continuous batching.
+- Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) -- vLLM, paging, and iteration-level scheduling.
+- Holmes et al., "Sarathi-Serve: Taming Compute-Utilization and Memory-Bottlenecks in LLM Serving" (OSDI 2024) -- chunked prefill analysis and optimal chunk sizing.
+- Patel et al., "Splitwise: Efficient generative LLM inference using phase splitting" (ISCA 2024) -- prefill--decode disaggregation.
+- Wu et al., "Fast Distributed Inference Serving for Large Language Models" (MLSys 2024) -- SLO-aware scheduling.
+- Zhong et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) -- RadixAttention and scheduling with prefix caching.
+
+---
+
+**Next:** [Speculative_Decoding](Speculative_Decoding.md).
+**See also:** [KV_Cache](KV_Cache.md), [vLLM_Internals](vLLM_Internals.md), [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md), [Production_Architecture](Production_Architecture.md).

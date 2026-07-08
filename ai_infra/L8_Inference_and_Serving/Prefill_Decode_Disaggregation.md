@@ -800,4 +800,4 @@ A: A research design (ISCA 2024) showing that disaggregated prefill/decode acros
 | Example pool ratio | 3 prefill (4×H100, TP4) : 3 decode (2×H200, TP2) | sized to traffic, not 1:1 |
 | KV transfer payload | full per-layer K,V for the prompt, prefill→decode | the price of disaggregation |
 | KV transfer medium | NVLink (intra-node) / IB or RDMA (cross-node) | transfer time must hide under first decode |
-| When it helps | high prefill:decode ratio, bursty/long-prompt traffic, strict TTFT *and* TPOT SLOs together | the regime where a coupled pool forces a compromise on one or the other |
+| When it helps | high prefill:decode ratio + variable/bursty prompts, at fleet scale | +52–144% throughput/goodput (§6.1–6.2 above); below that scale, colocated is simpler |
