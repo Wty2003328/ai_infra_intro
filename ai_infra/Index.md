@@ -208,4 +208,22 @@ These numbers come up constantly. Burn them into memory before an interview.
 | PCIe Gen5 x16 | 64 GB/s | Host ↔ GPU |
 | NVLink-C2C (Grace-Hopper/Blackwell) | 900 GB/s | CPU↔GPU in superchip |
 | H100 ridge point (FP16) | ~295 ops/byte | Roofline inflection |
-| Llama-3-70B KV per token (FP16, GQA) | 320 KB | 2
+| Llama-3-70B KV per token (FP16, GQA) | 320 KB | 2 × 80 × 8 × 128 × 2 |
+| Llama-3-70B weights (FP16 / FP8 / INT4 / FP4) | 140 / 70 / 35 / 35 GB | Quant options |
+| DeepSeek-V4 Pro KV per token (MLA) | ~70 KB | ~8.5× smaller than dense MHA |
+| DeepSeek-V4 Pro active / total params | 37B / 671B | MoE asymmetry |
+| Llama-4 Maverick active / total | 17B / 400B | Top-1 routing |
+| Llama-4 Scout context window | 10M tokens | Extreme context target |
+| Qwen-3.6 Max Preview Intelligence Index | 52 | Top open-weights contender |
+| Kimi K2.6 Intelligence Index | 54 | Highest-ranked open-weights |
+| Typical TTFT SLO (chat) | <500 ms | Interactive UX |
+| Typical TPOT SLO (chat) | <50 ms | Smooth streaming |
+| Reasoning-mode output length (heavy) | 30K–100K tokens | KV pool sizing target |
+| GRPO sample group K | 8–64 | Per-prompt rollouts |
+| Mooncake-style cluster prefix hit rate | ~80% | Multi-replica chat workloads |
+| Cerebras WSE-3 die area | 46,225 mm² (full wafer) | Wafer-scale compute |
+| Cerebras IPO date | May 15, 2026 | Public market milestone |
+
+---
+
+*Last updated: May 2026.*

@@ -552,4 +552,4 @@ Production deployments often tier GPU pools by KV cache budget. Short-context te
 | Few-step distillation (LCM/DMD) | 50 → **1–4 steps** (10–50×) | the dominant gen speedup |
 | 1-hour video (1 fps, 128 tok/frame) | ~**461K tokens** | cap concurrent video sessions |
 | Prefill/decode ratio | text ~30/70; **VLM 5–25× (B=1), ~3× (B=8)** | why chunked prefill is mandatory |
-| VLM prefill thr
+| VLM prefill throughput | ~same tok/s per token as text-only prefill (still compute-bound) | image token count, not rate, is the real cost driver |

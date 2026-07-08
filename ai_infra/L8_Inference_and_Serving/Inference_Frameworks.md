@@ -946,4 +946,13 @@ A: Single-user local chat (llama.cpp, MLC). Edge or mobile deployment (MLC-LLM c
 - Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs" (NeurIPS 2024) — RadixAttention and the SGLang engine.
 - TensorRT-LLM v1.3 documentation, NVIDIA Developer — EAGLE-3, FlexKV, build pipeline, deployment guides.
 - NVIDIA Dynamo 1.0 documentation and GTC 2026 talks — disaggregated serving, KV Block Manager, Grove, Planner, AIConfigurator.
-- llm-d project re
+- llm-d project repository (CNCF Sandbox) — open-source disaggregated serving stack, v0.6 performance data.
+- BitNet / bitnet.cpp (Microsoft) — 1-bit LLM inference framework, CPU and GPU kernels.
+- vLLM v0.21 release notes — HMA, TurboQuant, FlashAttention 4, vLLM IR, bi-directional KV transfer.
+- SGLang v0.5.12 release notes — Spec Decoding V2, piecewise CUDA graphs, NIXL-EP, MLX backend, SGLang-Diffusion.
+- "Deep Dive into LLM Inference Acceleration" — Anyscale, Mosaic AI, and NVIDIA technical blogs.
+
+---
+
+**Next:** [vLLM_Internals](vLLM_Internals.md).
+**See also:** [KV_Cache](KV_Cache.md), [Batching_and_Scheduling](Batching_and_Scheduling.md), [Speculative_Decoding](Speculative_Decoding.md), [Production_Architecture](Production_Architecture.md), [Disaggregated_Serving_2025](Disaggregated_Serving_2025.md).

@@ -984,4 +984,26 @@ The activation outlier is reduced by $10\times$ — a dramatic improvement for I
 
 With $n = 4096$ channels and one outlier at magnitude 100:
 
-**Min-max:** $\alpha = 100$. Step size $s = 200 / 255 = 0.784$. For a non-outlier channel with magnitude $\sim 1$: the signal is 1, the quantization no
+**Min-max:** $\alpha = 100$. Step size $s = 200 / 255 = 0.784$. For a non-outlier channel with magnitude $\sim 1$: the signal is 1, the quantization noise is $s/\sqrt{12} = 0.226$. SQNR per non-outlier channel: $20\,\log_{10}(1 / 0.226) = 12.9$ dB — terrible.
+
+**Percentile ($p = 99.9\%$):** With 4096 channels, the 99.9th percentile excludes the top 4 channels. If the outlier is among them, $\alpha \approx 1.0$. Step size $s = 2/255 = 0.0078$. SQNR for non-outlier: $20\,\log_{10}(1 / 0.0023) = 52.8$ dB — excellent. But the outlier channels are clipped with error $\approx 99$, causing potential quality loss on those channels.
+
+**MSE-optimal:** The optimizer balances clipping error on the outlier against rounding precision everywhere else. For a distribution that is 99.98% bounded by 1 and 0.02% at 100, the optimal $\alpha$ will be in the range 2–5 (depending on the exact outlier density), yielding $s \approx 0.016$–$0.039$. SQNR for non-outlier channels: $20\,\log_{10}(1 / 0.005) \approx 46$ dB — a good compromise. The outlier is clipped but with moderate error.
+
+This is precisely the motivation for SmoothQuant: instead of choosing between bad SQNR for most channels (min-max) or clipping the outlier (percentile), migrate the outlier to the weight side where per-channel quantization handles it naturally.
+
+---
+
+## 15. References
+
+- Frantar, Ashkboos, et al., *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers*, ICLR 2023.
+- Lin, Ji, et al., *AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration*, MLSys 2024.
+- Xiao, Guangxuan, et al., *SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models*, ICML 2023.
+- Nagel, Markus, et al., *A White Paper on Neural Network Quantization*, arXiv:2106.08295, 2021 — comprehensive survey of PTQ fundamentals.
+- Gholami, Amir, et al., *A Survey of Quantization Methods for Efficient Neural Network Inference*, arXiv:2103.13630, 2021.
+- Egilmez, Hakan, *Quantization Error Analysis* lecture notes, Stanford EE392M, 2022 — SQNR derivation.
+
+---
+
+**Up the stack:** [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Transformer Engine, the sub-integer frontier.
+**Down the stack:** [FP_Unit_Design](../L2_Digital_Design_for_AI/FP_Unit_Design.md) — why smaller multipliers yield 2× throughput; [Transformer_Internals](Transformer_Internals.md) — the model architecture being quantized.

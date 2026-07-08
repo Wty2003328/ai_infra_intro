@@ -722,4 +722,4 @@ A: (1) Edge rate limiting: per-tenant tokens/min cap, 429 on excess. (2) Router:
 | KV size (70B FP8) | ~160 KB/token; TP=8 (640 GB) → ~3.5M tokens | why paging/compression/disagg are mandatory |
 | RPS per replica | 70B FP8 TP=8, 12K tok/s, 200-tok output → **60 RPS** | the capacity-planning unit |
 | Fleet sizing example | 10K RPS → 167 replicas → **1,336 H100s** | translate demand to hardware |
-| Bytes/param by forma
+| Bytes/param by format | FP32 4 B, FP16/BF16 2 B, FP8/INT8 1 B, INT4/NF4/FP4 0.5 B | the multiplier behind every VRAM/KV estimate above |

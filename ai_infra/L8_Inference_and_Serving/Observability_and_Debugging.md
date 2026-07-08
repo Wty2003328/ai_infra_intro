@@ -460,4 +460,4 @@ Every latency spike falls into one of the six pathology categories above. The di
 | H100 thermal-throttle point | **80 °C** → ~**18%** throughput loss (1.5/1.83 GHz) | the most common silent ITL regression |
 | DCGM GPU-util normal / alert | 70–98% / **< 50% sustained** | but "util" counts barrier spins (§2.2) |
 | Power normal / alert (H100 SXM) | 300–700 W / **> 680 W** | power-cap throttle precursor |
-| SM clock normal / throttl
+| SM clock normal / throttled (H100 SXM) | ~1.83 GHz / ~1.5 GHz | same clock swing as the thermal-throttle line above |
