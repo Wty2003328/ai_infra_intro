@@ -8,7 +8,7 @@
 
 ## 0. The optimization ladder
 
-A working CUDA kernel is the starting point, not the end. The gap between a functionally correct first draft and a production kernel operating at 80-90% of device peak is typically 10-50x in throughput. That gap is closed by applying a fixed sequence of optimizations, each one a precondition for the next: coalesced memory access before tiling, tiling before bank-conflict resolution, bank-conflict resolution before occupancy tuning, occupancy tuning before tensor-core offload, and so on. Skipping steps produces a kernel that profiles well on one metric but stalls on another. This page walks through every rung of that ladder, diagnoses failure modes with Nsight tools, and ends with a case study that ties everything together.
+A working CUDA kernel is the starting point, not the end. The gap between a functionally correct first draft and a production kernel operating at 80-90% of device peak is typically 10-50x in throughput. That gap is closed by applying a fixed sequence of optimizations, each one a precondition for the next: coalesced memory access before tiling, tiling before bank-conflict resolution, bank-conflict resolution before occupancy tuning, occupancy tuning before tensor-core offload, and so on. Skipping steps produces a kernel that profiles well on one metric but stalls on another. This page walks the generic rungs of that ladder — coalescing, tiling, bank conflicts, occupancy, vectorization, launch overhead — diagnoses failure modes with Nsight tools, and ends with a case study that ties everything together. The tensor-core rungs (tensor-core utilization, TMEM, async copy, double buffering, warp specialization, clusters) get their own page: [Tensor_Core_Programming](Tensor_Core_Programming.md).
 
 ---
 
@@ -44,7 +44,7 @@ flowchart TD
     style L fill:#f1f5f9,stroke:#475569,color:#000
 ```
 
-Each step assumes the prior step is already satisfied. Applying tensor-core intrinsics to a kernel with uncoalesced accesses yields worse results than a coalesced FP32 kernel. The hierarchy is causal, not merely a preference.
+Each step assumes the prior step is already satisfied. Applying tensor-core intrinsics to a kernel with uncoalesced accesses yields worse results than a coalesced FP32 kernel. The hierarchy is causal, not merely a preference. Steps 5–9 of the ladder (tensor-core utilization through cluster-level optimizations) are covered in depth in [Tensor_Core_Programming](Tensor_Core_Programming.md); sections 6–7 below pick the ladder back up at vectorization and launch overhead.
 
 ---
 
@@ -240,516 +240,9 @@ Rule of thumb: aim for $\ge$ 50% occupancy for memory-bound kernels. For compute
 
 ---
 
-## 6. Tensor-core utilization
+## 6. Vector types and instruction-level parallelism
 
-### 6.1 Instruction hierarchy
-
-| Level | Instruction | Threads involved | Tile shape (FP16/BF16) | Tile shape (FP8) | Architecture |
-|-------|------------|-----------------|----------------------|-----------------|-------------|
-| WMMA | `wmma::mma_sync` | 1 warp (32) | $16 \times 16 \times 16$ | — | Volta+ |
-| WGMMA | `wgmma.mma_async` | 1 warp group (128) | $64 \times N \times 16$ | $64 \times N \times 32$ | Hopper+ |
-| MMA (PTX) | `mma.sync` | 1 warp (32) | $16 \times 8 \times 16$ | — | Ampere+ |
-
-### 6.2 WMMA example (Volta through Ampere)
-
-```c
-#include <mma.h>
-using namespace nvcuda::wmma;
-
-fragment<matrix_a, 16, 16, 16, half, row_major> frag_a;
-fragment<matrix_b, 16, 16, 16, half, col_major> frag_b;
-fragment<accumulator, 16, 16, 16, float> frag_c;
-
-fill_fragment(frag_c, 0.0f);
-
-// Load tiles from SMEM
-load_matrix_sync(frag_a, smem_a + k * 16, 16);
-load_matrix_sync(frag_b, smem_b + k * 16, 16);
-
-// Multiply-accumulate
-mma_sync(frag_c, frag_a, frag_b, frag_c);
-
-// Store result
-store_matrix_sync(out + m * N + n, frag_c, N, mem_row_major);
-```
-
-Each `wmma` call performs $16 \times 16 \times 16 = 4\,096$ FMAs as a single instruction, issued to the tensor core. The warp's 32 threads cooperatively load and store the tile — each thread handles $(16 \times 16) / 32 = 8$ elements.
-
-### 6.3 WGMMA on Hopper
-
-Hopper's `wgmma` instruction is asynchronous: the warp group issues the instruction and continues executing independent instructions while the tensor core computes. This enables software pipelining of tensor-core operations with address arithmetic and data movement.
-
-Key constraints:
-- $M = 64$ (fixed).
-- $N \in \{8, 16, 24, 32, ..., 256\}$ (multiples of 8).
-- $K = 16$ (FP16/BF16), $K = 32$ (FP8), $K = 64$ (FP4).
-- Operands in SMEM (not registers for A/B; accumulators in registers).
-- Requires warp-group (4 warps, 128 threads) coordination.
-
-The CUTLASS library abstracts this via its `collective::Mma` construct, but understanding the hardware constraint is essential for debugging suboptimal utilization.
-
-### 6.4 Tensor-core utilization metric
-
-$$
-\text{TC Util} = \frac{\text{achieved FLOPs}}{\text{peak FLOPs}} = \frac{\text{wgmma\_issued} \cdot \text{FLOPs\_per\_wgmma}}{\text{SM\_count} \cdot \text{freq} \cdot \text{TC\_FLOPs\_per\_cycle\_per\_SM}}
-$$
-
-Nsight Compute reports this as `smsp__inst_executed_pipe_tensor.sum` relative to the pipe utilization ceiling.
-
-### 6.5 FP8 tensor-core programming
-
-Hopper (SM90) introduced native FP8 support in the 4th-generation tensor cores. FP8 doubles the FLOPS throughput compared to FP16 on the same hardware: H100 SXM delivers 1 979 TFLOPS dense FP8 vs. 989 TFLOPS dense FP16. The throughput gain comes from halved operand size — twice as many values fit in the same register/SMEM tile, so the tensor core processes twice the K-dimension per instruction.
-
-**FP8 formats.** Two encodings are defined by IEEE 754-like conventions:
-
-| Format | Exponent bits | Mantissa bits | Use case | Special values |
-|--------|--------------|---------------|----------|----------------|
-| E4M3 | 4 | 3 | Forward pass, inference weights/activations | No Inf/NaN (larger dynamic range is not needed) |
-| E5M2 | 5 | 2 | Backward pass (gradients) | Supports Inf/NaN (gradients can overflow) |
-
-E4M3 trades dynamic range for precision (3 mantissa bits vs. 2), which is ideal for weights and activations that are typically well-conditioned after calibration. E5M2 trades precision for dynamic range, which is necessary for gradients that span wider magnitudes during training.
-
-**WGMMA with FP8.** On Hopper, `wgmma.mma_async` accepts FP8 operands with MMA shape $M \times N \times K = 64 \times 128 \times 32$. The K-dimension doubles from 16 (FP16) to 32 (FP8) because each 128-byte SMEM tile holds twice as many FP8 elements. This doubling is the hardware mechanism behind the 2x FLOPS increase — a single `wgmma` instruction performs $64 \times 128 \times 32 = 262{,}144$ FMAs vs. $64 \times 128 \times 16 = 131{,}072$ FMAs for FP16.
-
-```c
-#include <cuda_fp8.h>
-
-// FP8 types
-__nv_fp8_e4m3 fp8_a = __nv_fp8_e4m3(fp16_val);   // cast from FP16
-__nv_fp8_e5m2 fp8_b = __nv_fp8_e5m2(fp16_grad);
-
-// WGMMA with FP8 operands (via CUTLASS or PTX)
-// PTX: wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e5m2.f8
-// Accumulator is always FP32 for numerical stability
-```
-
-**Quantization flow.** FP8 GEMM does not operate on raw FP8 values directly — it requires per-tensor scaling factors to preserve accuracy:
-
-$$
-\text{FP32 master weights} \xrightarrow{\text{cast + scale}} \text{FP8} \xrightarrow{\text{tensor core GEMM}} \text{FP32 accumulate}
-$$
-
-Each tensor (weight, activation, gradient) carries a 2-element scaling factor (scale + bias, or just scale for most LLM workloads). The overhead is negligible: 2 FP32 values per tensor regardless of tensor size.
-
-**Transformer Engine integration.** NVIDIA's [Transformer Engine](https://github.com/NVIDIA/TransformerEngine) automates FP8 management:
-
-- **Delayed scaling:** the scaling factor for the current FP8 tensor is computed from the maximum absolute value of the *previous* iteration's tensor (one-step lag). This avoids a costly max-reduction on the current tensor.
-- **Calibration:** a short calibration run (100-500 iterations) collects per-tensor statistics to set initial scaling factors. Without calibration, FP8 accuracy degrades by 1-5% on most LLM workloads; with calibration, degradation is typically <0.5%.
-- **Automatic mixed precision:** Transformer Engine wraps standard PyTorch modules (`Linear`, `LayerNorm`) and transparently dispatches FP8 GEMMs where safe, falling back to FP16/BF16 where not.
-
-```python
-import transformer_engine as te
-import transformer_engine.pytorch as te_pytorch
-
-# Wrap an nn.Linear with automatic FP8 management
-fp8_linear = te_pytorch.Linear(in_features, out_features, bias=False)
-
-# Calibration context manager
-with te_pytorch.fp8_autocast(enabled=True):
-    output = fp8_linear(input)
-```
-
-**Key considerations for FP8:**
-
-1. **Accuracy requires calibration.** FP8 has only 3-4 mantissa bits. Tensors with wide dynamic ranges (e.g., attention scores, embedding tables) need careful scaling. Run calibration before production use.
-2. **Per-tensor scaling overhead.** Each tensor needs its own scale factor — this is 2 FP32 values per tensor, negligible in memory but adds a small host-side bookkeeping cost.
-3. **Accumulator is FP32.** FP8 operands are promoted to FP32 before accumulation. The output of an FP8 GEMM is FP32, which is then cast back to FP8 (or BF16) for the next layer.
-4. **Not all layers benefit equally.** Matmuls in attention (QK^T, PV) and FFN (gate/up/down projections) benefit most. LayerNorm, softmax, and element-wise ops remain in FP32/BF16.
-
-### 6.6 2:4 Structured sparsity on tensor cores
-
-Starting with Ampere (SM80), NVIDIA tensor cores include hardware support for **2:4 structured sparsity**: in every contiguous group of 4 values, exactly 2 must be zero. The hardware doubles effective throughput by skipping the zero multiply-accumulate operations, yielding a 2x speedup on tensor-core GEMMs at constant accuracy (after fine-tuning).
-
-**How it works.** The tensor core's sparse matrix path expects a "compressed" weight matrix where the non-zero pairs in each group-of-4 are packed into 2 values, plus a 2-bit index encoding which positions are non-zero. The hardware reconstructs the full 4-element dot product by inserting zeros at the indexed positions — this is transparent to the programmer using the `cusparselt` library.
-
-**Hardware support timeline:**
-
-| Architecture | Sparse tensor cores | Dense FP16 | Sparse FP16 | Dense FP8 | Sparse FP8 |
-|-------------|--------------------|------------|-------------|-----------|------------|
-| Ampere (A100) | Yes | 312 TFLOPS | 624 TFLOPS | N/A | N/A |
-| Hopper (H100) | Yes | 990 TFLOPS | ~1 980 TFLOPS | 1 979 TFLOPS | ~3 958 TFLOPS |
-| Blackwell (B200) | Yes | ~2 250 TFLOPS | ~4 500 TFLOPS | ~4 500 TFLOPS | ~9 000 TFLOPS |
-
-Sparse throughput is exactly 2x dense for all supported precisions.
-
-**Sparsity pattern constraints:**
-
-1. **Static, not dynamic.** The 2:4 pattern is determined at model export time (post-training) and baked into the weight matrix. The pattern does not change at runtime. This means sparsity applies to weight-stationary inference and the forward pass of training — the backward pass uses dense weights because gradient sparsity patterns differ from weight sparsity patterns.
-2. **Pruning then fine-tuning.** The typical workflow is: (a) train a dense model, (b) apply magnitude pruning to enforce the 2:4 constraint (zero out the 2 smallest-magnitude values in each group-of-4), (c) fine-tune for 1-10K steps to recover accuracy.
-3. **Accuracy impact.** For LLM workloads (GPT-3, LLaMA, etc.), 2:4 sparsity typically causes <1% accuracy degradation after fine-tuning. For smaller models or tasks with high precision requirements (e.g., numerical simulation), degradation can be higher.
-
-**API and usage:**
-
-```c
-// cuSPARSELt: sparse matrix operations
-#include <cusparseLt.h>
-
-// Create sparse matrix descriptor with 2:4 pruning
-cusparseLtMatDescriptor_t matA;
-cusparseLtMatDescriptor_t matB;
-cusparseLtMatmulDescriptor_t matmul;
-cusparseLtMatmulPlan_t plan;
-
-// Initialize with 2:4 sparsity on matrix A
-cusparseLtStructuredDescriptorInit(
-    &handle, &matA, M, K, K, CUDA_R_16F,
-    CUSPARSE_ORDER_ROW, CUSPARSE_SPARSITY_50_PERCENT
-);
-
-// Prune matrix to 2:4 pattern
-cusparseLtSpMMAPrune(
-    &handle, &matmul, d_A_dense, d_A_compressed,
-    CUSPARSELT_PRUNE_CHECK, stream
-);
-
-// Sparse GEMM
-cusparseLtMatmul(&handle, &plan, &alpha, d_A_compressed, d_B, &beta, d_C, ...);
-```
-
-```python
-# PyTorch 2.x: semi-structured (2:4) sparsity
-import torch
-from torch.sparse import to_sparse_semi_structured
-
-# Prune to 2:4 pattern
-weight_pruned = torch._sparse_semi_structured_tensor.prune_2_4(weight_dense)
-
-# Convert to sparse format
-weight_sparse = to_sparse_semi_structured(weight_pruned)
-
-# Matrix multiplication uses sparse tensor cores automatically
-output = torch.nn.functional.linear(input, weight_sparse)
-```
-
-**Caveats:**
-
-1. **Only the weight matrix can be sparse.** The activation matrix (input to the GEMM) is always dense. This limits applicability to weight-stationary operations — primarily linear layers in inference.
-2. **Training backward pass is dense.** During training, the forward pass can use sparse weights (2x speedup), but the backward pass through the weight gradient uses dense weights (no speedup). Net training speedup is therefore <2x, typically 1.3-1.5x depending on the ratio of forward to backward compute.
-3. **Pattern search cost.** Finding the optimal 2:4 pruning pattern is NP-hard in general. The practical approach (magnitude pruning) is a greedy heuristic. For some models, a slightly more sophisticated search (e.g., iterative pruning with small steps) can improve accuracy recovery during fine-tuning.
-
----
-
-## 7. Blackwell TMEM (Tensor Memory) Programming
-
-### 7.1 Why TMEM exists
-
-Blackwell's 5th-generation tensor cores introduce a new memory tier called **TMEM (Tensor Memory)** that sits between shared memory and registers in the on-chip hierarchy. The motivation is bandwidth: FP4 tensor cores on Blackwell demand approximately ~50 TB/s/SM of operand bandwidth, far exceeding what SMEM can deliver at ~19 TB/s per SM. TMEM bridges this gap by providing a dedicated staging buffer for tensor-core operands, physically closer to the tensor-core datapath than SMEM.
-
-### 7.2 Memory hierarchy with TMEM
-
-The Blackwell on-chip memory hierarchy becomes:
-
-$$\text{HBM} \xrightarrow{\sim 8 \text{ TB/s}} \text{L2} \xrightarrow{\sim 60 \text{ TB/s}} \text{SMEM} \xrightarrow{\sim 19 \text{ TB/s}} \text{TMEM} \xrightarrow{\sim 100+ \text{ TB/s}} \text{Tensor Cores}$$
-
-Each tier is roughly 5-10x faster than the previous one. TMEM capacity is estimated at ~256 KB per SM (not officially confirmed by NVIDIA). Latency is approximately ~5 cycles, compared to ~20-30 cycles for SMEM and ~2-3 cycles for the register file.
-
-### 7.3 Programming model
-
-TMEM is managed by hardware, not directly by the programmer. The `wgmma` instruction on Blackwell implicitly reads its A and B operands from TMEM rather than from SMEM (as on Hopper). The programmer's responsibility is to **stage data into TMEM** before issuing `wgmma`. The data flow for a Blackwell GEMM kernel is:
-
-$$\text{TMA async copy} \rightarrow \text{SMEM} \rightarrow \text{TMEM} \rightarrow \text{wgmma} \rightarrow \text{accumulate in RF}$$
-
-This contrasts with Hopper, where `wgmma` reads directly from SMEM. The extra TMEM staging step is the key architectural difference.
-
-### 7.4 TMEM load operations
-
-The TMA (Tensor Memory Accelerator) hardware on Blackwell can load tiles directly into TMEM via new `tmem::load` operations. The CUDA PTX API exposes this through:
-
-```c
-// Load a tile from SMEM into TMEM (partitioned per warp group)
-cuda::ptx::tmem::load_partition(smem_tile, tmem_tile, partition_id);
-
-// Cross-warp reduction within TMEM (e.g., partial sum accumulation)
-cuda::ptx::tmem::reduce_add(tmem_dst, tmem_src_a, tmem_src_b);
-```
-
-Key API elements:
-
-| Operation | Description |
-|---|---|
-| `tmem::load_partition` | Loads a tile from SMEM into a TMEM partition owned by a specific warp group |
-| `tmem::reduce_add` | Performs an addition reduction across warp groups within TMEM, without writing to registers |
-| `wgmma.mma_async` | Implicitly reads A/B operands from TMEM (no explicit TMEM address in the instruction) |
-
-The `tmem::reduce_add` operation is particularly important for cross-warp reduction within TMEM, enabling efficient partial-sum accumulation without involving the register file or shared memory.
-
-### 7.5 Impact on kernel design
-
-The TMEM staging step changes the optimal pipeline structure for Blackwell GEMM kernels:
-
-```ascii-graph
-Hopper:  TMA → SMEM → wgmma(SMEM) → RF accumulate
-Blackwell: TMA → SMEM → TMEM → wgmma(TMEM) → RF accumulate
-```
-
-The extra stage means Blackwell kernels benefit from triple or quad buffering (vs. double buffering on Hopper) to keep the pipeline full. CUTLASS 3.x's Blackwell collective builders handle this automatically, but hand-written kernels must account for the additional latency of the SMEM → TMEM transfer.
-
-**Occupancy impact**: TMEM is a shared resource within the SM, competing with SMEM for the on-chip memory budget. A kernel using 256 KB of TMEM per SM has less SMEM available for tiling, which may require smaller tile sizes or fewer concurrent blocks per SM.
-
----
-
-## 8. Async copy — cp.async and TMA
-
-### 8.1 cp.async (Ampere+)
-
-The `cp.async` instruction copies data from global memory to shared memory without going through registers. The thread issues the copy and can overlap with compute.
-
-```c
-// Async copy of 4, 8, or 16 bytes per thread
-uint32_t bar = 0; // barrier token
-asm volatile(
-    "cp.async.ca.shared.global [%0], [%1], %2;\n"
-    :: "r"(smem_ptr), "l"(gmem_ptr), "n"(16)
-);
-
-// Commit all pending async copies
-asm volatile("cp.async.commit_group;\n" ::);
-
-// Wait for the Nth-most recent commit group
-asm volatile("cp.async.wait_group %0;\n" :: "n"(0));
-```
-
-`cp.async` bypasses the register file entirely, freeing registers for tiling. Each thread can issue a 4, 8, or 16-byte copy. A warp collectively copies $32 \times 16 = 512$ bytes per instruction — one 128-byte cache line per quadrant of the warp.
-
-### 8.2 TMA (Hopper+)
-
-The **Tensor Memory Accelerator** (TMA) is a hardware unit in the SM that handles multi-dimensional tile descriptors. Instead of each thread computing its own address, a single thread programs a TMA descriptor with the source tensor's dimensions, strides, and the desired sub-tile. The TMA engine then DMAs the entire tile into SMEM autonomously.
-
-```c
-// Create TMA descriptor (host side)
-CUtensorMap desc;
-cuTensorMapEncodeTiled(
-    &desc,
-    CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
-    2,                    // rank
-    d_ptr,                // global memory base
-    dims,                 // global dims [M, K]
-    strides,              // global strides [K*sizeof(float), sizeof(float)]
-    tile_dims,            // tile dims [TM, TK]
-    strides_interleave,   // (unused for simple cases)
-    swizzle,              // CU_TENSOR_MAP_SWIZZLE_128B
-    0, 0                  // padding
-);
-
-// Issue TMA load (device side, one thread per block)
-tma_load(&smem_tile[0], &desc, coord_m, coord_k);
-```
-
-TMA advantages:
-- **Single-thread programming.** One thread issues the descriptor; no per-thread address arithmetic.
-- **Hardware swizzle.** The TMA engine applies on-the-fly XOR swizzle to match SMEM bank layout.
-- **Multi-dimensional.** Handles 1D through 5D tensor slicing natively.
-- **Frees the entire warp group.** All 128 threads can do compute while TMA loads the next tile.
-
----
-
-## 8B. Double buffering and software pipelining
-
-### 8.1 The overlap principle
-
-Without double buffering, a tiled kernel alternates between loading a tile and computing on it:
-
-```ascii-graph
-Load tile 0 → Compute tile 0 → Load tile 1 → Compute tile 1 → ...
-```
-
-The load latency (HBM round-trip: 200-800 cycles) is entirely exposed to the compute pipeline. Double buffering allocates two SMEM buffers: while the compute stage processes buffer $i$, the async copy stage fills buffer $i \oplus 1$.
-
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-gantt
-    title Double-Buffered Pipeline
-    dateFormat X
-    axisFormat %s
-    section Load
-    Tile 0     :0, 1
-    Tile 1     :1, 2
-    Tile 2     :2, 3
-    section Compute
-    Tile 0     :1, 2
-    Tile 1     :2, 3
-```
-
-### 8.2 Implementation
-
-```c
-__shared__ float smemA[2][BLOCK_M][BLOCK_K]; // double buffer
-__shared__ float smemB[2][BLOCK_K][BLOCK_N];
-
-int buf = 0;
-
-// Prime: load first tile
-cp_async_load(smemA[buf], gmem_A + 0 * BLOCK_K);
-cp_async_load(smemB[buf], gmem_B + 0 * BLOCK_K);
-cp_async_commit();
-cp_async_wait(0);
-
-for (int kk = BLOCK_K; kk < K; kk += BLOCK_K) {
-    int next = buf ^ 1;
-
-    // Issue async load for NEXT tile
-    cp_async_load(smemA[next], gmem_A + kk);
-    cp_async_load(smemB[next], gmem_B + kk * N);
-    cp_async_commit();
-
-    // Compute on CURRENT tile
-    compute_tile(smemA[buf], smemB[buf], regC);
-
-    // Wait for next tile, then swap
-    cp_async_wait(0);
-    buf = next;
-}
-
-// Compute last tile
-compute_tile(smemA[buf], smemB[buf], regC);
-```
-
-Double buffering typically yields 20-40% speedup on memory-bound kernels by hiding HBM latency behind compute. On Hopper, triple buffering (or n-deep software pipelining) can extract additional gains for kernels with very short compute phases relative to load phases.
-
----
-
-## 9. Warp specialization — producer-consumer
-
-### 9.1 Motivation
-
-On Hopper, `wgmma` is asynchronous and operates on SMEM-resident data. The optimal pipeline assigns one warp group (128 threads) to continuously issue `wgmma` instructions (consumer) and a second warp group to continuously issue TMA loads (producer). The two groups communicate through SMEM buffers with barrier synchronization.
-
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-sequenceDiagram
-    autonumber
-    participant P as Producer warp group<br/>(TMA loads)
-    participant B0 as SMEM buffer 0
-    participant B1 as SMEM buffer 1
-    participant C as Consumer warp group<br/>(wgmma compute)
-
-    Note over P,C: Iteration 0
-    P->>B0: TMA load tile A0, B0
-    Note over B0: arrive barrier
-    B0-->>C: signal ready
-    C->>C: wgmma on buffer 0
-    Note over P,C: Iteration 1 (overlapped)
-    P->>B1: TMA load tile A1, B1
-    C->>C: wgmma on buffer 0 (completes)
-    Note over B1: arrive barrier
-    B1-->>C: signal ready
-    Note over P,C: Iteration 2 (steady state)
-    P->>B0: TMA load tile A2, B2<br/>(buffer 0 reused)
-    C->>C: wgmma on buffer 1
-```
-
-### 9.2 Barrier synchronization
-
-Hopper provides hardware barriers (`bar.sync`, `bar.arrive`) that are far cheaper than `__syncthreads()` for inter-warp-group coordination. CUTLASS 3.x uses named barriers:
-
-```c
-// Producer signals "buffer is full"
-asm volatile("bar.arrive.shared::cta 1, 128;\n" ::); // barrier 1, 128 threads
-
-// Consumer waits for "buffer is full"
-asm volatile("bar.sync.shared::cta 1, 128;\n" ::);
-
-// Consumer signals "buffer is consumed"
-asm volatile("bar.arrive.shared::cta 2, 128;\n" ::);
-
-// Producer waits for "buffer is consumed"
-asm volatile("bar.sync.shared::cta 2, 128;\n" ::);
-```
-
-Warp specialization is the architecture of record for Hopper and Blackwell matmul kernels. FlashAttention-3 uses this pattern for its Q-tile producer and KV-tile consumer pipeline.
-
----
-
-## 10. Cluster-level optimizations (SM90+)
-
-### 10.1 When to use threadblock clusters
-
-Clusters (groups of 1–8 threadblocks executing on neighboring SMs) are a Hopper-specific optimization that applies after warp specialization is already in place. They are beneficial when:
-
-- **Cross-block data exchange is a bottleneck.** If your kernel splits work across blocks that must share intermediate results, DSMEM (~50 GB/s cross-SM) is faster than writing to HBM and reading back.
-- **The producer-consumer pattern spans multiple blocks.** When one block produces data that another block consumes in the same kernel, clustering avoids the HBM round-trip.
-- **Collaborative loading is needed.** Multiple blocks can cooperatively load a large tile, then exchange portions via DSMEM so each block has the full data without redundant HBM reads.
-
-Clusters are **not** beneficial when blocks are fully independent (most elementwise kernels, simple reductions) or when the cross-block communication is sparse relative to per-block compute.
-
-### 10.2 DSMEM bandwidth advantage
-
-| Cross-block communication path | Bandwidth | Notes |
-|---|---|---|
-| DSMEM (direct SM-to-SM within cluster) | ~50 GB/s | Bypasses L2, no HBM traffic |
-| L2 cache (warm) | Up to ~60 TB/s | Only if data is already cached |
-| HBM (global memory write + read) | ~3.35 TB/s write + ~3.35 TB/s read | Default without clusters |
-
-For small cross-block exchanges (a few KB of partial results), DSMEM's advantage is primarily latency, not throughput. For larger exchanges (full tiles), the bandwidth difference matters — DSMEM avoids consuming L2 capacity that other warps or blocks need.
-
-### 10.3 Cluster-wide reduction patterns
-
-The canonical cluster optimization is the **cluster-level reduction**, replacing the traditional two-kernel approach:
-
-**Without clusters (traditional):**
-```ascii-graph
-Kernel 1: each block reduces its portion to 1 value → write to global memory
-Kernel 2: single block reads all partial sums → reduces to final result
-```
-
-**With clusters:**
-```ascii-graph
-Single kernel: blocks in a cluster reduce locally in SMEM,
-               then exchange partial results via DSMEM,
-               one block produces the cluster's final partial sum → atomicAdd to global total
-```
-
-This eliminates one kernel launch and one HBM round-trip per cluster. For kernels with many small reductions (e.g., per-head attention normalization in FlashAttention-3), the savings are significant.
-
-```c
-// Cluster-wide reduction sketch (SM90)
-__global__ void __cluster_dims__(CLUSTER_SIZE, 1, 1)
-cluster_reduce(float *input, float *output, int n) {
-    __shared__ float partial[BLOCK_SIZE];
-    namespace cg = cooperative_groups;
-    cg::cluster_group cluster = cg::this_cluster();
-
-    // Step 1: Local block reduction (standard SMEM tree reduction)
-    //     Each thread loads input elements, then sequential-addressing
-    //     reduction in SMEM down to partial[0] = block's local sum.
-    //     (See Section 15 for the full optimized reduction pattern.)
-
-    // Step 2: Cluster-wide exchange
-    cg::sync(cluster);  // all blocks have completed local reduction
-
-    if (cluster.block_rank() == 0) {
-        float cluster_sum = 0.0f;
-        for (int r = 0; r < cluster.num_blocks(); r++) {
-            // Read each block's partial[0] via DSMEM
-            float *remote = cluster.map_shared_rank(partial, r);
-            cluster_sum += remote[0];
-        }
-        // One atomic per cluster to global memory
-        atomicAdd(output, cluster_sum);
-    }
-}
-```
-
-### 10.4 Decision flowchart
-
-```ascii-graph
-Is cross-block data exchange needed within a single kernel?
-  |
-  +-- No  → Regular threadblocks (no cluster needed)
-  |
-  +-- Yes → How many blocks need to communicate?
-              |
-              +-- 2-8 blocks  → Use a cluster with DSMEM
-              |
-              +-- >8 blocks  → Use global memory + kernel boundary sync
-                                (or cooperative groups grid sync)
-```
-
----
-
-## 11. Vector types and instruction-level parallelism
-
-### 11.1 Vector loads and stores
+### 6.1 Vector loads and stores
 
 CUDA provides built-in vector types: `char4`, `short4`, `int4`, `float4`, `uint4`, `double2`, etc. A single `float4` load moves 16 bytes in one instruction, reducing the total number of load instructions by 4x. This matters because each load instruction consumes an issue slot and a load/store unit cycle.
 
@@ -766,7 +259,7 @@ float4 a = reinterpret_cast<float4*>(input)[i >> 2];
 
 Vector loads also improve coalescing: a warp of `float4` loads accesses 128 bytes (one full cache line) in one transaction. The `memcpy_async` pipeline in Ampere+ requires 16-byte (`float4`) or 8-byte (`float2`) alignment.
 
-### 11.2 ILP — independent instruction chains
+### 6.2 ILP — independent instruction chains
 
 A single thread can have multiple independent operations in flight simultaneously. If the compiler can prove two FMAs have no data dependency, it schedules them on different ALU pipelines within the same cycle (dual-issue on some architectures):
 
@@ -787,13 +280,13 @@ On tensor-core kernels, ILP is less important because `wgmma` already issues asy
 
 ---
 
-## 12. Kernel launch overhead
+## 7. Kernel launch overhead
 
-### 12.1 The cost
+### 7.1 The cost
 
 Each `cudaLaunchKernel` call costs 2-10 microseconds of host-side overhead (argument marshaling, driver queuing). For a kernel that runs in 5 us, the launch overhead is 30-60% of total wall time. This is catastrophic for shallow networks or inference with small batch sizes.
 
-### 12.2 Kernel fusion
+### 7.2 Kernel fusion
 
 The primary mitigation: merge multiple kernels into one. If kernel A writes to global memory and kernel B reads the same data, fusing them eliminates the intermediate global round-trip and one launch overhead.
 
@@ -806,7 +299,7 @@ kernel_add_bias<<<grid, block>>>(d_out, d_bias);
 kernel_relu_add_bias<<<grid, block>>>(d_out, d_mid, d_bias);
 ```
 
-### 12.3 CUDA graphs
+### 7.3 CUDA graphs
 
 CUDA graphs encode an entire DAG of kernel launches, memory operations, and events into a single "graph" object. The graph is instantiated once and replayed with minimal host involvement. Launch overhead drops to ~100 ns per node.
 
@@ -827,7 +320,7 @@ cudaGraphLaunch(instance, stream);  // ~100ns overhead per node
 
 CUDA graphs are critical for inference serving where the same model DAG executes millions of times. PyTorch's `torch.compile` with `mode="reduce-overhead"` uses CUDA graphs under the hood.
 
-### 12.4 Persistent kernels
+### 7.4 Persistent kernels
 
 An alternative to graphs: launch a kernel that never returns. The kernel uses a work queue in global memory, and the host pushes work items into the queue. The kernel polls the queue, processes items, and signals completion via a flag.
 
@@ -845,9 +338,9 @@ Persistent kernels eliminate launch overhead entirely but complicate error handl
 
 ---
 
-## 13. Profiling with Nsight Compute and Nsight Systems
+## 8. Profiling with Nsight Compute and Nsight Systems
 
-### 13.1 Nsight Systems — system-level timeline
+### 8.1 Nsight Systems — system-level timeline
 
 ```bash
 nsys profile --trace=cuda,nvtx,osrt --gpu-metrics-device=all ./app
@@ -860,7 +353,7 @@ Nsight Systems provides a Gantt-chart timeline showing kernel launches, memory t
 - **Low SM utilization during transfers** = transfer/compute not overlapped.
 - **Unbalanced stream usage** = serialization opportunity missed.
 
-### 13.2 Nsight Compute — kernel-level roofline
+### 8.2 Nsight Compute — kernel-level roofline
 
 ```bash
 ncu --set roofline --section MemoryWorkloadAnalysis --section ComputeWorkloadAnalysis ./app
@@ -878,7 +371,7 @@ Nsight Compute provides per-kernel metrics:
 
 The **roofline plot** places the kernel on a chart with FLOPs on the y-axis and arithmetic intensity (FLOPs/byte) on the x-axis. The roofline has two segments: a memory-bound slope (rising) and a compute-bound ceiling (flat). The kernel's position relative to the roofline reveals which bottleneck to attack next.
 
-### 13.3 Iterative optimization workflow
+### 8.3 Iterative optimization workflow
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -901,11 +394,11 @@ flowchart TD
 
 ---
 
-## 14. Case study — parallel reduction
+## 9. Case study — parallel reduction
 
 Reduction (sum, max, min) is the canonical CUDA optimization example because every optimization in the checklist applies. The goal: compute $\sum_{i=0}^{N-1} a_i$ with peak throughput.
 
-### 14.1 Naive reduction
+### 9.1 Naive reduction
 
 ```c
 __global__ void reduce_naive(float* input, float* output, int N) {
@@ -925,7 +418,7 @@ __global__ void reduce_naive(float* input, float* output, int N) {
 
 Problems: (1) warp divergence (only even threads active after stride 1), (2) repeated global memory access instead of SMEM, (3) bank conflicts in SMEM access pattern, (4) low occupancy at large strides.
 
-### 14.2 Optimized reduction — sequential addressing
+### 9.2 Optimized reduction — sequential addressing
 
 ```c
 __shared__ float sdata[BLOCK_SIZE];
@@ -973,7 +466,7 @@ if (tid < 32) {
 
 Warp shuffle (`__shfl_down_sync`) reads directly from the register file of the source lane — no SMEM involvement, no bank conflicts, no synchronization barrier. For the final 32-lane reduction, this is 3-5x faster than SMEM-based reduction.
 
-### 14.3 Performance progression
+### 9.3 Performance progression
 
 | Version | Bandwidth (GB/s) on A100 | % of peak | Bottleneck |
 |---------|--------------------------|-----------|-----------|
@@ -987,7 +480,7 @@ Warp shuffle (`__shfl_down_sync`) reads directly from the register file of the s
 
 ---
 
-## 15. End-to-end optimization flow
+## 10. End-to-end optimization flow
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -1026,7 +519,7 @@ flowchart TD
 
 ---
 
-## 16. Numbers to memorize
+## 11. Numbers to memorize
 
 | Number | Value | Context |
 |--------|-------|---------|
@@ -1042,42 +535,29 @@ flowchart TD
 | Bank width | 4 bytes (32-bit) | One float per bank |
 | Cache line size (L1/L2) | 128 bytes | Coalescing granularity |
 | HBM latency | 200-800 cycles | Why tiling matters |
-| `wgmma` throughput per SM (Hopper, FP16) | ~7.5 TFLOPS | 4th gen tensor core (~990 TFLOPS total / 132 SMs) |
-| `wgmma` throughput per SM (Hopper, FP8) | ~15 TFLOPS | FP8 doubles FLOPS vs. FP16 (~1 979 TFLOPS total / 132 SMs) |
-| `wgmma` tile shape (Hopper, FP16) | $64 \times N \times 16$ | Fixed M and K |
-| `wgmma` tile shape (Hopper, FP8) | $64 \times 128 \times 32$ | K doubles vs. FP16 |
-| H100 dense FP8 throughput | ~1 979 TFLOPS | 2x FP16 dense (989 TFLOPS) |
-| H100 sparse FP16 throughput | ~1 980 TFLOPS | 2x dense via 2:4 structured sparsity |
-| B200 dense FP8 throughput | ~4 500 TFLOPS | Blackwell 5th gen tensor core |
-| B200 sparse FP8 throughput | ~9 000 TFLOPS | 2x dense via 2:4 structured sparsity |
 | Kernel launch overhead | 2-10 us | Host-side API cost |
 | CUDA graph node overhead | ~100 ns | Near-zero replay |
-| `cp.async` copy size per thread | 4, 8, or 16 bytes | Register bypass |
-| TMA max descriptor dimensionality | 5D | Multi-dimensional tile DMA |
 | Warp shuffle latency | ~5 cycles | Register-to-register |
 | `__syncthreads` latency | ~20-40 cycles | SMEM barrier |
-| DSMEM bandwidth (cross-SM within cluster) | ~50 GB/s | SM90+ cluster feature, bypasses L2 |
-| Cluster size (SM90+) | 1–8 threadblocks | Group of blocks sharing DSMEM |
 | Occupancy floor for memory-bound kernels | ~50% | Below = latency stalls |
+
+> Tensor-core, TMA, DSMEM, and cluster numbers now live in [Tensor_Core_Programming](Tensor_Core_Programming.md) §9.
 
 ---
 
-## 17. References
+## 12. References
 
 1. NVIDIA. *CUDA C++ Programming Guide*, v12.6. 2024. Sections on memory coalescing, shared memory, tensor cores, async copy.
 2. NVIDIA. *CUDA Best Practices Guide*, v12.6. 2024. Occupancy calculator, optimization checklist.
 3. Mark Harris. *Optimizing Parallel Reduction in CUDA*. NVIDIA Developer Technology, 2007. The canonical reduction optimization walkthrough.
 4. NVIDIA. *Nsight Compute Documentation*, v2024. Profiling methodology, roofline analysis, stall metrics.
 5. NVIDIA. *CUTLASS 3.x Documentation*. 2024. Collective builders, TMA, wgmma, warp specialization.
-6. Tri Dao et al. *FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision*. 2024. Warp specialization pipeline in production.
-7. Ryo Kawahara et al. *Optimizing CUDA Kernel Performance: A Roofline-based Approach*. GTC 2024. Nsight workflow.
-8. Stephen Jones. *CUDA Performance Checklist*. GTC 2023. The 10-step hierarchy this page follows.
-9. NVIDIA. *Hopper Tuning Guide*. 2024. TMA, wgmma, barrier synchronization.
-10. Scott Gray. *Tensor Cores: From WMMA to WGMMA*. 2023. Blog post on tensor-core programming evolution.
+6. Ryo Kawahara et al. *Optimizing CUDA Kernel Performance: A Roofline-based Approach*. GTC 2024. Nsight workflow.
+7. Stephen Jones. *CUDA Performance Checklist*. GTC 2023. The 10-step hierarchy this page follows.
 
 ---
 
-## 18. Up/down stack links
+## 13. Up/down stack links
 
 **Depends on (this page assumes you know):**
 - [CUDA_Programming](CUDA_Programming.md) — thread hierarchy, memory model, synchronization primitives.
@@ -1086,6 +566,7 @@ flowchart TD
 - [Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md) — arithmetic intensity, roofline model, compute vs. memory bound.
 
 **Feeds into (higher-layer pages that use this):**
+- [Tensor_Core_Programming](Tensor_Core_Programming.md) — the tensor-core rungs of this ladder: wgmma, TMEM, TMA, warp specialization, clusters.
 - [Triton_and_Kernels](Triton_and_Kernels.md) — Triton autotuner automates this checklist; understanding the underlying optimizations is essential for interpreting autotuner results.
 - [FlashAttention_Deep_Dive](FlashAttention_Deep_Dive.md) — applies every optimization in this page: coalesced Q-tile loads, SMEM tiling of K/V, async TMA copies, wgmma accumulation, warp-specialized producer-consumer pipeline.
 - [Cutting_Edge_Kernels](Cutting_Edge_Kernels.md) — CUTLASS 3.x collective builders encode this optimization checklist as composable C++ template parameters.

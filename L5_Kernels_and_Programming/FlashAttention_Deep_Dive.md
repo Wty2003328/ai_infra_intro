@@ -151,7 +151,7 @@ The naive kernel transfers $\Theta(N^2 + Nd)$ data (dominated by the $S$ and $P$
 
 $$\text{HBM}_{\text{FA1}} = \Theta\!\left(\frac{N^2 d^2}{M}\right) \;\text{bytes}$$
 
-where $M$ is SRAM per thread block. This asymptotic formula hides a constant factor that depends on tile sizing. Deriving the concrete traffic from the tiling with $B_r = B_c = 128$ (fits in 192 KB SRAM; see [Section 7](#7-tile-sizing-math)), $T_r = N/B_r = 32$:
+where $M$ is SRAM per thread block. This asymptotic formula hides a constant factor that depends on tile sizing. Deriving the concrete traffic from the tiling with $B_r = B_c = 128$ (fits in 192 KB SRAM; see [Section 8](#8-tile-sizing-math)), $T_r = N/B_r = 32$:
 
 | Transfer | Size (FP16) |
 |----------|------------|
@@ -297,9 +297,63 @@ v3 achieves **1.5-2x** over v2 on Hopper.
 
 ---
 
-## 6. Backward Pass — Gradient Without Materializing P
+## 6. FlashAttention v4 (Beta) — Blackwell and Beyond
 
-### 6.1 Gradient Equations
+FlashAttention 4 (Tri Dao lab, 2026) is the next major version of the canonical training attention kernel, currently in beta (fa4-v4.0.0.beta13, released May 13, 2026). FA4 extends support to NVIDIA Blackwell (SM100/SM120) and AMD GPUs via ROCm, while adding several features previously only available in inference-oriented libraries like FlashInfer (surveyed in [Cutting_Edge_Kernels](Cutting_Edge_Kernels.md) §5).
+
+### 6.1 Key new features vs FA3
+
+| Feature | FA3 | FA4 | Impact |
+|---|---|---|---|
+| Architecture support | Hopper (SM90) | Hopper + **Blackwell SM100/SM120** | Next-gen GPU support |
+| ROCm (AMD GPU) support | No | **Yes** | Multi-vendor GPU training |
+| head_dim=256 | Limited/special handling | **Native** | Required for large-head models (e.g., Gemma) |
+| FP8 attention | Partial | **Full** | 2x throughput on Blackwell FP8 tensor cores |
+| Paged KV cache | No | **Yes** | Unified training + inference kernel |
+| MLA (Multi-head Latent Attention) | No | **Yes** | DeepSeek-V3/R1 compressed attention |
+| CuTe DSL integration | CUTLASS C++ only | **CuTe DSL** | Cleaner kernel codebase, easier maintenance |
+| Block sparsity | No | **Yes** | Sparse attention patterns for long context |
+| 2CTA optimization | No | **Yes** | Cross-CTA cooperation for larger tiles |
+| Throughput (Hopper) | ~75% FP16 peak | **Improved** | Better utilization on existing hardware |
+| Throughput (Blackwell) | N/A | **Higher** | Leverages 5th-gen tensor cores and TMEM |
+
+### 6.2 Architecture: 2CTA and block sparsity
+
+FA4 introduces a **2CTA (2 Cooperative Thread Array)** optimization where two CTAs collaborate on a single attention tile, effectively doubling the per-tile compute budget. This is critical on Blackwell where TMEM and larger shared memory allow bigger working sets:
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TB
+    subgraph FA4["FlashAttention 4 Pipeline"]
+        CTA0["CTA 0<br/>TMA load Q/K/V tile<br/>wgmma QK^T"]
+        CTA1["CTA 1<br/>TMA load K/V tile<br/>wgmma PV"]
+        SYNC["Cross-CTA Barrier<br/>distributed shared memory"]
+        OUT["Output tile<br/>TMA store"]
+    end
+
+    CTA0 --> SYNC --> OUT
+    CTA1 --> SYNC
+```
+
+Block sparsity allows the attention kernel to skip entire blocks of the QK matrix based on a sparsity mask, reducing compute from $O(S^2)$ to $O(S \cdot \text{active\_blocks})$ for sparse patterns.
+
+### 6.3 MLA support
+
+Multi-head Latent Attention (MLA), introduced by DeepSeek-V3, compresses the KV cache into a low-rank latent representation. FA4 integrates MLA directly into the attention kernel:
+
+$$\text{MLA: } Q \in \mathbb{R}^{B \times H \times S \times D}, \quad K_c, V_c \in \mathbb{R}^{B \times 1 \times S \times D_c}$$
+
+where $D_c \ll D \times H$ is the compressed latent dimension. FA4 fuses the latent-to-full projection with the attention computation, avoiding materialization of the full KV cache.
+
+### 6.4 FA4 in the ecosystem
+
+FA4's paged KV support blurs the traditional training/inference split: the same kernel can serve both bulk prefill (training-style) and paged decode (inference-style), simplifying deployment in frameworks that previously needed both FA and FlashInfer. However, FlashInfer remains superior for pure decode serving with complex batching and speculative verification trees.
+
+---
+
+## 7. Backward Pass — Gradient Without Materializing P
+
+### 7.1 Gradient Equations
 
 Given upstream $dO \equiv \partial L / \partial O$, the attention output is $O = PV$ where $P = \text{softmax}(QK^T/\sqrt{d})$.
 
@@ -317,7 +371,7 @@ $$\boxed{dS = P \odot \left(dP - D \cdot \mathbf{1}^T\right)}$$
 
 **Step 4:** $dQ = dS \cdot K / \sqrt{d}$, $\quad dK = dS^T \cdot Q / \sqrt{d}$
 
-### 6.2 Tiled Backward Strategy
+### 7.2 Tiled Backward Strategy
 
 The backward pass recomputes $S_{ij}, P_{ij}$ on-the-fly from stored $Q, K$ blocks. Each thread block:
 
@@ -330,9 +384,9 @@ Memory savings: only $O_i, m_i, \ell_i$ stored during forward ($\sim Nd$ total),
 
 ---
 
-## 7. Tile-Sizing Math
+## 8. Tile-Sizing Math
 
-### 7.1 SRAM Budget Constraint
+### 8.1 SRAM Budget Constraint
 
 Tile sizes $B_r$, $B_c$ must satisfy:
 
@@ -350,15 +404,15 @@ Practical defaults (H100, 228 KB/SM, 1 block/SM, FP16):
 | 128 | 64 | 128 | ~188 KB |
 | 256 | 32 | 64 | ~156 KB |
 
-### 7.2 Worked Example ($d=128$, H100, 228 KB)
+### 8.2 Worked Example ($d=128$, H100, 228 KB)
 
 Try $B_r = 128$, $B_c = 128$: $5 \times (128 \times 128 \times 2) + 512 = 164{,}352$ bytes $= 160.5$ KB $\leq 228$ KB. Fits with 1 block/SM (228 / 160.5 = 1.4).
 
 ---
 
-## 8. Variants — Causal, Sliding-Window, and Masked
+## 9. Variants — Causal, Sliding-Window, and Masked
 
-### 8.1 Causal Attention
+### 9.1 Causal Attention
 
 $S_{ij}$ masked when $j > i$. In the tiled kernel: skip blocks where $j_{\text{start}} > i_{\text{end}}$; no mask needed when $j_{\text{end}} \leq i_{\text{start}}$; element-wise mask only on diagonal tiles.
 
@@ -372,23 +426,23 @@ graph TD
     end
 ```
 
-### 8.2 Sliding-Window Attention
+### 9.2 Sliding-Window Attention
 
 Restricts attention to a local window of $W$ tokens: $S_{ij} = -\infty$ if $|i-j| > W$. The inner loop iterates over only $\lceil 2W/B_c \rceil$ blocks instead of $\lceil N/B_c \rceil$, reducing FLOPs and traffic by $N/(2W)$.
 
-### 8.3 Arbitrary Masks
+### 9.3 Arbitrary Masks
 
 **Block-sparse mask:** Boolean matrix $M \in \{0,1\}^{T_r \times T_c}$ selects blocks to compute. **Per-element mask:** Loaded as a separate tensor, applied in SRAM ($B_r \times B_c$ bytes overhead). v2/v3 support all variants via `mask_type` with zero extra HBM for causal/sliding-window (implicit masks).
 
 ---
 
-## 9. FlashDecoding — Parallelizing the Decode Step
+## 10. FlashDecoding — Parallelizing the Decode Step
 
-### 9.1 The Decode Bottleneck
+### 10.1 The Decode Bottleneck
 
 During autoregressive inference, each step processes $N_q = 1$ query token against the full KV cache ($N_{kv}$ = 32K-128K). Arithmetic intensity is $O(d)$ FLOPs/byte — deeply memory-bound. With batch=1 the GPU is severely underutilized.
 
-### 9.2 Split-K Parallelism
+### 10.2 Split-K Parallelism
 
 FlashDecoding splits the KV cache into chunks along the key dimension, assigning each to a thread block:
 
@@ -414,7 +468,7 @@ Each thread block computes partial $(o_{\text{partial}}, m_{\text{partial}}, \el
 
 Parallelism proportional to $N_{kv}/B_c$ (128-512 thread blocks at batch=1).
 
-### 9.3 Performance (H100, $N_{kv}$=32K, $d$=128, batch=1)
+### 10.3 Performance (H100, $N_{kv}$=32K, $d$=128, batch=1)
 
 | Method | Latency | GPU Util |
 |--------|---------|----------|
@@ -424,7 +478,7 @@ Parallelism proportional to $N_{kv}/B_c$ (128-512 thread blocks at batch=1).
 
 ---
 
-## 10. Integration with KV Cache and Paged Memory
+## 11. Integration with KV Cache and Paged Memory
 
 Production inference engines ([KV Cache](../L8_Inference_and_Serving/KV_Cache.md)) store the KV cache in non-contiguous pages. Two approaches:
 
@@ -436,7 +490,7 @@ FlashDecoding aligns split boundaries with page boundaries ($B_c$ is a multiple 
 
 ---
 
-## 11. Comparison Table of Attention Kernel Variants
+## 12. Comparison Table of Attention Kernel Variants
 
 | Feature | Naive | FA v1 | FA v2 | FA v3 | FlashDecoding |
 |---------|-------|-------|-------|-------|---------------|
@@ -452,7 +506,7 @@ FlashDecoding aligns split boundaries with page boundaries ($B_c$ is a multiple 
 
 ---
 
-## 12. End-to-End Pipeline Flowchart
+## 13. End-to-End Pipeline Flowchart
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -485,7 +539,7 @@ flowchart TD
 
 ---
 
-## 13. Numbers to Memorize
+## 14. Numbers to Memorize
 
 | Quantity | Value | Context |
 |----------|-------|---------|
@@ -512,7 +566,7 @@ flowchart TD
 
 ---
 
-## 14. References
+## 15. References
 
 1. Dao, T. et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS*. [arXiv:2205.14135](https://arxiv.org/abs/2205.14135)
 2. Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning." [arXiv:2307.08691](https://arxiv.org/abs/2307.08691)
@@ -521,10 +575,11 @@ flowchart TD
 5. Dao, T. et al. (2023). "FlashDecoding: Fast Attention on Long Sequences for Inference."
 6. NVIDIA (2024). "Hopper Tuning Guide." *CUDA Toolkit Documentation*.
 7. Kwon, W. et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention." *SOSP*.
+8. Dao, T. et al. (2026). "FlashAttention-4 (beta): Blackwell, ROCm, paged KV, MLA." *flash-attention repository*, fa4-v4.0.0.beta13.
 
 ---
 
-## 15. Stack Links
+## 16. Stack Links
 
 **Up (deeper):**
 - [CUDA Optimization](CUDA_Optimization.md) — shared memory banking, warp-level primitives

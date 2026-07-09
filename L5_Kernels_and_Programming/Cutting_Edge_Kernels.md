@@ -62,91 +62,37 @@ The practical rule: start at the highest level that could work. Escalate only wh
 
 ## 2. Triton 3.x — Updated Capabilities
 
-Triton has evolved substantially since its initial release. The 3.x line (2024-2026) adds Hopper/Blackwell-native features that narrow the gap with CUTLASS. The latest release, **Triton 3.6.0** (2026), brings Blackwell-first features that make Triton a viable primary kernel tool even for next-generation hardware.
-
-### 2.1 New features in Triton 3.x
-
-| Feature | Status | Impact |
-|---|---|---|
-| Hopper TMA support | Stable | Bulk tile loads without register pressure |
-| `wgmma` async tensor-core dispatch | Stable | Asynchronous warpgroup MMA |
-| Block pointers (`tl.make_block_ptr`) | Stable | Ergonomic multi-dimensional tile addressing |
-| `tl.async_copy` / `tl.barrier` | Experimental | Producer-consumer async pipelines |
-| FP8 (E4M3, E5M2) | Stable | Native FP8 matmul on Hopper |
-| FP4 (NVFP4) | Experimental | Blackwell FP4 tensor cores |
-| `num_stages` software pipelining | Stable | Multi-stage prefetch overlap |
-| Multidimensional batch support | **3.6.0** | Native multi-dim batch dimensions in kernels |
-| Ragged TMA for Blackwell | **3.6.0** | Variable-length TMA descriptors for Blackwell tensor memory accelerator |
-| TMEM support for Blackwell | **3.6.0** | Direct access to Blackwell tensor memory |
-| GFX950 (MI350) AMD support | **3.6.0** | AMD Instinct MI350 GPU backend |
-| GFX1250 (RDNA4) support | **3.6.0** | Consumer AMD GPU backend |
-| Warp specialization (production) | **3.6.0** | Production-ready producer-consumer warp roles |
-| Gluon framework | **3.6.0** | New IR and analysis framework for Triton optimization |
-| BF16x3 trick | **3.6.0** | 3-way BF16 packing for higher throughput |
-| MXFP scaled dot decomposition | **3.6.0** | Microscaling FP format support in dot operations |
-
-### 2.2 Block pointers
-
-Block pointers simplify the pointer-arithmetic-heavy code that dominates Triton kernels:
-
-```python
-@triton.jit
-def matmul_tiled(A, B, C, M, N, K,
-                 BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-                 BLOCK_K: tl.constexpr):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-
-    a_block_ptr = tl.make_block_ptr(
-        base=A, shape=(M, K), strides=(K, 1),
-        offsets=(pid_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_K), order=(1, 0)
-    )
-    b_block_ptr = tl.make_block_ptr(
-        base=B, shape=(K, N), strides=(N, 1),
-        offsets=(0, pid_n * BLOCK_N),
-        block_shape=(BLOCK_K, BLOCK_N), order=(1, 0)
-    )
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k in range(0, K, BLOCK_K):
-        a = tl.load(a_block_ptr)              # TMA-backed on Hopper
-        b = tl.load(b_block_ptr)
-        acc = tl.dot(a, b, acc)
-        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
-
-    # Store output tile
-    c_block_ptr = tl.make_block_ptr(
-        base=C, shape=(M, N), strides=(N, 1),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-        block_shape=(BLOCK_M, BLOCK_N), order=(1, 0)
-    )
-    tl.store(c_block_ptr, acc.to(tl.float16))
-```
-
-Block pointers abstract away stride arithmetic, boundary masking, and on Hopper can lower directly to TMA descriptors, eliminating the need for manual pointer computation per thread.
-
-### 2.3 Triton limits in 2025-2026
-
-Triton 3.6.0 has closed several major gaps:
-
-- **Warp specialization**: Now production-ready in 3.6.0, enabling dedicated producer vs consumer warp roles within a kernel.
-- **TMEM (Blackwell tensor memory)**: Exposed in 3.6.0 for Blackwell GPUs.
-- **Threadblock clusters** (Hopper feature: multiple blocks sharing distributed shared memory). Partially surfaced; complex patterns still require CUTLASS.
-- **Ragged TMA**: Variable-length TMA descriptors now available for Blackwell.
-
-Remaining gaps where CUTLASS/TileLang/ThunderKittens are still preferable:
-
-- **Custom mbarrier patterns** for complex multi-stage synchronization beyond standard producer-consumer.
-- **Fine-grained CuTe layout control** for non-standard swizzle patterns or shared-memory bank-conflict avoidance.
-- **Full NVFP4 epilogue fusion** with custom quantization schedules (CUTLASS-Python is stronger here).
+> **Moved:** the full Triton 3.x feature survey now lives in [Triton_and_Kernels](Triton_and_Kernels.md) §2, next to the Triton programming model it extends.
+>
+> One-paragraph summary: the 3.x line (through **Triton 3.6.0**, 2026) added Hopper TMA, async `wgmma` dispatch, block pointers, FP8/FP4, `num_stages` pipelining, and — in 3.6.0 — production warp specialization, Blackwell TMEM and ragged-TMA support, AMD GFX950/GFX1250 backends, the Gluon IR framework, and MXFP scaled-dot support. Remaining gaps vs. CUTLASS: custom `mbarrier` patterns, fine-grained CuTe layout control, and full NVFP4 epilogue fusion.
 
 ---
 
 ## 3. CUTLASS 3.x and CuTe
 
-NVIDIA's CUTLASS (CUDA Templates for Linear Algebra Subroutines) is the de facto standard for production GEMM, attention, and quantized-matmul kernels. CUTLASS 3.x (2023-2026) is a ground-up redesign built on **CuTe** (CUTLASS Tensor Expressions).
+NVIDIA's CUTLASS (CUDA Templates for Linear Algebra Subroutines) is the de facto standard for production GEMM, attention, and quantized-matmul kernels. CUTLASS 3.x (2023-2026) is a ground-up redesign built on **CuTe** (CUTLASS Tensor Expressions). The kernel dataflow and warp-group roles at a glance:
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    subgraph CUTLASS3["CUTLASS 3.x Kernel"]
+        TMA["TMA Descriptor (async load)"] --> SMEM["Shared Memory (swizzled)"]
+        SMEM --> WGMMA["wgmma.mma_async"]
+        WGMMA --> EPI["Epilogue (fused bias/act/quant)"]
+        EPI --> GMEM["Global Memory Store"]
+    end
+    subgraph WG["Warp Groups"]
+        WG0["WG0: DMA (TMA loads)"]
+        WG1["WG1-2: MMA (compute)"]
+    end
+    WG0 --> TMA
+    WG1 --> WGMMA
+
+    classDef hw fill:#fde68a,stroke:#b45309,color:#000
+    classDef wg fill:#bfdbfe,stroke:#1d4ed8,color:#000
+    class TMA,SMEM,WGMMA,EPI,GMEM hw
+    class WG0,WG1 wg
+```
 
 ### 3.1 CuTe layout algebra
 
@@ -181,6 +127,8 @@ Key CuTe operations:
 | `composition(Swizzle{}, L)` | Apply XOR swizzle to shared memory |
 
 The CuTe type system is entirely compile-time (C++ template metaprogramming). The layout algebra runs at compile time, producing zero-overhead runtime indexing. Steep learning curve, but once internalized, any Hopper/Blackwell tile layout can be expressed in under 20 lines.
+
+Two further core abstractions build on `Layout`: a **Tensor** is a Layout plus a pointer — it can be sliced, transposed, and composed; a **Tile** is a sub-layout extracted via `local_tile(tensor, tile_shape, tile_coord)`. CuTe makes explicit what Triton abstracts away, providing precise control when the autotuner cannot find a good configuration.
 
 ### 3.2 Templated GEMM structure
 
@@ -291,6 +239,31 @@ using Epilogue = cutlass::epilogue::collective::Sm90TmaWarpSpecialized<
 ```
 
 Common fused epilogues: bias + activation (ReLU, GELU, SwiGLU), per-row/per-column scaling (for quantization), dequantization, and direct TMA store back to HBM.
+
+### 3.6 CUTLASS vs Triton decision flowchart
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+flowchart TD
+    START["Custom kernel needed"] --> Q1{"Standard or fused GEMM?"}
+    Q1 -->|Yes| TRITON["Triton + autotune"]
+    Q1 -->|No| Q2{"Need TMA / warp spec?"}
+    Q2 -->|Yes| Q3{"C++ templates OK?"}
+    Q3 -->|Yes| CUTLASS["CUTLASS 3.x + CuTe"]
+    Q3 -->|No| TRITON2["Triton (extra tuning)"]
+    Q2 -->|No| Q4{"Complex reduction/scan?"}
+    Q4 -->|Yes| CUDACPP["CUDA C++"]
+    Q4 -->|No| TRITON
+
+    classDef t fill:#bbf7d0,stroke:#15803d,color:#000
+    classDef c fill:#bfdbfe,stroke:#1d4ed8,color:#000
+    classDef n fill:#fecaca,stroke:#991b1b,color:#000
+    class TRITON,TRITON2 t
+    class CUTLASS c
+    class CUDACPP n
+```
+
+Rule of thumb: GEMM-shaped with a standard epilogue → Triton first; TMA/warp-specialization/sparse-MMA control → CUTLASS; awkward reductions and scans → CUDA C++.
 
 ---
 
@@ -424,55 +397,9 @@ FlashAttention (Tri Dao lab) is the canonical training implementation. FA-v3 (Ho
 
 ## 6. FlashAttention 4 (Beta) — Blackwell and Beyond
 
-FlashAttention 4 (Tri Dao lab, 2026) is the next major version of the canonical training attention kernel, currently in beta (fa4-v4.0.0.beta13, released May 13, 2026). FA4 extends support to NVIDIA Blackwell (SM100/SM120) and AMD GPUs via ROCm, while adding several features previously only available in inference-oriented libraries like FlashInfer.
-
-### 6.1 Key new features vs FA3
-
-| Feature | FA3 | FA4 | Impact |
-|---|---|---|---|
-| Architecture support | Hopper (SM90) | Hopper + **Blackwell SM100/SM120** | Next-gen GPU support |
-| ROCm (AMD GPU) support | No | **Yes** | Multi-vendor GPU training |
-| head_dim=256 | Limited/special handling | **Native** | Required for large-head models (e.g., Gemma) |
-| FP8 attention | Partial | **Full** | 2x throughput on Blackwell FP8 tensor cores |
-| Paged KV cache | No | **Yes** | Unified training + inference kernel |
-| MLA (Multi-head Latent Attention) | No | **Yes** | DeepSeek-V3/R1 compressed attention |
-| CuTe DSL integration | CUTLASS C++ only | **CuTe DSL** | Cleaner kernel codebase, easier maintenance |
-| Block sparsity | No | **Yes** | Sparse attention patterns for long context |
-| 2CTA optimization | No | **Yes** | Cross-CTA cooperation for larger tiles |
-| Throughput (Hopper) | ~75% FP16 peak | **Improved** | Better utilization on existing hardware |
-| Throughput (Blackwell) | N/A | **Higher** | Leverages 5th-gen tensor cores and TMEM |
-
-### 6.2 Architecture: 2CTA and block sparsity
-
-FA4 introduces a **2CTA (2 Cooperative Thread Array)** optimization where two CTAs collaborate on a single attention tile, effectively doubling the per-tile compute budget. This is critical on Blackwell where TMEM and larger shared memory allow bigger working sets:
-
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TB
-    subgraph FA4["FlashAttention 4 Pipeline"]
-        CTA0["CTA 0<br/>TMA load Q/K/V tile<br/>wgmma QK^T"]
-        CTA1["CTA 1<br/>TMA load K/V tile<br/>wgmma PV"]
-        SYNC["Cross-CTA Barrier<br/>distributed shared memory"]
-        OUT["Output tile<br/>TMA store"]
-    end
-
-    CTA0 --> SYNC --> OUT
-    CTA1 --> SYNC
-```
-
-Block sparsity allows the attention kernel to skip entire blocks of the QK matrix based on a sparsity mask, reducing compute from $O(S^2)$ to $O(S \cdot \text{active\_blocks})$ for sparse patterns.
-
-### 6.3 MLA support
-
-Multi-head Latent Attention (MLA), introduced by DeepSeek-V3, compresses the KV cache into a low-rank latent representation. FA4 integrates MLA directly into the attention kernel:
-
-$$\text{MLA: } Q \in \mathbb{R}^{B \times H \times S \times D}, \quad K_c, V_c \in \mathbb{R}^{B \times 1 \times S \times D_c}$$
-
-where $D_c \ll D \times H$ is the compressed latent dimension. FA4 fuses the latent-to-full projection with the attention computation, avoiding materialization of the full KV cache.
-
-### 6.4 FA4 in the ecosystem
-
-FA4's paged KV support blurs the traditional training/inference split: the same kernel can serve both bulk prefill (training-style) and paged decode (inference-style), simplifying deployment in frameworks that previously needed both FA and FlashInfer. However, FlashInfer remains superior for pure decode serving with complex batching and speculative verification trees.
+> **Moved:** the FA4 deep dive now lives in [FlashAttention_Deep_Dive](FlashAttention_Deep_Dive.md) §6, following the FA-1 → FA-3 lineage.
+>
+> One-paragraph summary: FA4 (Tri Dao lab, beta 2026) adds Blackwell SM100/SM120 and AMD ROCm support, native head_dim=256, full FP8, paged KV, MLA, block sparsity, a 2CTA cross-CTA cooperation scheme, and a CuTe-DSL codebase — blurring the traditional training/inference kernel split (FlashInfer remains stronger for pure decode serving, §5.4).
 
 ---
 

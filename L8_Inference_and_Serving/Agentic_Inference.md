@@ -43,7 +43,7 @@ flowchart TD
 Two structural consequences:
 
 1. **Each step's prefill is an *incremental append*.** Everything before the new tool output is byte-identical to the previous step. Without prefix caching you re-prefill $O(L)$ tokens per step → $O(L^2)$ total work over a task; with it, $O(\Delta)$ per step. For a 100-step task ending at 120K context, that is the difference between ~6M and ~120K+Δ-sum prefill tokens — **a 10–50× cost factor**, bigger than any kernel optimization on this page of the stack.
-2. **The session is stateful but the fleet is load-balanced.** KV locality vs load spreading becomes the central routing tension (§3).
+2. **The session is stateful but the fleet is load-balanced.** KV locality vs load spreading becomes the central routing tension (§2.3).
 
 ---
 
@@ -84,7 +84,7 @@ Pure session-affinity (sticky routing) maximizes hits but hotspots; pure least-l
 
 Agent steps are not prose: they must be valid JSON / tool-call grammar / code-diff format. Constrained decoding masks invalid tokens per step.
 
-- **Naive guided decoding**: evaluate grammar against the full vocab each step on CPU → can dominate decode latency.
+- **Naive guided decoding**: evaluate grammar against the full vocab each step on CPU → can dominate decode latency; even optimized grammar masking costs ~5–15% of decode throughput when not overlapped with the forward pass.
 - **Compressed FSM (SGLang/XGrammar/llguidance class)**: compile the JSON-schema/grammar to a token-level FSM offline; per-step mask = current-state lookup; **overlap mask computation with the GPU forward pass** so its cost hides entirely. ~3× faster structured generation than naive guidance.
 - **Jump-forward decoding**: when the FSM has a single legal continuation (e.g., `","` `"name"` `":"` inside fixed JSON syntax), emit those tokens *without model forward passes* — multi-token skips. Synergizes with agent formats which are syntax-heavy.
 
@@ -101,6 +101,8 @@ A continuation (step $k{+}1$ of a live task) and a fresh task arrive together. F
 - **Priority = f(turn depth, KV-hotness, task deadline)** — continuations preempt fresh prefills.
 - **Admission control at the task level**, not request level: admitting a new agent task commits you to ~50–200 future steps of load. Token-bucket on *projected* step volume, or the system oscillates.
 - **Speculative continuation**: for tools with predictable output schemas, some stacks pre-prefill the expected-shape continuation during tool execution and patch the diff (advanced; only pays when tool latency ≫ prefill time).
+- **Session-aware scheduling with KV reservation** — the scheduler tracks which sequences belong to which agent session and keeps their KV warm across turns, which may mean reserving KV blocks for paused agents even when other requests could use them. Paused-on-tool agents get lower priority than actively decoding agents or fresh requests, so idle sessions do not monopolize GPU work.
+- **GPU sharing during tool pauses** — while an agent waits on a tool (milliseconds for a calculator, seconds for a web search), its KV occupies memory but generates no GPU work; the scheduler backfills with other requests and preserves the paused session's KV in HBM or an offload tier (§2.2).
 
 ### 4.2 Interaction with disaggregation
 
@@ -112,16 +114,27 @@ Agentic traffic sharpens the prefill/decode split ([Prefill_Decode_Disaggregatio
 - **Parallel tool calls** (model emits N calls in one step): scatter-gather, append all results in one continuation → one prefill instead of N.
 - Stream tool output into the prompt as it arrives (chunked prefill of the growing suffix) when tools emit slowly.
 
+### 4.4 Engine support — NVIDIA Dynamo's agentic hints
+
+NVIDIA Dynamo (the inference framework succeeding TensorRT-LLM and Triton Inference Server) ships explicit agentic-workload optimizations, indicative of where engines are heading:
+
+- **Session affinity** — requests from the same agent session route to the same inference replica, keeping the KV cache local and avoiding cross-node transfers (the routing policy of §2.3).
+- **KV cache persistence** — KV blocks can be pinned to specific sessions, marked as reserved and excluded from the normal eviction policy during tool-execution pauses.
+- **Tool-call streaming** — structured output streams incrementally, so tool execution can begin before the full call is generated (e.g., fire the HTTP request as soon as the URL argument completes).
+- **Disaggregated agent scheduling** — the scheduler tracks session states (active decoding / tool-waiting / tool-executing) and adjusts batch composition accordingly, prioritizing active agents.
+
+These optimizations are early but indicate the direction: inference frameworks are evolving from single-request optimization to session-aware, agent-optimized serving.
+
 ---
 
 ## 5. Long-horizon context management
 
 Context grows ~ (tool output size) per step and tasks die at the context limit. Mitigations, in order of production prevalence:
 
-1. **Tool-output truncation/structuring** — cap each observation (head+tail of logs); biggest single lever, costs accuracy if too aggressive.
+1. **Tool-output truncation/structuring** — cap each observation (head+tail of logs), or have a smaller model (or the agent itself) summarize verbose tool outputs before appending — typically 5–10× reduction for structured data (JSON API responses, web pages). Biggest single lever; costs accuracy if too aggressive.
 2. **Compaction** — model summarizes its own history into a compact state, old turns evicted; restart with summary + recent turns. Costs one summarize step + a cold full prefill; schedule compaction *during a long tool call* to hide it.
 3. **KV-cache compression** ([Modern_KV_Compression](Modern_KV_Compression.md)) — quantized (FP8/FP4) KV, eviction (H2O/SnapKV-class) for tolerant workloads; MLA-style architectural compression solves it at the model level.
-4. **Memory files / external state** — agent writes durable notes to disk and re-reads selectively; converts context tokens into retrieval.
+4. **Memory files / external state** — agent writes durable notes to disk and re-reads selectively; converts context tokens into retrieval. A sliding-window variant keeps only the most recent N tokens active and retrieves older context from a vector store (RAG) when relevant.
 
 The serving-side accounting: per-step cost ≈ $c_{\text{prefill}}\Delta_k + c_{\text{decode}}O_k + c_{\text{KV-hold}} L_k \tau_k$ where $\tau_k$ is tool wait time. For long tasks the **KV-hold term dominates the marginal cost** — which is why offload tiers (§2.2) and compaction are economic, not just capacity, decisions.
 

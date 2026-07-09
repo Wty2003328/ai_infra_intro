@@ -67,9 +67,95 @@ Each program instance computes one $BLOCK_M \times BLOCK_N$ output tile by loopi
 
 ---
 
-## 2. Triton Kernel Structure
+## 2. Triton 3.x — Updated Capabilities
 
-### 2.1 Anatomy of a Kernel
+Triton has evolved substantially since its initial release. The 3.x line (2024-2026) adds Hopper/Blackwell-native features that narrow the gap with CUTLASS. The latest release, **Triton 3.6.0** (2026), brings Blackwell-first features that make Triton a viable primary kernel tool even for next-generation hardware.
+
+### 2.1 New features in Triton 3.x
+
+| Feature | Status | Impact |
+|---|---|---|
+| Hopper TMA support | Stable | Bulk tile loads without register pressure |
+| `wgmma` async tensor-core dispatch | Stable | Asynchronous warpgroup MMA |
+| Block pointers (`tl.make_block_ptr`) | Stable | Ergonomic multi-dimensional tile addressing |
+| `tl.async_copy` / `tl.barrier` | Experimental | Producer-consumer async pipelines |
+| FP8 (E4M3, E5M2) | Stable | Native FP8 matmul on Hopper |
+| FP4 (NVFP4) | Experimental | Blackwell FP4 tensor cores |
+| `num_stages` software pipelining | Stable | Multi-stage prefetch overlap |
+| Multidimensional batch support | **3.6.0** | Native multi-dim batch dimensions in kernels |
+| Ragged TMA for Blackwell | **3.6.0** | Variable-length TMA descriptors for Blackwell tensor memory accelerator |
+| TMEM support for Blackwell | **3.6.0** | Direct access to Blackwell tensor memory |
+| GFX950 (MI350) AMD support | **3.6.0** | AMD Instinct MI350 GPU backend |
+| GFX1250 (RDNA4) support | **3.6.0** | Consumer AMD GPU backend |
+| Warp specialization (production) | **3.6.0** | Production-ready producer-consumer warp roles |
+| Gluon framework | **3.6.0** | New IR and analysis framework for Triton optimization |
+| BF16x3 trick | **3.6.0** | 3-way BF16 packing for higher throughput |
+| MXFP scaled dot decomposition | **3.6.0** | Microscaling FP format support in dot operations |
+
+### 2.2 Block pointers
+
+Block pointers simplify the pointer-arithmetic-heavy code that dominates Triton kernels:
+
+```python
+@triton.jit
+def matmul_tiled(A, B, C, M, N, K,
+                 BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+                 BLOCK_K: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    a_block_ptr = tl.make_block_ptr(
+        base=A, shape=(M, K), strides=(K, 1),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K), order=(1, 0)
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=B, shape=(K, N), strides=(N, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N), order=(1, 0)
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, K, BLOCK_K):
+        a = tl.load(a_block_ptr)              # TMA-backed on Hopper
+        b = tl.load(b_block_ptr)
+        acc = tl.dot(a, b, acc)
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    # Store output tile
+    c_block_ptr = tl.make_block_ptr(
+        base=C, shape=(M, N), strides=(N, 1),
+        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M, BLOCK_N), order=(1, 0)
+    )
+    tl.store(c_block_ptr, acc.to(tl.float16))
+```
+
+Block pointers abstract away stride arithmetic, boundary masking, and on Hopper can lower directly to TMA descriptors, eliminating the need for manual pointer computation per thread.
+
+### 2.3 Triton limits in 2025-2026
+
+Triton 3.6.0 has closed several major gaps:
+
+- **Warp specialization**: Now production-ready in 3.6.0, enabling dedicated producer vs consumer warp roles within a kernel.
+- **TMEM (Blackwell tensor memory)**: Exposed in 3.6.0 for Blackwell GPUs.
+- **Threadblock clusters** (Hopper feature: multiple blocks sharing distributed shared memory). Partially surfaced; complex patterns still require CUTLASS.
+- **Ragged TMA**: Variable-length TMA descriptors now available for Blackwell.
+
+Remaining gaps where CUTLASS/TileLang/ThunderKittens are still preferable:
+
+- **Custom mbarrier patterns** for complex multi-stage synchronization beyond standard producer-consumer.
+- **Fine-grained CuTe layout control** for non-standard swizzle patterns or shared-memory bank-conflict avoidance.
+- **Full NVFP4 epilogue fusion** with custom quantization schedules (CUTLASS-Python is stronger here).
+
+The surrounding kernel-DSL ecosystem — CUTLASS-Python/CuteDSL, TileLang, ThunderKittens, and vendor DSLs — is surveyed in [Cutting_Edge_Kernels](Cutting_Edge_Kernels.md).
+
+---
+
+## 3. Triton Kernel Structure
+
+### 3.1 Anatomy of a Kernel
 
 ```python
 import triton
@@ -96,7 +182,7 @@ def vector_add_kernel(
 
 Key elements: `@triton.jit` marks the function for JIT compilation (all `tl.constexpr` parameters are folded at compile time). `tl.program_id(axis=0)` identifies which block this instance processes. `tl.arange(0, BLOCK_SIZE)` creates the offset vector — the fundamental addressing primitive. `mask` handles boundary conditions. No explicit shared memory, no thread indexing, no synchronization.
 
-### 2.2 Launching a Kernel
+### 3.2 Launching a Kernel
 
 ```python
 def vector_add(x, y):
@@ -110,9 +196,9 @@ The `grid` lambda receives the kernel's `meta` parameters. `triton.cdiv(a, b)` c
 
 ---
 
-## 3. Matrix Multiplication in Triton
+## 4. Matrix Multiplication in Triton
 
-### 3.1 Tiled Matmul Kernel
+### 4.1 Tiled Matmul Kernel
 
 A $M \times K$ times $K \times N$ matrix multiplication decomposes into tiles. Each program instance computes one $BLOCK_M \times BLOCK_N$ output tile by iterating over $K$ in steps of $BLOCK_K$.
 
@@ -144,7 +230,7 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
     tl.store(c_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
 ```
 
-### 3.2 How tl.dot Maps to Tensor Cores
+### 4.2 How tl.dot Maps to Tensor Cores
 
 The `tl.dot(a, b)` call lowers to hardware tensor core instructions:
 
@@ -156,7 +242,7 @@ The `tl.dot(a, b)` call lowers to hardware tensor core instructions:
 
 The compiler handles register allocation, shared memory swizzling, and async load-compute overlap. On Hopper, `tl.dot` with `num_stages > 1` automatically uses `wgmma.mma_async` with multi-stage prefetching.
 
-### 3.3 Pointer Arithmetic for 2D Tiles
+### 4.3 Pointer Arithmetic for 2D Tiles
 
 For a row-major $M \times K$ matrix $A$: $\text{ptr}(i, k) = \text{base} + i \cdot \text{stride\_am} + k \cdot \text{stride\_ak}$ where $\text{stride\_am} = K$ and $\text{stride\_ak} = 1$. Triton uses broadcasting: `offs_m[:, None] + offs_k[None, :]` creates a $BLOCK_M \times BLOCK_K$ pointer matrix with a single vector expression.
 
@@ -172,9 +258,9 @@ flowchart TD
 
 ---
 
-## 4. Autotuning
+## 5. Autotuning
 
-### 4.1 The Autotuning Problem
+### 5.1 The Autotuning Problem
 
 Kernel performance depends on three compile-time parameters:
 
@@ -184,7 +270,7 @@ Kernel performance depends on three compile-time parameters:
 
 Performance can vary by 5× across configurations. The autotuner sweeps these at first invocation and caches the best result.
 
-### 4.2 The @triton.autotune Decorator
+### 5.2 The @triton.autotune Decorator
 
 ```python
 @triton.autotune(
@@ -202,14 +288,14 @@ def tuned_matmul_kernel(...): ...
 
 The `key` parameter specifies which runtime arguments trigger re-tuning. When $M, N, K$ change, the autotuner re-runs the sweep; otherwise it uses the cached config.
 
-### 4.3 Pruning and Early Termination
+### 5.3 Pruning and Early Termination
 
 A full sweep of 50+ configurations can take minutes. Two pruning strategies reduce this:
 
 1. **Shared memory budget**: if `num_stages * S_stage` exceeds 227 KB (SM90), the configuration is pruned before execution.
 2. **Warmup + timing**: 10 warmup iterations followed by 100 timed iterations. Slow configurations are pruned early.
 
-### 4.4 Autotuning Cost Model
+### 5.4 Autotuning Cost Model
 
 Shared memory per block: $SHMEM = num\_stages \times (BM \cdot BK + BK \cdot BN) \times sizeof(dtype)$. On SM90 with 227 KB limit:
 
@@ -219,9 +305,9 @@ For FP16 with $BM=128, BN=128, BK=64$: per-stage = $(128 \times 64 + 64 \times 1
 
 ---
 
-## 5. Softmax Kernel
+## 6. Softmax Kernel
 
-### 5.1 Numerically Stable Softmax
+### 6.1 Numerically Stable Softmax
 
 The naive softmax $x_i / \sum_j e^{x_j}$ overflows for large $x_i$. The numerically stable form:
 
@@ -229,7 +315,7 @@ $$\text{softmax}(x_i) = \frac{e^{x_i - \max(x)}}{\sum_j e^{x_j - \max(x)}}$$
 
 requires three passes: (1) find max, (2) compute sum of exponentials, (3) divide. In Triton, `tl.max` and `tl.sum` handle the reductions automatically — the compiler emits warp shuffle reductions.
 
-### 5.2 Triton Softmax Kernel
+### 6.2 Triton Softmax Kernel
 
 ```python
 @triton.jit
@@ -256,9 +342,9 @@ Each program instance handles one row (grid = `(num_rows,)`). `tl.max(row, axis=
 
 ---
 
-## 6. Simplified FlashAttention in Triton
+## 7. Simplified FlashAttention in Triton
 
-### 6.1 The Online Softmax Trick
+### 7.1 The Online Softmax Trick
 
 FlashAttention's core insight: the attention output for a query tile can be computed incrementally over key/value tiles without materializing the full $N \times N$ attention matrix. The online softmax maintains running statistics:
 
@@ -270,7 +356,7 @@ $$\mathbf{o}^{(j)} = \frac{e^{m^{(j-1)} - m^{(j)}} \cdot \ell^{(j-1)} \cdot \mat
 
 where $S_j = \mathbf{Q} \cdot K_j^T / \sqrt{d_k}$ is the partial attention score for the $j$-th key/value tile.
 
-### 6.2 Triton Attention Kernel (Simplified)
+### 7.2 Triton Attention Kernel (Simplified)
 
 The structure: a 3D grid over (query_tiles, heads, batches). Each program instance loads one query tile, iterates over key/value tiles, and maintains running statistics.
 
@@ -305,83 +391,30 @@ def attention_kernel(Q, K, V, Out, seq_len, head_dim, /* strides... */,
 
 The production kernel adds causal masking, KV padding, and paged KV. See [FlashAttention_Deep_Dive](FlashAttention_Deep_Dive.md) for the complete algorithm.
 
-### 6.3 IO Complexity
+### 7.3 IO Complexity
 
 The key result: standard attention materializes the $N \times N$ matrix in HBM ($\Theta(N^2 d)$ memory). FlashAttention reduces HBM IO to $\Theta(N^2 d^2 / M_{SRAM})$ where $M_{SRAM} = 228$ KB on Hopper. For $N = 8192, d = 128$: standard writes $8192^2 \times 4 = 256$ MB per head; FlashAttention writes $8192 \times 128 \times 4 = 4$ MB per head — a 64× reduction.
 
 ---
 
-## 7. CUTLASS and CuTe
-
-### 7.1 When to Use CUTLASS
+## 8. CUTLASS and CuTe — when to reach for it
 
 Triton covers 80-90% of custom kernel needs. The remaining cases require CUTLASS:
 
 | Requirement | Triton | CUTLASS |
 |---|---|---|
 | Standard/fused matmul | First choice | Also works |
-| TMA loads | Limited (v3.0+) | Full control |
+| TMA loads | Good since 3.x block pointers / ragged TMA (§2) | Full control |
 | Custom wgmma layouts | Not exposed | Direct access |
 | Sparse 2:4 GEMM | Not supported | Supported |
 | Custom MMA epilogue | Limited | Full flexibility |
-| Warp specialization | Not exposed | First-class |
+| Warp specialization | Production since 3.6.0 (§2) | First-class |
 
-### 7.2 CUTLASS 3.x Architecture
-
-CUTLASS 3.x (targeting Hopper/Blackwell) restructured around three concepts: (1) **Collective operations** — a `CollectiveMma` encapsulates the entire GEMM tiling strategy (TMA loads, MMA scheduling, epilogue). (2) **TMA descriptors** — the Tensor Memory Accelerator on Hopper allows a single thread to describe a tile, which hardware asynchronously loads from global memory. (3) **Warp specialization** — one warp group acts as DMA engine (loads tiles via TMA), others as MMA engines (compute tiles), overlapping load and compute.
-
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    subgraph CUTLASS3["CUTLASS 3.x Kernel"]
-        TMA["TMA Descriptor (async load)"] --> SMEM["Shared Memory (swizzled)"]
-        SMEM --> WGMMA["wgmma.mma_async"]
-        WGMMA --> EPI["Epilogue (fused bias/act/quant)"]
-        EPI --> GMEM["Global Memory Store"]
-    end
-    subgraph WG["Warp Groups"]
-        WG0["WG0: DMA (TMA loads)"]
-        WG1["WG1-2: MMA (compute)"]
-    end
-    WG0 --> TMA
-    WG1 --> WGMMA
-
-    classDef hw fill:#fde68a,stroke:#b45309,color:#000
-    classDef wg fill:#bfdbfe,stroke:#1d4ed8,color:#000
-    class TMA,SMEM,WGMMA,EPI,GMEM hw
-    class WG0,WG1 wg
-```
-
-### 7.3 CuTe: Layout Algebra
-
-CuTe (ships with CUTLASS) provides a layout algebra for describing how multi-dimensional data maps to memory. Core abstractions: **Layout** — a pair $(shape, stride)$ mapping logical coordinates to offsets. **Tensor** — a Layout plus a pointer; can be sliced, transposed, and composed. **Tile** — a sub-layout extracted via `local_tile(tensor, tile_shape, tile_coord)`. CuTe makes explicit what Triton abstracts away, providing precise control when the autotuner cannot find a good configuration.
-
-### 7.4 CUTLASS vs Triton Decision Flowchart
-
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    START["Custom kernel needed"] --> Q1{"Standard or fused GEMM?"}
-    Q1 -->|Yes| TRITON["Triton + autotune"]
-    Q1 -->|No| Q2{"Need TMA / warp spec?"}
-    Q2 -->|Yes| Q3{"C++ templates OK?"}
-    Q3 -->|Yes| CUTLASS["CUTLASS 3.x + CuTe"]
-    Q3 -->|No| TRITON2["Triton (extra tuning)"]
-    Q2 -->|No| Q4{"Complex reduction/scan?"}
-    Q4 -->|Yes| CUDACPP["CUDA C++"]
-    Q4 -->|No| TRITON
-
-    classDef t fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef c fill:#bfdbfe,stroke:#1d4ed8,color:#000
-    classDef n fill:#fecaca,stroke:#991b1b,color:#000
-    class TRITON,TRITON2 t
-    class CUTLASS c
-    class CUDACPP n
-```
+> CUTLASS 3.x architecture, CuTe layout algebra, TMA-aware mainloops, warp specialization, epilogue fusion, and the CUTLASS-vs-Triton decision flowchart are covered in depth in [Cutting_Edge_Kernels](Cutting_Edge_Kernels.md) §3 (CUTLASS-Python/CuteDSL in §4).
 
 ---
 
-## 8. Comparison: CUDA vs CUTLASS vs Triton
+## 9. Comparison: CUDA vs CUTLASS vs Triton
 
 | Metric | CUDA C++ | CUTLASS 3.x | Triton |
 |---|---|---|---|
@@ -399,9 +432,9 @@ The portability row is critical: Triton compiles to PTX (NVIDIA), ROCm (AMD), or
 
 ---
 
-## 9. Production Kernel Case Studies
+## 10. Production Kernel Case Studies
 
-### 9.1 FlashAttention
+### 10.1 FlashAttention
 
 | Version | Architecture | Peak Utilization | Key Innovation |
 |---|---|---|---|
@@ -411,7 +444,7 @@ The portability row is critical: Triton compiles to PTX (NVIDIA), ROCm (AMD), or
 
 The Triton implementation in the `flash-attn` package (~800 lines) achieves ~85-90% of the CUDA version's performance.
 
-### 9.2 PagedAttention (vLLM)
+### 10.2 PagedAttention (vLLM)
 
 PagedAttention stores KV blocks in a page table instead of contiguous memory:
 
@@ -419,7 +452,7 @@ $$KV\_cache[page\_table[b][s\_page]] = K\_block \parallel V\_block$$
 
 Each block is a fixed-size page (typically $16 \times head\_dim$). The Triton implementation uses `tl.make_block_ptr` with page-table indirection for ~90% of theoretical bandwidth despite non-coalesced gathers.
 
-### 9.3 FP8 GEMM
+### 10.3 FP8 GEMM
 
 FP8 (E4M3 forward, E5M2 backward) doubles tensor core throughput. Production kernels handle: (1) per-tensor or per-channel scaling to manage FP8's limited dynamic range ($\pm 448$ for E4M3), (2) FP32 accumulation for numerical stability, (3) sub-channel scaling with 128-element sub-tiles for large matrices. In Triton, `tl.dot` with FP8 inputs automatically accumulates in FP32:
 
@@ -431,7 +464,7 @@ output = acc * scale_a * scale_b
 tl.store(c_ptrs, output.to(tl.float16))
 ```
 
-### 9.4 MoE Router Kernel
+### 10.4 MoE Router Kernel
 
 Mixture-of-Experts routing fuses gating ($g = \text{softmax}(W_g \cdot x)$) and top-K selection into one kernel. The fused approach avoids materializing the full $[B, E]$ logits tensor in HBM. For $B = 4096$ tokens and $E = 256$ experts:
 
@@ -441,9 +474,9 @@ With 58 MoE layers (DeepSeek-V3), this saves ~232 MB of HBM traffic per forward 
 
 ---
 
-## 10. Debugging Triton Kernels
+## 11. Debugging Triton Kernels
 
-### 10.1 Common Pitfalls
+### 11.1 Common Pitfalls
 
 | Pitfall | Symptom | Fix |
 |---|---|---|
@@ -454,14 +487,14 @@ With 58 MoE layers (DeepSeek-V3), this saves ~232 MB of HBM traffic per forward 
 | Accumulator dtype mismatch | Silent precision loss | Initialize accumulator as `tl.float32` |
 | Recomputation inside K loop | 2-3× slower | Hoist invariants outside the loop |
 
-### 10.2 Debugging Tools
+### 11.2 Debugging Tools
 
 1. **Triton interpreter**: `TRITON_INTERPRET=1 python kernel.py` — runs element-by-element on CPU. Catches pointer/mask bugs.
 2. **`tl.device_print`**: prints tensor values at kernel execution time (limited to small tensors).
 3. **Nsight Compute**: `ncu --set full -k kernel_name python launch.py` — profiles compiled kernel, shows SASS.
 4. **TTIR/TTGIR dumps**: `TRITON_PRINT_LLIR=1` — dumps intermediate IR for verifying compiler optimizations.
 
-### 10.3 Performance Debugging Checklist
+### 11.3 Performance Debugging Checklist
 
 1. **Roofline**: is the kernel compute-bound or memory-bound? $AI = \text{FLOPs} / \text{bytes\_transferred}$.
 2. **Tensor core utilization**: `ncu --metrics sm__pipeline_tensor_op_cycles_active` — should be >50% for GEMM.
@@ -471,17 +504,17 @@ With 58 MoE layers (DeepSeek-V3), this saves ~232 MB of HBM traffic per forward 
 
 ---
 
-## 11. When Triton Is NOT the Right Tool
+## 12. When Triton Is NOT the Right Tool
 
-### 11.1 Known Limitations
+### 12.1 Known Limitations
 
 1. **Launch overhead**: JIT-compiled launches take 10-15 μs (first invocation); cached launches ~5 μs. For sub-10 μs kernels, CUDA C++ (~2-5 μs) is better.
 2. **Dynamic control flow**: Triton does not support divergent control flow within a block. All threads in a program instance must take the same branch.
-3. **Hardware-specific features**: TMA descriptors, warp-group scheduling, and the full `wgmma` API are partially or fully unavailable. CUTLASS provides complete access.
+3. **Hardware-specific features**: TMA descriptors, warp-group scheduling, and the full `wgmma` API are only partially exposed even in Triton 3.6 (§2.3). CUTLASS provides complete access.
 4. **Complex shared memory patterns**: automatic management is a benefit until explicit control is needed (custom swizzling, hand-tuned double-buffering).
 5. **Cross-device kernels**: Triton does not support cooperative kernel launches across multiple GPUs.
 
-### 11.2 When to Use CUDA C++ or CUTLASS Instead
+### 12.2 When to Use CUDA C++ or CUTLASS Instead
 
 | Scenario | Tool | Reason |
 |---|---|---|
@@ -493,7 +526,7 @@ With 58 MoE layers (DeepSeek-V3), this saves ~232 MB of HBM traffic per forward 
 
 ---
 
-## 12. End-to-End Cause / Effect
+## 13. End-to-End Cause / Effect
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -524,7 +557,7 @@ flowchart TD
 
 ---
 
-## 13. Numbers to Memorize
+## 14. Numbers to Memorize
 
 | Quantity | Value | Why It Matters |
 |---|---|---|
@@ -546,7 +579,7 @@ flowchart TD
 
 ---
 
-## 14. References
+## 15. References
 
 **Foundational**
 - P. Tillet et al., "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations," *MAPL 2019*.

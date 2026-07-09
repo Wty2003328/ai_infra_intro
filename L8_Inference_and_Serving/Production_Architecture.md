@@ -575,63 +575,9 @@ The router consults the semantic cache before model selection. The load balancer
 
 ## 12. Agentic Inference Architecture
 
-### 12.1 Definition
+Agentic workloads turn requests into sessions: 5–50+ LLM calls per task interleaved with tool executions, KV caches that must survive tool pauses, monotonically growing context, and structured tool-call output at every step. Serving them well means session-aware scheduling (continuations preempt fresh work; paused agents yield GPU but keep KV), KV offload timed to hide inside tool latency, per-step context compaction, and compressed-FSM constrained decoding.
 
-Agentic inference refers to infrastructure for serving LLM agentic workloads where each "request" is a multi-turn agent loop: think -> tool call -> observe -> think again. Unlike traditional request-response serving (one prompt in, one completion out), an agentic request may involve 5--50+ sequential LLM calls, interleaved with tool executions, over seconds to minutes.
-
-### 12.2 Key differences from request-response serving
-
-| Dimension | Request-response serving | Agentic inference |
-|---|---|---|
-| Session duration | Milliseconds to seconds | Seconds to minutes |
-| LLM calls per request | 1 | 5--50+ (planning, tool selection, output parsing, verification) |
-| KV cache lifetime | Evictable after response | Must persist across turns within a session |
-| GPU utilization pattern | Continuous (always decoding or prefilling) | Bursty: GPU active during LLM calls, idle during tool execution |
-| Context growth | Fixed at request time | Grows monotonically as agent accumulates observations |
-| Output structure | Free-form text or single JSON | Structured function calls + reasoning traces |
-
-The KV cache requirement is critical: between agent turns (while a tool executes), the KV cache for that session must not be evicted, or the next turn pays the full prefill cost again. This breaks the assumption of traditional continuous batching that KV blocks can be reclaimed as soon as a sequence completes.
-
-### 12.3 Scheduling implications
-
-Traditional continuous batching assumes short, independent requests. Agent sessions need different scheduling policies:
-
-- **Session-aware scheduling.** The scheduler knows which sequences belong to the same agent session and keeps their KV cache warm. This may mean reserving KV blocks for paused agents even when other requests could use them.
-- **GPU sharing during tool pauses.** While an agent waits for a tool result (which may take milliseconds for a calculator or seconds for a web search), its KV cache occupies memory but the GPU is idle. The scheduler should serve other requests during these pauses. However, the agent's KV cache must be preserved (either in HBM or swapped to host memory).
-- **Priority queuing.** Agents paused on tool execution have lower scheduling priority than actively decoding agents or fresh single-turn requests. This prevents idle agents from occupying GPU memory that could serve active work.
-- **Disaggregated KV storage.** During tool pauses, the agent's KV cache can be offloaded from GPU HBM to host RAM or SSD (as described in Section 9.2). When the agent resumes, the KV cache is reloaded. The swap latency (~1--10 ms for RAM, ~10--100 ms for NVMe) is acceptable given tool execution times.
-
-### 12.4 Context management
-
-Agent context grows monotonically as the agent accumulates tool outputs, reasoning traces, and observations. Unmanaged, a 10-turn agent session can easily exceed 50K tokens, straining both memory and attention quality.
-
-Techniques:
-
-- **Context compression between turns.** After receiving a tool output, compress it before appending to the agent's context. A smaller model (or the agent itself) can summarize verbose tool outputs. Typical compression: 5--10x reduction for structured data (JSON API responses, web page contents).
-- **Sliding window with retrieval.** Keep only the most recent N tokens in the active context. Older context is stored in a vector store and retrieved via RAG when relevant. Trades full-history awareness for memory efficiency.
-- **Disaggregated KV storage.** Keep the full KV cache but store older layers on CPU/SSD during tool pauses. Only the most recent layers (which are most likely to be attended) remain in HBM. The Mooncake-style tiered KV pool (Section 9.2) applies directly.
-
-### 12.5 Structured output
-
-Agents require reliable structured output (JSON function calls, tool-use schemas, argument parsing). This is implemented via **constrained decoding**: grammar masking in the sampler that restricts the vocabulary at each position to only tokens valid under the target schema.
-
-Implementation approaches:
-
-- **JSON grammar masking.** Construct a CFG or regex for the expected JSON schema. At each decode step, compute the set of valid next tokens and mask the logit distribution to zero out invalid tokens. This guarantees syntactically valid output.
-- **Tool-call formatting.** For models with native tool-call support (function calling), the framework applies a grammar specific to the tool-call format. The model generates structured tool invocations instead of free-form text.
-
-Overhead: constrained decoding adds ~5--15% overhead on decode throughput due to the grammar masking computation per step. This is acceptable given that structured output eliminates the need for brittle regex-based parsing of free-form responses.
-
-### 12.6 NVIDIA Dynamo agentic inference hints
-
-NVIDIA Dynamo (the inference framework succeeding TensorRT-LLM and Triton) includes explicit optimizations for agentic workloads:
-
-- **Session affinity.** Requests from the same agent session are routed to the same inference replica, keeping the KV cache local and avoiding cross-node transfers.
-- **KV cache persistence.** Dynamo supports pinning KV cache blocks to specific sessions, preventing eviction during tool execution pauses. The pinned blocks are marked as "reserved" and excluded from the normal eviction policy.
-- **Tool-call streaming.** When an agent emits a tool call, Dynamo can stream the structured output incrementally, allowing tool execution to begin before the full call is generated (e.g., start an HTTP request as soon as the URL parameter is complete).
-- **Disaggregated agent scheduling.** Dynamo's scheduler is aware of agent session states (active decoding, tool-waiting, tool-executing) and adjusts batch composition accordingly, prioritizing active agents and sharing GPU among waiting agents.
-
-These optimizations are early but indicate the direction: inference frameworks are evolving from single-request optimization to session-aware, agent-optimized serving.
+> Full treatment — workload math, prefix-cache economics, offload tiers, cache-aware routing, SLO compounding, and NVIDIA Dynamo's agentic hints — lives in [Agentic_Inference](Agentic_Inference.md).
 
 ---
 
