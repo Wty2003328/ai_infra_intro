@@ -18,7 +18,7 @@ git clone https://github.com/Wty2003328/silicon-to-serving.git
 - **GitHub:** every page renders directly in the GitHub preview (Mermaid + LaTeX supported).
 - **Any markdown viewer:** standard markdown with relative links throughout.
 
-Start at [ai_infra/Index.md](ai_infra/Index.md), or jump into a reading path below.
+Start at [Index.md](Index.md), or jump into a reading path below.
 
 ## Dependencies & Setup
 
@@ -39,46 +39,46 @@ To view this notebook exactly as intended, the following Obsidian configurations
 ## Structure
 
 ```ascii-graph
-ai_infra_intro/
-└── ai_infra/                         AI infrastructure (silicon → inference serving)
-    ├── L0_Silicon_and_Process/
-    ├── L1_Packaging_and_Memory/
-    ├── L2_Digital_Design_for_AI/
-    ├── L3_Microarchitecture/
-    ├── L4_Systems_and_Interconnects/
-    ├── L5_Kernels_and_Programming/
-    ├── L6_Algorithms_and_Models/
-    ├── L7_Training_Stack/
-    ├── L8_Inference_and_Serving/
-    └── interview_prep/
+ai_infra_intro/                       AI infrastructure (silicon → inference serving)
+├── Index.md                          master index — start here
+├── L0_Silicon_and_Process/
+├── L1_Packaging_and_Memory/
+├── L2_Digital_Design_for_AI/
+├── L3_Microarchitecture/
+├── L4_Systems_and_Interconnects/
+├── L5_Kernels_and_Programming/
+├── L6_Algorithms_and_Models/
+├── L7_Training_Stack/
+├── L8_Inference_and_Serving/
+└── interview_prep/
 ```
 
-## AI Infrastructure (`ai_infra/`)
+## Contents
 
-57 content pages (plus layer indexes) organized in 9 layers following a strict bottom-up dependency chain. Each layer assumes the content of all layers below it.
+66 content pages (plus layer indexes) organized in 9 layers following a strict bottom-up dependency chain. Each layer assumes the content of all layers below it. Pages within each folder are numbered in reading order.
 
 | Layer | Pages | Lines | Coverage |
 |-------|-------|-------|----------|
-| L0 — Silicon & Process | 1 | 832 | CMOS scaling, process nodes, wafer economics |
-| L1 — Packaging & Memory | 2 | 1,280 | CoWoS, HBM3/3E/4, chiplets, TSVs |
-| L2 — Digital Design | 4 | 2,173 | FP units, systolic arrays, SRAM, RTL |
-| L3 — Microarchitecture | 10 | 4,054 | H100/B200/Rubin, TPU 8t/8i, AMD MI455X, roofline |
-| L4 — Systems & Interconnects | 3 | 2,227 | NVLink, InfiniBand, NVL72, liquid cooling |
-| L5 — Kernels & Programming | 6 | 5,282 | CUDA, Triton, FlashAttention v1–v3, CUTLASS 3.x, ML compilers (torch.compile/XLA/MLIR) |
-| L6 — Algorithms & Models | 7 | 5,608 | Transformers, MLA, MoE, quantization, SSMs |
-| L7 — Training Stack | 6 | 4,689 | 3D parallelism, NCCL, FSDP, GRPO, reasoning models |
-| L8 — Inference & Serving | 15 | 10,580 | vLLM, SGLang, KV cache, disaggregation, agentic serving, GPU multi-tenancy, K8s, prod |
-| Interview Prep | 11 | — | See [ai_infra/interview_prep](ai_infra/interview_prep) — per-layer Q&A (L0-L8) plus system design, common Q&A, and coding patterns |
+| L0 — Silicon & Process | 1 | 800 | CMOS scaling, process nodes, wafer economics |
+| L1 — Packaging & Memory | 2 | 1,234 | CoWoS, HBM3/3E/4, chiplets, TSVs |
+| L2 — Digital Design | 4 | 2,095 | FP units, systolic arrays, SRAM, RTL |
+| L3 — Microarchitecture | 10 | 3,926 | H100/B200/Rubin, TPU 8t/8i, AMD MI455X, roofline |
+| L4 — Systems & Interconnects | 3 | 1,986 | NVLink, InfiniBand, NVL72, liquid cooling |
+| L5 — Kernels & Programming | 7 | 4,969 | CUDA, tensor-core programming (WGMMA/TMA/warp specialization), Triton, FlashAttention v1–v4, CUTLASS 3.x, ML compilers (torch.compile/XLA/MLIR) |
+| L6 — Algorithms & Models | 7 | 5,441 | Transformers, MLA, MoE, quantization, SSMs |
+| L7 — Training Stack | 6 | 4,671 | 3D parallelism, NCCL, FSDP, GRPO, reasoning models |
+| L8 — Inference & Serving | 15 | 10,418 | vLLM, SGLang, KV cache, disaggregation, agentic serving, GPU multi-tenancy, K8s, prod |
+| Interview Prep | 11 | — | See [interview_prep/](interview_prep) — per-layer Q&A (L0-L8) plus system design, common Q&A, and coding patterns |
 
 **Topics:** GPU/TPU/ASIC architectures, CUDA/Triton kernels, ML compilers (torch.compile, CUDA Graphs, XLA/GSPMD, MLIR), transformer internals, MoE, quantization (FP8/FP4/MX), distributed training (FSDP/ZeRO/3D parallelism), KV cache, continuous batching, speculative decoding, prefill-decode disaggregation, agentic/tool-calling inference, GPU multi-tenancy (MIG/MPS/DRA), vLLM/SGLang/TRT-LLM internals, Kubernetes orchestration, production serving.
 
-See [ai_infra/Index.md](ai_infra/Index.md) for the full page index and reading paths.
+See [Index.md](Index.md) for the full page index and reading paths.
 
 ## Reading Paths
 
 **2-week interview sprint:** GPU Architecture → Memory Hierarchy → Transformer Internals → Attention → KV Cache → Batching → Parallelism → Prefill-Decode Disaggregation → Quantization → vLLM Internals → Agentic Inference → Kubernetes → System Design Interview
 
-**CUDA/kernel interview:** CUDA Programming → CUDA Optimization → Triton → FlashAttention → Cutting-Edge Kernels → ML Compilers → Coding Patterns
+**CUDA/kernel interview:** CUDA Programming → CUDA Optimization → Tensor Core Programming → Triton → FlashAttention → Cutting-Edge Kernels → ML Compilers → Coding Patterns
 
 **Distributed training interview:** GPU Architecture → Networking → Parallelism → NCCL → Distributed Training → Training Optimization
 
@@ -107,5 +107,3 @@ Updated June 2026: TPU 8t/8i, NVIDIA Vera Rubin / Rubin CPX, AMD MI455X "Altair"
 The digital IC design / hardware content was split out into its own repository (with git history preserved) — the Silicon Design Notebook.
 
 ## License
-
-[MIT](LICENSE) — use freely for study, interview prep, or teaching.

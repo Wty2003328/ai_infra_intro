@@ -9,10 +9,11 @@
 L5 covers the **kernel-level programming** of AI accelerators.
 
 1. **CUDA fundamentals** — thread/block/warp/grid hierarchy, memory model, synchronization, streams, events.
-2. **CUDA optimization** — coalescing, bank conflicts, occupancy, tensor cores, async copy, TMA, warp specialization, profiling.
-3. **Triton and kernel DSLs** — Triton programming model, autotuning, matmul/softmax/attention kernels, CUTLASS/CuTe overview.
-4. **FlashAttention deep dive** — v1/v2/v3 algorithms, online softmax derivation, IO complexity proof, Hopper-specific optimizations.
-5. **Cutting-edge kernels** — CUTLASS 3.x, FlashInfer, DeepEP, TileLang, ThunderKittens, Liger Kernel.
+2. **CUDA optimization** — coalescing, shared-memory tiling, bank conflicts, occupancy, vectorization/ILP, launch overhead, profiling.
+3. **Tensor-core programming** — WMMA→WGMMA, FP8 and 2:4 sparsity, TMEM, cp.async/TMA, double buffering, warp specialization, clusters.
+4. **Triton and kernel DSLs** — Triton programming model, autotuning, matmul/softmax/attention kernels, CUTLASS/CuTe overview.
+5. **FlashAttention deep dive** — v1/v2/v3/v4 algorithms, online softmax derivation, IO complexity proof, Hopper-specific optimizations.
+6. **Cutting-edge kernels** — CUTLASS 3.x, FlashInfer, DeepEP, TileLang, ThunderKittens, Liger Kernel.
 
 L5 explicitly does **not** cover chip architecture (→ L3), network topology (→ L4), model algorithms (→ L6), or distributed training (→ L7).
 
@@ -21,11 +22,12 @@ L5 explicitly does **not** cover chip architecture (→ L3), network topology (�
 ## Pages (read in order)
 
 1. [CUDA_Programming](01_CUDA_Programming.md) — the CUDA programming model from scratch. Thread hierarchy, memory spaces, synchronization, streams, complete matmul example.
-2. [CUDA_Optimization](02_CUDA_Optimization.md) — the optimization hierarchy: coalescing, shared memory tiling, bank conflicts, occupancy, tensor cores, async copy, TMA, warp specialization, profiling with Nsight.
-3. [Triton_and_Kernels](04_Triton_and_Kernels.md) — Triton DSL, JIT compilation, autotuning, block-pointer model, matmul/softmax/attention in Triton, CUTLASS/CuTe overview.
-4. [FlashAttention_Deep_Dive](05_FlashAttention_Deep_Dive.md) — full algorithm walkthrough v1→v2→v3, online softmax derivation, IO complexity proof, tile-sizing math, backward pass, FlashDecoding.
-5. [Cutting_Edge_Kernels](06_Cutting_Edge_Kernels.md) — CUTLASS 3.x, CuTe layout algebra, FlashInfer, DeepEP, TileLang, ThunderKittens, Liger Kernel, quantized matmul kernels.
-6. [ML_Compilers](07_ML_Compilers.md) — torch.compile (Dynamo/AOTAutograd/Inductor), guards and graph breaks, CUDA Graphs, XLA/GSPMD/Pallas, MLIR ecosystem, autotuning, compilers inside vLLM/SGLang, what compilers still can't do.
+2. [CUDA_Optimization](02_CUDA_Optimization.md) — the generic optimization hierarchy: coalescing, shared memory tiling, bank conflicts, occupancy, vectorization/ILP, launch overhead, profiling with Nsight, reduction case study.
+3. [Tensor_Core_Programming](03_Tensor_Core_Programming.md) — the tensor-core rungs: WMMA→WGMMA, FP8 and 2:4 sparsity, TMEM (Blackwell), cp.async/TMA, mbarrier, double buffering, warp specialization, cluster optimizations.
+4. [Triton_and_Kernels](04_Triton_and_Kernels.md) — Triton DSL, JIT compilation, autotuning, block-pointer model, matmul/softmax/attention in Triton, CUTLASS/CuTe overview.
+5. [FlashAttention_Deep_Dive](05_FlashAttention_Deep_Dive.md) — full algorithm walkthrough v1→v2→v3→v4, online softmax derivation, IO complexity proof, tile-sizing math, backward pass, FlashDecoding.
+6. [Cutting_Edge_Kernels](06_Cutting_Edge_Kernels.md) — CUTLASS 3.x, CuTe layout algebra, FlashInfer, DeepEP, TileLang, ThunderKittens, Liger Kernel, quantized matmul kernels.
+7. [ML_Compilers](07_ML_Compilers.md) — torch.compile (Dynamo/AOTAutograd/Inductor), guards and graph breaks, CUDA Graphs, XLA/GSPMD/Pallas, MLIR ecosystem, autotuning, compilers inside vLLM/SGLang, what compilers still can't do.
 
 ---
 
@@ -45,9 +47,4 @@ L5 explicitly does **not** cover chip architecture (→ L3), network topology (�
 
 ## Reading order
 
-Top-down for orientation: skim this Index → FlashAttention_Deep_Dive for the canonical algorithm → back to CUDA_Programming for fundamentals.
-
-Strict bottom-up for depth: CUDA_Programming → CUDA_Optimization → Triton_and_Kernels → FlashAttention_Deep_Dive → Cutting_Edge_Kernels → ML_Compilers.
-
-After this layer, ascend to [L6 — Algorithms & Models](../L6_Algorithms_and_Models/00_Index.md) where kernels become model architectures.
-
+Top-down for orientation: skim this Index → FlashAtten
