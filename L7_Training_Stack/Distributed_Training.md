@@ -399,37 +399,18 @@ At 10 seconds per checkpoint saved hourly, the overhead is 0.28% — acceptable.
 
 $$T_{\text{sync}} = \frac{6{,}480}{128 \times 1} = 50.6 \;\text{s} \quad (1.4\% \text{ overhead})$$
 
-### 4.3 Asynchronous checkpointing
+### 4.3 Asynchronous checkpointing (orchestration view)
 
-PyTorch Distributed Checkpoint (DCP) decouples the write from training:
+PyTorch Distributed Checkpoint (DCP) decouples the write from training: state is copied to a staging buffer, training resumes immediately, and a background thread persists the buffer to storage. From the training-loop side, two numbers matter:
 
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    A["Training step completes"] --> B["Copy state to<br/>staging buffer"]
-    B --> C["Training resumes<br/>immediately"]
-    B --> D["Background thread<br/>writes to storage"]
-    D --> E["Checkpoint persisted"]
-```
+- **Staging memory**: the buffer requires $16P / N_{\mathrm{DP}}$ bytes of extra GPU or CPU memory. For 70B with 64 DP ranks, that is $1{,}120/64 = 17.5$ GB per rank — manageable in CPU RAM.
+- **Vulnerability window**: if a failure occurs between the staging copy and the storage write, the checkpoint is lost — a window $\approx T_{\text{write}}$. Mitigation: write to local NVMe first (fast), then asynchronously replicate to remote storage.
 
-The staging buffer requires $16P / N_{\mathrm{DP}}$ bytes of extra GPU or CPU memory. For 70B with 64 DP ranks, that is $1{,}120/64 = 17.5$ GB per rank — manageable in CPU RAM.
-
-The trade-off: if a failure occurs between the staging copy and the storage write, the checkpoint is lost. This creates a window of vulnerability approximately equal to $T_{\text{write}}$. Mitigation: write to local NVMe first (fast), then asynchronously replicate to remote storage.
+> The full I/O mechanics — copy-on-write process forking, `dcp.save(async_save=True)` internals, barrier-then-fork coordination, torn-checkpoint prevention, COW memory-overhead math, and the two-stage NVMe→S3 pipeline — live in [Storage_and_Model_Loading](../L4_Systems_and_Interconnects/Storage_and_Model_Loading.md) §3.5.
 
 ### 4.4 Distributed checkpointing
 
-In a distributed checkpoint, each rank writes only its local shard. The checkpoint is a directory of per-rank files plus a metadata file recording the world size, TP/PP/DP decomposition, and shard map:
-
-```text
-checkpoint/
-  metadata.json          # world_size, dp_degree, tp_degree, pp_degree
-  rank_00000.pt          # shard for rank 0
-  rank_00001.pt          # shard for rank 1
-  ...
-  rank_NNNNN.pt          # shard for rank N-1
-```
-
-On restore, each rank reads only its own shard. This eliminates the need for any rank to hold the full model — critical for models that exceed single-node memory.
+In a distributed checkpoint, each rank writes only its local shard: the checkpoint is a directory of per-rank files plus a metadata file recording the world size, TP/PP/DP decomposition, and shard map (on-disk formats in [Storage_and_Model_Loading](../L4_Systems_and_Interconnects/Storage_and_Model_Loading.md) §2.4). On restore, each rank reads only its own shard. This eliminates the need for any rank to hold the full model — critical for models that exceed single-node memory.
 
 **Resharding.** If the world size changes between save and restore (elastic training, different cluster), a reshard utility re-partitions the checkpoint. The metadata file contains enough information to reconstruct the full parameter set on a single node and re-shard.
 
@@ -938,4 +919,4 @@ $$N_{\text{GPU}} = 8 \times 8 \times 64 = 4{,}096 \checkmark$$
 ---
 
 **Up the stack:** [Training_Optimization](Training_Optimization.md), [Modern_Post_Training](Modern_Post_Training.md).
-**Down the stack:** [Parallelism_Strategies](Parallelism_Strategies.md), [Collectives_and_NCCL](Collectives_and_NCCL.md), [Modern_MoE](../L6_Algorithms_and_Models/Modern_MoE.md).
+**Down the stack:** [Parallelism_Strategies](Parallelism_Strategies.md), [Collectives_and_NCCL](Collectives_and_NCCL.md), [Modern_MoE](../L6_Algorithms_and_Models/Mod

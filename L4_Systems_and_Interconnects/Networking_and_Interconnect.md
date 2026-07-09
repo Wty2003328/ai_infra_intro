@@ -720,59 +720,16 @@ Benefits: reduces latency by ~30-50% and avoids the CPU memcpy overhead. The hos
 
 ---
 
-## 5c. SHARP In-Network AllReduce
+## 5c. SHARP In-Network AllReduce — the switch-ASIC view
 
-### 5c.1 What SHARP is
+**SHARP (Scalable Hierarchical Aggregation and Reduction Protocol)** offloads AllReduce computation from GPU endpoints into the switch silicon. The hardware picture:
 
-**SHARP (Scalable Hierarchical Aggregation and Reduction Protocol)** is NVIDIA's technology for offloading AllReduce computation to InfiniBand switches. Instead of endpoints (GPUs) performing the reduction, the switch hardware performs reduction operations (sum, max, min) on data as it passes through the network.
+- **Reduction engine in the switch ASIC**: SHARP-capable switches (NVIDIA Quantum-2/Quantum-XR InfiniBand; NVLink Switch for NVLink SHARP) contain dedicated ALUs that perform element-wise sum/max/min on packets in flight, forwarding only the reduced result.
+- **Traffic reduction**: each rank sends its buffer once up the tree and receives the result once — the switch absorbs the $N$-way combining, so wire traffic per rank drops from $2D(N{-}1)/N$ (ring) to $2D/N$ per link-level view, and the reduction latency no longer scales with rank count.
+- **Fixed-function precision**: the ASIC reduces in a fixed set of datatypes (FP32/FP16/BF16; sum/max/min only) — custom operators or exotic formats fall back to endpoint reduction.
+- **Topology constraint**: the aggregation tree must be embedded in the physical switch hierarchy; deep fat-trees need multi-level SHARP, and per-switch aggregation-group resources are finite (a shared, schedulable resource across jobs).
 
-### 5c.2 How it works
-
-In a standard AllReduce, each rank sends its data to other ranks, and the reduction happens at the endpoints. With SHARP, data flows through the switch fabric, and the switch ASIC performs the reduction:
-
-1. Multiple ranks send their data chunks to the switch.
-2. The switch's hardware reduction engine computes the reduction (e.g., element-wise sum) on the incoming data.
-3. The switch forwards only the reduced result, not the raw inputs.
-
-The data volume reduction is dramatic: for an $N$-rank AllReduce, SHARP reduces the data that traverses the network by a factor of $N$. Instead of $N$ copies of the data flowing to each endpoint, only the reduced result is forwarded.
-
-**Without SHARP (Ring AllReduce, N ranks):**
-   - Each rank sends (N-1)/N of the data volume around the ring.
-   - Total data transferred: 2 * (N-1)/N * D * N = 2(N-1)D
-
-**With SHARP:**
-   - Each rank sends D once to the switch.
-   - Switch reduces and returns D once to each rank.
-   - Total data transferred: 2 * D * N (but switch does the reduction in-network)
-
-### 5c.3 Performance
-
-| Message size | AllReduce speedup with SHARP |
-|---|---|
-| Large messages (>1 MB) | ~2x |
-| Small messages (<64 KB) | ~30-50% |
-| Medium messages | ~1.5-1.8x |
-
-SHARP benefits large messages most because the reduction computation in the switch is amortized over more data. Small messages see less benefit because the fixed overhead of SHARP setup and synchronization dominates.
-
-### 5c.4 Limitations
-
-1. **Limited reduction operations**: SHARP only supports sum, max, and min reductions. Arbitrary operations (e.g., custom reduce functions) cannot be offloaded.
-2. **Hardware requirement**: requires SHARP-capable switches (NVIDIA Quantum-XR, Quantum-2, or later). Standard Ethernet switches do not support SHARP.
-3. **Precision**: the switch performs reductions in a fixed precision (typically FP32 or FP16). Mixed-precision or FP8 reductions may not be supported.
-4. **Topology constraints**: SHARP works best with a single switch or a shallow hierarchy. Deep fat-tree topologies require multi-level SHARP, which adds complexity.
-
-### 5c.5 Use in AI training
-
-NCCL can use SHARP transparently when SHARP-capable switches are detected. The configuration is automatic:
-
-```bash
-# Enable SHARP in NCCL (usually auto-detected)
-export NCCL_SHARP_DISABLE=0    # Enable SHARP (default on capable hardware)
-export NCCL_SHARP_GROUP_SIZE=4 # Number of ranks per SHARP group
-```
-
-In production AI training clusters (e.g., NVIDIA DGX SuperPOD), SHARP is typically enabled for AllReduce operations in tensor parallelism, where message sizes are large and the 2x speedup translates directly to faster training throughput. For MoE models with small, irregular All-to-All messages, SHARP provides less benefit and is often disabled.
+> Algorithm-level treatment — SHARP vs ring/tree AllReduce math, message-size speedup profile (~2x large-message), NCCL integration and `NCCL_SHARP_*` tuning, and when MoE All-to-All defeats it — lives in [Collectives_and_NCCL](../L7_Training_Stack/Collectives_and_NCCL.md) §6.
 
 ---
 

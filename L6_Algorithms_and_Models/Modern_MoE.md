@@ -373,10 +373,18 @@ sequenceDiagram
 Total bytes per MoE layer per GPU:
 
 $$
-V_{\text{comm}} = 2 \cdot \frac{N \cdot d \cdot k \cdot (P-1)}{P} \cdot \text{sizeof(element)}
+V_{\text{comm}} = \underbrace{\frac{N \cdot d \cdot k \cdot (P-1)}{P}}_{\text{dispatch}} + \underbrace{\frac{N \cdot d \cdot k \cdot (P-1)}{P}}_{\text{combine}} = 2 \cdot \frac{N \cdot d \cdot k \cdot (P-1)}{P} \cdot \text{sizeof(element)}
 $$
 
 The factor of 2 is dispatch + combine. $(P-1)/P$ accounts for the fraction of tokens sent off-GPU (tokens whose experts are local stay put).
+
+**Key scaling properties:**
+1. **Linear in batch size $N$**: more tokens means more data to route. This is why MoE prefill is communication-intensive.
+2. **Linear in hidden dim $d$**: each token sends its full hidden representation. This is fundamental — you cannot compress the token representation without losing information.
+3. **Linear in $k$**: each token routes to $k$ experts, so each token generates $k$ dispatch messages.
+4. **Sub-linear in $P$**: the $(P-1)/P$ factor approaches 1 as $P$ grows, meaning nearly all tokens must be sent over the network at large scale.
+
+The factor of 2 (dispatch + combine) means every token's hidden vector traverses the network twice per MoE layer — once to reach its expert, once to return the result. For DeepSeek V3 with 61 MoE layers: $2 \times 61 = 122$ network traversals per forward pass.
 
 For DeepSeek V3 on NVL72 (72 GB200 GPUs, FP8):
 
@@ -416,25 +424,7 @@ DeepEP provides two distinct communication kernels optimized for different MoE s
 
 **When to use which:** During decode (batch size 1--8, small token count), the all-to-all latency dominates the MoE layer time, so the low-latency kernel is preferred. During prefill or training (batch size 64+, large token count), the all-to-all throughput matters more, so the normal-throughput kernel is used. DeepEP auto-selects based on token count per expert.
 
-### 7.5 Communication volume formula — Detailed
-
-The total communication volume for expert parallelism over $P$ GPUs with $E$ routed experts, $k$ selections per token, and batch of $N$ tokens is:
-
-$$
-V_{\text{total}} = \underbrace{N \cdot d \cdot k \cdot (P-1)/P}_{\text{dispatch}} + \underbrace{N \cdot d \cdot k \cdot (P-1)/P}_{\text{gather}} = 2 \cdot N \cdot d \cdot k \cdot \frac{P-1}{P}
-$$
-
-This is per MoE layer. The $(P-1)/P$ factor accounts for local experts — tokens routed to an expert on the same GPU do not traverse the network.
-
-**Key scaling properties:**
-1. **Linear in batch size $N$**: more tokens means more data to route. This is why MoE prefill is communication-intensive.
-2. **Linear in hidden dim $d$**: each token sends its full hidden representation. This is fundamental — you cannot compress the token representation without losing information.
-3. **Linear in $k$**: each token routes to $k$ experts, so each token generates $k$ dispatch messages.
-4. **Sub-linear in $P$**: the $(P-1)/P$ factor approaches 1 as $P$ grows, meaning nearly all tokens must be sent over the network at large scale.
-
-The factor of 2 (dispatch + gather) means every token's hidden vector traverses the network twice per MoE layer — once to reach its expert, once to return the result. For DeepSeek V3 with 61 MoE layers: $2 \times 61 = 122$ network traversals per forward pass.
-
-### 7.6 Worked Example — Token Dispatch and Gather on Expert Parallelism
+### 7.5 Worked Example — Token Dispatch and Gather on Expert Parallelism
 
 Consider a simplified setup: $P = 4$ GPUs, $E = 8$ routed experts (2 per GPU), $k = 2$, $d = 4$, batch of $N = 4$ tokens.
 

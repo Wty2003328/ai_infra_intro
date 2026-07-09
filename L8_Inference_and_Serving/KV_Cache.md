@@ -447,41 +447,13 @@ NIXL abstracts KV movement across all tiers with a unified non-blocking API. It 
 
 ### 6.6 KV Cache Quantization
 
-Offloading moves KV data to slower tiers; quantization shrinks it before it ever leaves the GPU. By reducing the bits per element $b$, quantization attacks both the capacity and bandwidth constraints simultaneously.
-
-#### FP8 KV cache
-
-Quantize K and V tensors to FP8 (E4M3 for forward pass, E5M2 optional for gradients). This halves the per-token cost: $b = 1$ instead of $b = 2$.
-
-For Llama-3 70B GQA: $c_{\text{FP8}} = 2 \times 80 \times 8 \times 128 \times 1 = 163{,}840$ B $\approx 160$ KB/token, down from 320 KB. The quantization is static (absmax per head or per tensor), applied at KV store time. No calibration dataset needed. Quality impact: $< 0.1\%$ perplexity degradation for E4M3, negligible for chat quality. FP8 KV is the default in vLLM, TensorRT-LLM, and SGLang for 2025+ serving.
-
-#### Asymmetric INT4/2-bit quantization (KIVI)
-
-KIVI quantizes Keys and Values at different granularities: Keys use flat per-channel quantization (treating the channel dimension as the quantization group), Values use residual per-channel quantization. At 2-bit per element:
-
-For Llama-3 70B GQA: $c_{\text{KIVI-2bit}} = 2 \times 80 \times 8 \times 128 \times \lceil 2/8 \rceil = 2 \times 80 \times 8 \times 128 \times 1 = 163{,}840$ B $\approx 160$ KB/token using packed representation (4 elements per byte), effective cost is $\sim 40$ KB/token. Quality: $< 1\%$ perplexity at 2-bit, acceptable for long-context retrieval where the bottleneck is capacity, not precision.
-
-#### Quantized KV cache size formula
-
-For arbitrary bit width $b_{\text{kv}}$ (bits per element):
+Offloading moves KV data to slower tiers; quantization shrinks it before it ever leaves the GPU, attacking capacity and bandwidth simultaneously. For arbitrary bit width $b_{\text{kv}}$ (bits per element):
 
 $$c_{\text{quantized}} = 2 \cdot n_l \cdot n_{\text{kv}} \cdot d_h \cdot \lceil b_{\text{kv}} / 8 \rceil$$
 
-| Format | Bits/elem | Per-token (70B GQA) | Compression vs FP16 | Quality |
-|--------|-----------|---------------------|---------------------|---------|
-| FP16/BF16 | 16 | 320 KB | 1x | Baseline |
-| FP8 E4M3 | 8 | 160 KB | 2x | $< 0.1\%$ ppl loss |
-| INT8 | 8 | 160 KB | 2x | $< 0.5\%$ ppl loss |
-| INT4 (KIVI) | 4 | 80 KB | 4x | $< 1\%$ ppl loss |
-| FP4 NV | 4 | 80 KB | 4x | Emerging |
-| 2-bit (KIVI) | 2 | 40 KB | 8x | 1--2% ppl loss |
+Representative point: FP8 E4M3 halves Llama-3 70B GQA per-token cost from 320 KB to 160 KB at $< 0.1\%$ perplexity loss — calibration-free, and the default in vLLM/TensorRT-LLM/SGLang for 2025+ serving.
 
-#### Production considerations
-
-- **Granularity**: per-tensor (cheapest, slightly lower quality), per-head (default for FP8), per-group of 64--128 elements (best quality, used for INT4 and below).
-- **Calibration**: FP8 is calibration-free (absmax at store time). INT8/INT4 benefit from a small calibration dataset to set scale factors; KIVI avoids this via online per-channel scaling.
-- **Mixed precision**: keep recent tokens (high attention weights) in FP8, quantize older tokens to INT4 or 2-bit. This exploits the observation that long-context attention is sparse -- old tokens receive low attention scores and tolerate aggressive quantization.
-- **PagedAttention interaction**: quantization happens per block. Each block can have its own scale factors, stored as metadata alongside the block. Dequantization occurs in-register during the attention kernel, adding $< 2\%$ overhead.
+> Full treatment — FP8 vs INT8 vs INT4/KIVI formats, the per-format compression table, granularity and calibration choices, mixed-precision recency policies, and PagedAttention per-block scale metadata — lives in [Modern_KV_Compression](Modern_KV_Compression.md) §3.
 
 ### 6.7 When offloading helps vs hurts
 

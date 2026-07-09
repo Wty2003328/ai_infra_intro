@@ -373,21 +373,9 @@ Most production systems accept a small failure-rate budget ($< 0.1\%$ of request
 
 ## 6. Pool Sizing and the Reasoning Shift
 
-### 6.1 Sizing Formulas
+> The pool-sizing formulas ($N_p$ from prefill FLOPs, $N_d$ from decode bytes) and the worked chat (113 prefill GPUs, $\bar{Q}_d = 140.7$ GB, 28:1) and reasoning (1:3) examples live in [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md) §5 — the derivation applies unchanged here. The takeaway: $N_p/N_d$ varies by over 80x between workload types, so disaggregation lets each pool scale independently.
 
-For request rate $\lambda$, average prompt length $S_p$, average output length $S_d$, model parameter count $N$:
-
-**Prefill pool GPUs:**
-
-$$N_p = \frac{\lambda \cdot 2 \cdot N \cdot S_p}{\eta_p \cdot \pi_{\text{GPU}}}$$
-
-**Decode pool GPUs:**
-
-$$N_d = \frac{\lambda \cdot S_d \cdot \left(W_{\text{bytes}} + c_{\text{token}} \cdot \left(S_p + \frac{S_d}{2}\right)\right)}{\eta_d \cdot \beta_{\text{GPU}}}$$
-
-where $c_{\text{token}}$ is the per-token KV cost in bytes, $W_{\text{bytes}}$ is the weight footprint, $\eta_p \approx 0.4$--$0.6$, and $\eta_d \approx 0.7$--$0.85$.
-
-### 6.2 The Reasoning Workload Shift
+### 6.1 The Reasoning Workload Shift
 
 In 2023--2024, standard chat models had $S_p \approx 1000$, $S_d \approx 200$. Prefill dominated; typical $N_p : N_d$ ratios were 5:1 to 30:1. Reasoning models (OpenAI o1/o3, DeepSeek-R1) changed this fundamentally:
 
@@ -396,42 +384,7 @@ In 2023--2024, standard chat models had $S_p \approx 1000$, $S_d \approx 200$. P
 - $N_p : N_d$ ratios flip to 1:10 to 1:20 in 2026 deployments.
 - The KV transfer cost is amortized over tens of thousands of decode steps, becoming negligible.
 - FP4 KV quantization reduces the transfer payload by 4x, further trivializing the network hop.
-
-### 6.3 Worked Example: Chat Workload
-
-Parameters: $\lambda = 200$ req/s, $S_p = 2000$, $S_d = 300$, Llama-3-70B FP16 ($W = 140$ GB, $c_{\text{token}} = 320$ KB), H100 ($\pi = 990$ TFLOPS, $\beta = 3.35$ TB/s).
-
-**Prefill:**
-
-$$\Phi_p = 200 \times 2 \times 70 \times 10^9 \times 2000 = 5.6 \times 10^{16} \text{ FLOP/s}$$
-
-$$N_p = \frac{56{,}000 \text{ TFLOP/s}}{0.5 \times 990 \text{ TFLOP/s}} \approx 113 \text{ GPUs}$$
-
-**Decode:**
-
-$$\bar{Q}_d = 140 + 0.000320 \times (2000 + 150) = 140.7 \text{ GB}$$
-
-$$N_d = \frac{200 \times 300 \times 140.7 \text{ GB}}{0.75 \times 3350 \text{ GB/s}} \approx 3.4 \approx 4 \text{ GPUs}$$
-
-**Ratio:** $N_p : N_d \approx 28:1$. Chat is overwhelmingly prefill-heavy.
-
-### 6.4 Worked Example: Reasoning Workload
-
-Parameters: $\lambda = 50$ req/s, $S_p = 500$, $S_d = 8000$, same model.
-
-**Prefill:**
-
-$$N_p = \frac{50 \times 2 \times 70 \times 10^9 \times 500}{0.5 \times 990 \times 10^{12}} = \frac{3{,}500}{495} \approx 7 \text{ GPUs}$$
-
-**Decode:**
-
-$$\bar{Q}_d = 140 + 0.000320 \times (500 + 4000) = 141.4 \text{ GB}$$
-
-$$N_d = \frac{50 \times 8000 \times 141.4}{0.75 \times 3350} \approx 22.5 \approx 23 \text{ GPUs}$$
-
-**Ratio:** $N_p : N_d \approx 1:3$. Decode dominates. This is the regime where H200 (4.8 TB/s HBM BW) or B200 (8.0 TB/s) justifies the premium for decode GPUs.
-
-**The point:** the ratio $N_p / N_d$ varies by over 80x between workload types. A coupled system provisions for the maximum of both; disaggregation lets each pool scale independently.
+- This is the regime where H200 (4.8 TB/s HBM BW) or B200 (8.0 TB/s) justifies the premium for decode GPUs.
 
 ---
 
@@ -518,19 +471,7 @@ Per-LoRA traffic can have its own decode pool to avoid adapter-loading thrashing
 
 ## 9. SLO Accounting with Disaggregation
 
-TTFT in a disaggregated system decomposes as:
-
-$$\text{TTFT} = t_{\text{queue}} + t_{\text{prefill}} + t_{\text{transfer}} + t_{\text{first\_decode}}$$
-
-With layer pipelining, $t_{\text{transfer}}$ is approximately:
-
-$$t_{\text{transfer}} \approx \max\!\left(0,\; \frac{\text{KV}_{\text{bytes}}}{\beta_{\text{fabric}}} - t_{\text{prefill}} \cdot \frac{L - 1}{L}\right)$$
-
-For Llama-3-70B with $S_p = 4096$, $L = 80$, KV = 1.25 GB on NVLink ($\beta = 900$ GB/s):
-
-$$t_{\text{transfer}} = \max\!\left(0,\; 1.4\text{ ms} - 200\text{ ms} \times \frac{79}{80}\right) = 0 \text{ ms}$$
-
-Fully hidden. On IB NDR ($\beta = 50$ GB/s): $t_{\text{transfer}} = \max(0, 25\text{ ms} - 197.5\text{ ms}) = 0$. Still fully hidden.
+> The TTFT decomposition ($t_{\text{queue}} + t_{\text{prefill}} + t_{\text{transfer}} + t_{\text{first\_decode}}$) and the layer-pipelined transfer-hiding math — showing $t_{\text{transfer}} = 0$ on both NVLink and IB NDR for realistic prompt lengths — are derived in [Prefill_Decode_Disaggregation](Prefill_Decode_Disaggregation.md) §11.
 
 TPOT is determined purely by the decode pool: $t_d = \bar{Q}_d / (\eta_d \cdot \beta_{\text{HBM}})$. There is no interference from prefill bursts.
 

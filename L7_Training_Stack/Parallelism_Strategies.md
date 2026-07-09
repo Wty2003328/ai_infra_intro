@@ -363,29 +363,7 @@ Each MoE layer requires two all-to-all operations:
 1. **Dispatch all-to-all:** After routing, each rank sends its tokens to the ranks that hold the assigned experts. Each rank receives tokens from all other ranks.
 2. **Combine all-to-all:** After expert computation, each rank sends results back to the originating ranks.
 
-$$V_{\text{EP/all-to-all}} = \frac{B \cdot S \cdot d \cdot b \cdot k}{P_{\text{EP}}}$$
-
-The factor $k/P_{\text{EP}}$ arises because each token activates $k$ of $P_{\text{EP}}$ ranks. The total per MoE layer:
-
-$$\boxed{V_{\text{EP/layer}} = \frac{2 \cdot B \cdot S \cdot d \cdot b \cdot k}{P_{\text{EP}}}}$$
-
-**EP communication volume — first-principles derivation:**
-
-The dispatch all-to-all sends each token's hidden state to the expert's host rank. Each rank originally holds $B \cdot S$ tokens, and each token is routed to $k$ experts. With $P_{\text{EP}}$ expert-parallel ranks, each rank sends to and receives from all other ranks. The per-rank send volume per all-to-all:
-
-$$V_{\text{dispatch, per-rank}} = B \cdot S \cdot d \cdot b \cdot \frac{k}{P_{\text{EP}}}$$
-
-The all-to-all has the property that total bytes sent equals total bytes received. The combine all-to-all has the same volume (expert outputs return to origin). Total per MoE layer:
-
-$$V_{\text{EP/layer}} = 2 \cdot B \cdot S \cdot d \cdot b \cdot \frac{k}{P_{\text{EP}}}$$
-
-**Worked example — DeepSeek-V3, 256 experts, top-2, EP=64, $B=64$, $S=4096$, $d=7168$, BF16:**
-
-$$V_{\text{EP/layer}} = \frac{2 \times 64 \times 4096 \times 7168 \times 2 \times 2}{64} = \frac{2 \times 64 \times 4096 \times 7168 \times 4}{64}$$
-
-$$= 2 \times 4096 \times 7168 \times 4 = 235 \;\text{MB per MoE layer per all-to-all}$$
-
-With 58 MoE layers (DeepSeek-V3 has MoE at layers 4, 8, ..., 60): $58 \times 2 \times 235 \;\text{MB} \approx 27.3$ GB total EP communication per step. On an NVLink domain this is manageable; across InfiniBand it would be $\sim 0.55$ seconds — significant.
+> The communication-volume derivation — $V_{\text{comm}} = 2 \cdot N \cdot d \cdot k \cdot \frac{P-1}{P} \cdot b$ per MoE layer (dispatch + combine, with the $(P-1)/P$ local-expert discount), its scaling properties, and the DeepSeek-V3-on-NVL72 worked numbers — lives in [Modern_MoE](../L6_Algorithms_and_Models/Modern_MoE.md) §7.2.
 
 **3D parallelism total communication — worked example:** Llama-3-70B, TP=8, PP=4, DP=4 (ZeRO-3), $B=64$, $S=4096$, $d=8192$, $L=80$, BF16.
 

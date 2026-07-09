@@ -655,6 +655,8 @@ With SmoothQuant: channel 0 is now magnitude $0.6$. Represented as $\lfloor 0.6/
 
 ## 9. KV Cache Quantization
 
+> This section covers the numerics. The serving-side canonical treatment — format tradeoffs in production engines, granularity/calibration policy, and PagedAttention integration — is [Modern_KV_Compression](../L8_Inference_and_Serving/Modern_KV_Compression.md) §3.
+
 ### 9.1 Why KV cache quantization matters
 
 During autoregressive decode, the KV cache grows by $2 \cdot n_{\text{kv\_heads}} \cdot d_h$ elements per token per layer. For a model with $L$ layers, $n_{\text{kv}}$ KV heads, head dim $d_h$, sequence length $S$, and $b$ bytes/element, the total is:
@@ -1005,5 +1007,4 @@ This is precisely the motivation for SmoothQuant: instead of choosing between ba
 
 ---
 
-**Up the stack:** [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Transformer Engine, the sub-integer frontier.
-**Down the stack:** [FP_Unit_Design](../L2_Digital_Design_for_AI/FP_Unit_Design.md) — why smaller multipliers yield 2× throughput; [Transformer_Internals](Transformer_Internals.md) — the model architecture being quantized.
+**Up the stack:** [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Tra

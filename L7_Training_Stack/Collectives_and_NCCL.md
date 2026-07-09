@@ -520,7 +520,17 @@ flowchart TB
 - Supports only sum and specific data types (FP32, FP16, BF16). FP8 support was added in SHARP v2.5 (2025).
 - The switch must have SHARP-capable hardware (Mellanox/NVIDIA Quantum-2 or later).
 - Maximum tree depth is limited by switch buffer size. Large $M$ can overflow switch SRAM, requiring fallback to software reduction.
-- NCCL enables SHARP automatically when `NCCL_SHARP_DISABLE=0` (default) and the fabric supports it.
+- NCCL enables SHARP automatically when `NCCL_SHARP_DISABLE=0` (default) and the fabric supports it; `NCCL_SHARP_GROUP_SIZE` sets ranks per SHARP group.
+
+**Measured payoff by message size:**
+
+| Message size | AllReduce speedup with SHARP |
+|---|---|
+| Large messages (>1 MB) | ~2x |
+| Medium messages | ~1.5-1.8x |
+| Small messages (<64 KB) | ~30-50% |
+
+Large messages benefit most because the in-switch reduction is amortized over more data; small messages are dominated by SHARP setup/synchronization overhead. In DGX SuperPOD-class clusters SHARP is enabled for large-message TP AllReduce; for MoE models with small, irregular All-to-All traffic it provides little benefit and is often disabled. The switch-ASIC hardware view (reduction-engine silicon, aggregation-tree embedding) lives in [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md) §5c.
 
 ---
 
@@ -686,12 +696,4 @@ Degradation factor: $514 / 36 = 14.3\times$. A single bad NVLink cable reduces A
 **Cross-references**
 - [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md) — InfiniBand, NVLink, and topology primitives.
 - [Rack_Scale_Design](../L4_Systems_and_Interconnects/Rack_Scale_Design.md) — how NVLink domains map to physical rack layout.
-- [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) — NVLink and NVSwitch within the GPU system.
-- [Parallelism_Strategies](Parallelism_Strategies.md) — which parallelism strategies use which collectives.
-- [Distributed_Training](Distributed_Training.md) — end-to-end training loop with overlapped communication.
-- [Training_Optimization](Training_Optimization.md) — gradient compression, overlapping, and mixed-precision communication.
-
----
-
-**Up the stack:** [Distributed_Training](Distributed_Training.md), [Training_Optimization](Training_Optimization.md).
-**Down the stack:** [Parallelism_Strategies](Parallelism_Strategies.md), [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md), [Rack_Scale_Design](../L4_Systems_and_Interconnects/Rack_Scale_Design.md), [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md).
+- [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) — NVLink and NVSwitch within t
