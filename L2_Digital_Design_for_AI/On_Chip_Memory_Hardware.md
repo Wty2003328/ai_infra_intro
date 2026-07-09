@@ -546,10 +546,6 @@ flowchart TD
 - ISSCC bitcell papers from TSMC, Intel, Samsung — annual SRAM-cell area trends.
 - Triton compiler source — `padding` autotuner heuristics.
 
-**Cross-references**
-- [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) — primitive memory cells.
-- [`digital_design/Physical_Design.md`](../../hardware_design/05_Backend_Physical_Design/Physical_Design.md) — SRAM macro placement.
-
 ---
 
 **Up the stack:** [FP_Unit_Design](FP_Unit_Design.md) → [Systolic_Arrays_and_Dataflow](Systolic_Arrays_and_Dataflow.md) → [Digital_Design_For_AI](Digital_Design_For_AI.md) → [L3 Microarchitecture](../L3_Microarchitecture/Index.md).

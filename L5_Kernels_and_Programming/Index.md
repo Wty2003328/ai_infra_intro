@@ -51,6 +51,3 @@ Strict bottom-up for depth: CUDA_Programming → CUDA_Optimization → Triton_an
 
 After this layer, ascend to [L6 — Algorithms & Models](../L6_Algorithms_and_Models/Index.md) where kernels become model architectures.
 
-Cross-domain references:
-- [`hardware_design/Implementation/Synthesis_and_Optimization.md`](../../hardware_design/04_Synthesis/Synthesis_and_Optimization.md) — what synthesis sees of these pipeline structures.
-- [`hardware_design/Architecture/CPU_Architecture.md`](../../hardware_design/01_Architecture_and_PPA/CPU_Architecture.md) — RTL-level view of pipelined execution and scheduling.

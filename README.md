@@ -6,7 +6,7 @@ A comprehensive, bottom-up technical reference covering the full AI infrastructu
 
 Built for senior-level interview preparation and professional reference. Target roles: LLM inference/serving engineer, GPU kernel/CUDA engineer, distributed training/MLSys engineer.
 
-This notebook covers the AI-infrastructure half of the original combined project. The digital IC design / hardware half now lives in its own sibling notebook: **[Silicon Design Notebook](../hardware_design_notebook)** (RISC-V CPU microarchitecture, RTL/verification, synthesis, physical design, signoff, fabrication).
+This notebook covers the AI-infrastructure half of the original combined project. The digital IC design / hardware half now lives in its own sibling notebook: **Silicon Design Notebook** (RISC-V CPU microarchitecture, RTL/verification, synthesis, physical design, signoff, fabrication).
 
 ## Getting Started
 
@@ -104,7 +104,7 @@ Updated June 2026: TPU 8t/8i, NVIDIA Vera Rubin / Rubin CPX, AMD MI455X "Altair"
 
 ## History
 
-The digital IC design / hardware content that used to live in `hardware_design/` was split out into its own repository (with git history preserved) — see [Silicon Design Notebook](../hardware_design_notebook).
+The digital IC design / hardware content was split out into its own repository (with git history preserved) — the Silicon Design Notebook.
 
 ## License
 

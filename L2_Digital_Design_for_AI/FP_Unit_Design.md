@@ -1,7 +1,7 @@
 # FP Unit Design — Multipliers, Wallace Trees, FMA, MX Formats
 
 > **Layer:** L2.
-> **Prerequisites:** [On_Chip_Memory_Hardware](On_Chip_Memory_Hardware.md). IEEE-754 basics ([Floating_Point](../../hardware_design/00_Fundamentals/Floating_Point.md)).
+> **Prerequisites:** [On_Chip_Memory_Hardware](On_Chip_Memory_Hardware.md). IEEE-754 basics assumed.
 > **Hands off to:** [Systolic_Arrays_and_Dataflow](Systolic_Arrays_and_Dataflow.md), [L3 Microarchitecture](../L3_Microarchitecture/Index.md).
 
 ---
@@ -484,10 +484,6 @@ flowchart TD
 - Rouhani et al., *Microscaling Data Formats for Deep Learning*, arXiv 2310.10537.
 - Sun et al., *Hybrid 8-bit Floating Point Training for Deep Neural Networks*, NeurIPS 2019 (origin of E4M3 / E5M2 split).
 - Kuzmin et al., *FP8 Quantization: The Power of the Exponent*, NeurIPS 2022.
-
-**Cross-references**
-- [`digital_design/Floating_Point.md`](../../hardware_design/00_Fundamentals/Floating_Point.md) — IEEE-754 corner cases.
-- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/04_Synthesis/Synthesis_and_Optimization.md) — what synthesis does with `*`.
 
 ---
 

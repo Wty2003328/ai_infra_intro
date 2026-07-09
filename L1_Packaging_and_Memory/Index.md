@@ -49,8 +49,3 @@ Start with [Advanced_Packaging](Advanced_Packaging.md) for the package geometry,
 - [L3 — Microarchitecture](../L3_Microarchitecture/Index.md) for how this bandwidth is consumed by SMs / tensor cores.
 - [L4 — Systems & Interconnects](../L4_Systems_and_Interconnects/Index.md) for what NVLink / NVSwitch does *across* packages, on top of NV-HBI *inside* the package.
 
-Cross-domain references in this vault:
-
-- [`digital_design/IC_Packaging.md`](../../hardware_design/07_Manufacturing_and_Bringup/IC_Packaging.md) — package-engineer view of the same ground.
-- [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) — DRAM device physics from the design-engineer angle.
-- [`digital_design/Signal_Integrity_Reliability.md`](../../hardware_design/05_Backend_Physical_Design/Signal_Integrity_Reliability.md) — eye-diagram, jitter, ISI math.

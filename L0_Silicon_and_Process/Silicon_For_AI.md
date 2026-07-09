@@ -795,12 +795,6 @@ Every higher-layer optimization in this notebook is, somewhere, a workaround for
 - Rabaey, *Digital Integrated Circuits*, 2nd ed. — depth on noise margin, leakage, and scaling.
 - Plummer, Deal, Griffin, *Silicon VLSI Technology* — the fab-process side.
 
-**Cross-references in this vault**
-- [`digital_design/Fabrication_Process.md`](../../hardware_design/07_Manufacturing_and_Bringup/Fabrication_Process.md) — wafer-flow chemistry.
-- [`digital_design/CMOS_Fundamentals.md`](../../hardware_design/00_Fundamentals/CMOS_Fundamentals.md) — device-level companion.
-- [`digital_design/IC_Packaging.md`](../../hardware_design/07_Manufacturing_and_Bringup/IC_Packaging.md) — package-engineer view of the same ground.
-- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/02_Power_and_Low_Power/Power_Analysis_and_Signoff.md) — IR/EM signoff math.
-
 ---
 
 **Up the stack:** [L1 — Packaging & Memory Stack](../L1_Packaging_and_Memory/Index.md) → [L2 — Digital Design for AI](../L2_Digital_Design_for_AI/Index.md) → [L3 — Microarchitecture](../L3_Microarchitecture/Index.md).

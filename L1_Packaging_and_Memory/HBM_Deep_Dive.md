@@ -1,7 +1,7 @@
 # HBM Deep Dive — Channels, TSVs, Sense Amps, Base Die
 
 > **Layer:** L1.
-> **Prerequisites:** [L0 Silicon_For_AI](../L0_Silicon_and_Process/Silicon_For_AI.md), [Advanced_Packaging](Advanced_Packaging.md). DRAM device-physics primer in [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) helps.
+> **Prerequisites:** [L0 Silicon_For_AI](../L0_Silicon_and_Process/Silicon_For_AI.md), [Advanced_Packaging](Advanced_Packaging.md). DRAM device-physics primer assumed.
 > **Hands off to:** [L3 Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memory_Hierarchy_and_Roofline.md), then everything in [L8 inference engines](../L8_Inference_and_Serving/Index.md) that depends on the bandwidth wall.
 
 ---
@@ -487,11 +487,6 @@ Full coverage in [L3 Memory_Hierarchy_and_Roofline](../L3_Microarchitecture/Memo
 **Academic**
 - Onur Mutlu's research group (CMU/ETH) — DRAM controller design, RowHammer, refresh scheduling.
 - Brian Wong et al., *DRAM Refresh Mechanisms, Penalties, and Trade-Offs* (TC 2014) — canonical refresh analysis.
-
-**Cross-references in this vault**
-- [`digital_design/Memory.md`](../../hardware_design/01_Architecture_and_PPA/Memory.md) — DRAM device-physics primer.
-- [`digital_design/Signal_Integrity_Reliability.md`](../../hardware_design/05_Backend_Physical_Design/Signal_Integrity_Reliability.md) — signaling-side companion.
-- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/02_Power_and_Low_Power/Power_Analysis_and_Signoff.md) — PHY power signoff.
 
 ---
 

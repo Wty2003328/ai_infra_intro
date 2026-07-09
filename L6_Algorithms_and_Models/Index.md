@@ -56,5 +56,3 @@ Strict bottom-up: Transformer_Internals -> Attention_Mechanisms -> Modern_MoE ->
 
 After this layer, ascend to [L7 — Training Stack](../L7_Training_Stack/Index.md).
 
-Cross-domain references:
-- [`digital_design/Fixed_Point.md`](../../hardware_design/00_Fundamentals/Floating_Point.md) — the RTL view of quantization arithmetic.

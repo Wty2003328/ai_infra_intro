@@ -564,11 +564,6 @@ flowchart TD
 - Wang et al., *NV-HBI Cross-Die Bridge for Blackwell*, Hot Chips 2024.
 - Foundry-DTCO disclosures from TSMC / Intel — pipelining-friendly cell libraries.
 
-**Cross-references**
-- [`digital_design/Synthesis_and_Optimization.md`](../../hardware_design/04_Synthesis/Synthesis_and_Optimization.md) — synthesis flow and timing closure tools.
-- [`digital_design/Formal_Verification.md`](../../hardware_design/03_Frontend_RTL_and_Verification/Formal_Verification.md) — property-based verification.
-- [`digital_design/Clock_Division.md`](../../hardware_design/03_Frontend_RTL_and_Verification/Clock_Division.md) — PLLs and clock generation.
-
 ---
 
 **Up the stack:** [L3 Microarchitecture](../L3_Microarchitecture/Index.md) — these RTL patterns become SMs, ISAs, and rooflines.

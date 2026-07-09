@@ -735,11 +735,6 @@ flowchart TD
 - ISSCC — PHY and base-die designs.
 - OFC (Optical Fiber Communication) — silicon photonics and CPO developments.
 
-**Cross-references in this vault**
-- [`digital_design/IC_Packaging.md`](../../hardware_design/07_Manufacturing_and_Bringup/IC_Packaging.md) — package-engineer view.
-- [`digital_design/Signal_Integrity_Reliability.md`](../../hardware_design/05_Backend_Physical_Design/Signal_Integrity_Reliability.md) — eye/jitter/ISI analysis.
-- [`power/Power_Analysis_and_Signoff.md`](../../hardware_design/02_Power_and_Low_Power/Power_Analysis_and_Signoff.md) — IR/EM signoff.
-
 ---
 
 **Up the stack:** [HBM_Deep_Dive](HBM_Deep_Dive.md) → [L2 — Digital Design for AI](../L2_Digital_Design_for_AI/Index.md) → [L3 — Microarchitecture](../L3_Microarchitecture/Index.md).
