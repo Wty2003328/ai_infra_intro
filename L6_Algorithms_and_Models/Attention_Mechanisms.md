@@ -36,6 +36,8 @@ Throughout this page the following notation is fixed:
 
 ## 1. Scaled Dot-Product Attention — Full Derivation
 
+> This page assumes the attention block's place in the forward pass — QKV projection shapes, output projection, and per-block FLOP/parameter accounting — from [Transformer_Internals](Transformer_Internals.md) §4 and §9.
+
 ### 1.1 The Motivating Problem
 
 Given a sequence of $S$ tokens each represented as a $D$-dimensional vector, we want each token to aggregate information from other tokens based on *content relevance* — a form of differentiable dictionary lookup. The query $Q$ specifies "what I am looking for," the key $K$ specifies "what I contain as an index," and the value $V$ is the payload.

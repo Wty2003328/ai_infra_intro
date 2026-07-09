@@ -458,6 +458,8 @@ Announced at GTC March 2026 as the **Vera Rubin** platform (Vera CPU + Rubin GPU
 
 The headline architectural change: with **High-NA EUV** halving the reticle field, dies must shrink in area and packages must grow in die-count. Rubin will normalize 4-die compute clusters; Rubin Ultra will push to 6-die. NV-HBI evolves to NV-HBI-2 with hybrid bonding.
 
+> Full Vera Rubin platform detail — confirmed specs, the Vera CPU, the VR200 NVL144 rack, and the Rubin CPX prefill GPU — lives in [Accelerator_Landscape_2026](Accelerator_Landscape_2026.md) §11.
+
 ---
 
 ## 10. End-to-end cause / effect

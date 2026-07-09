@@ -684,6 +684,8 @@ KV cache quantization can be applied at different granularities, each with diffe
 
 ### 9.3 FP8 E4M3 vs INT8 vs INT4 for KV
 
+> Below the INT4 floor, 2-bit KV formats (TurboQuant-class) and other emerging KV-compression formats are covered in [Modern_Quantization_Frontier](Modern_Quantization_Frontier.md) §10.
+
 | Format | Bits/element | Dynamic range | Precision | KV cache at 128K (Llama-3-70B) |
 |---|---|---|---|---|
 | FP16 (baseline) | 16 | $\pm 65{,}504$ | 0.1% | 40 GB |

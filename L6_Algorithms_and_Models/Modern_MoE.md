@@ -176,13 +176,7 @@ $$
 \mathcal{L}_{\text{aux}} = \alpha \cdot N \cdot \sum_{i=1}^{E} f_i \cdot p_i
 $$
 
-**Derivation of why this works.** The term $\sum_i f_i \cdot p_i$ is minimized when $f_i = p_i = 1/E$ for all $i$ (uniform load). Proof: by Jensen's inequality, for any probability distribution $f$ and $p$ over $E$ categories:
-
-$$
-\sum_{i} f_i \cdot p_i \;\geq\; \left(\sum_i \frac{f_i + p_i}{2}\right)^2 = \frac{1}{E}
-$$
-
-Wait — that is not tight. The correct argument: the product $f_i \cdot p_i$ is minimized (subject to $\sum f_i = k$, $\sum p_i = 1$) when both are uniform. Intuitively, $f_i \cdot p_i$ penalizes any expert that has both high routing probability *and* high actual assignment. The minimum at $f_i = k/E$, $p_i = 1/E$ gives $\mathcal{L}_{\text{aux}} = \alpha \cdot N \cdot k/E$.
+**Derivation of why this works.** The hard assignment fractions $f_i$ are non-differentiable counts; gradients flow only through the router probabilities $p_i$. Since $\partial \mathcal{L}_{\text{aux}} / \partial p_i \propto f_i$, the router is pushed to lower the probability of exactly those experts that are currently overloaded — the product $f_i \cdot p_i$ penalizes any expert with both high routing probability *and* high realized assignment. Because hard assignments track router probabilities in expectation ($f_i \approx k \cdot p_i$), the loss behaves like $\alpha N k \sum_i p_i^2$, and by Cauchy–Schwarz $\sum_i p_i^2 \geq 1/E$ with equality iff the distribution is uniform. The minimum, at $f_i = k/E$ and $p_i = 1/E$, gives $\mathcal{L}_{\text{aux}} = \alpha \cdot N \cdot k/E$.
 
 The coefficient $\alpha$ (typically $0.01$) controls the strength. Too high: model quality degrades (the loss dominates). Too low: imbalance persists. The $N$ factor normalizes across batch sizes.
 
@@ -873,4 +867,4 @@ The fundamental difference: 256 fine-grained experts naturally smooth the load d
 ---
 
 **Up the stack:** [Distributed_Training](../L7_Training_Stack/Distributed_Training.md), [Frontier_Models_2025_2026](Frontier_Models_2025_2026.md).
-**Down the stack:** [Transformer_Internals](Transformer_Internals.md), [Attention_Mechanisms](Attention_Mechanisms.md), [Cutting_Edge_Kernels](../L5_Kernels_and_Programming/Cutting_Edge_Kernels.md).
+**Down the stack:** [Transformer_Internals](Transformer_Internals.md), [Attention_Mechanisms](Attention_Mecha

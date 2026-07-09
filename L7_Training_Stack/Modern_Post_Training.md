@@ -361,13 +361,13 @@ where $\rho_i(\theta) = \pi_\theta(y_i \mid x) / \pi_{\theta_{\text{old}}}(y_i \
 
 PPO's value function $V_\psi$ is used to compute advantages via GAE (Section 2.2). GRPO replaces this by using the group statistics directly: the mean of group rewards serves as a baseline (analogous to $V(s)$), and the standard deviation normalizes the scale. This is a REINFORCE-with-baseline estimator where the baseline is the empirical group mean rather than a learned function.
 
-The variance reduction from group normalization is:
+The variance accounting: subtracting the sample mean of $G$ i.i.d. rewards gives the raw advantage $r_i - \bar{r}$ a variance of
 
 $$
-\text{Var}(\tilde{A}_i) = \frac{1}{G-1} \cdot \frac{\text{Var}(r)}{\text{Var}(r)} = \frac{1}{G-1}
+\text{Var}(r_i - \bar{r}) = \text{Var}(r) \cdot \left(1 - \frac{1}{G}\right),
 $$
 
-Wait — more precisely, the raw advantage $r_i - \bar{r}$ has variance $\text{Var}(r) \cdot (1 - 1/G)$. Normalizing by the sample std gives approximately unit variance. As $G$ increases, the group mean $\bar{r}$ converges to $\mathbb{E}[r]$, providing an increasingly accurate baseline.
+and dividing by the sample standard deviation $\sigma_G$ makes $\tilde{A}_i$ approximately unit-variance regardless of the reward scale. As $G$ increases, the group mean $\bar{r}$ converges to $\mathbb{E}[r]$, providing an increasingly accurate baseline — recovering the variance-reduction role of PPO's learned $V_\psi$ without training one.
 
 ### 8.4 GRPO for verifiable rewards
 
@@ -749,5 +749,4 @@ The critical difference is **exploration**: GRPO's on-policy sampling explores t
 - Hong et al., *ORPO: Monolithic Preference Optimization without Reference Model*, EMNLP 2024.
 - DeepSeek-AI, *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*, arXiv 2501.12948, 2025.
 - von Werra et al., *TRL: Transformer Reinforcement Learning Library*, GitHub, 2020–2026.
-- OpenRLHF Team, *OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework*, GitHub, 2024–2026.
-- ByteDance, *veRL: Volcano Engine Reinforcement Learning for LLM*, GitHub, 2025.
+- OpenRLHF Team, *OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Fra

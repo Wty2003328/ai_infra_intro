@@ -725,7 +725,7 @@ Benefits: reduces latency by ~30-50% and avoids the CPU memcpy overhead. The hos
 **SHARP (Scalable Hierarchical Aggregation and Reduction Protocol)** offloads AllReduce computation from GPU endpoints into the switch silicon. The hardware picture:
 
 - **Reduction engine in the switch ASIC**: SHARP-capable switches (NVIDIA Quantum-2/Quantum-XR InfiniBand; NVLink Switch for NVLink SHARP) contain dedicated ALUs that perform element-wise sum/max/min on packets in flight, forwarding only the reduced result.
-- **Traffic reduction**: each rank sends its buffer once up the tree and receives the result once — the switch absorbs the $N$-way combining, so wire traffic per rank drops from $2D(N{-}1)/N$ (ring) to $2D/N$ per link-level view, and the reduction latency no longer scales with rank count.
+- **Traffic reduction**: each rank sends its buffer once up the tree and receives the result once ($M$ up + $M$ down on a full-duplex link, vs. $2(N{-}1)$ serialized ring steps) — and the switch absorbs all $N$ contributions, forwarding a single reduced result, so inter-switch traffic per tree level drops from $O(N \cdot M)$ to $O(M)$ and reduction latency scales with tree depth, not rank count.
 - **Fixed-function precision**: the ASIC reduces in a fixed set of datatypes (FP32/FP16/BF16; sum/max/min only) — custom operators or exotic formats fall back to endpoint reduction.
 - **Topology constraint**: the aggregation tree must be embedded in the physical switch hierarchy; deep fat-trees need multi-level SHARP, and per-switch aggregation-group resources are finite (a shared, schedulable resource across jobs).
 
@@ -821,4 +821,4 @@ flowchart TD
 ---
 
 **Up the stack:** [Rack_Scale_Design](Rack_Scale_Design.md), [Storage_and_Model_Loading](Storage_and_Model_Loading.md), [Collectives_and_NCCL](../L7_Training_Stack/Collectives_and_NCCL.md).
-**Down the stack:** [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md), [Advanced_Packaging](../L1_Packaging_and_Memory/Advanced_Packaging.md), [Silicon_For_AI](../L0_Silicon_and_Process/Silicon_For_AI.md).
+**Down the stack:** [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md), [Advanced_Packaging](../L1_

@@ -376,6 +376,8 @@ $$
 
 ## 5. Transformer Engine: FP8 GEMM with delayed scaling
 
+> This section covers the FP8 delayed-scaling foundation. The TE v2 extension — FP6/FP4 support, MXFP block scaling, and per-tensor current scaling — is in [Modern_Quantization_Frontier](../L6_Algorithms_and_Models/Modern_Quantization_Frontier.md) §6.
+
 ### 5.1 Architecture overview
 
 Transformer Engine (TE) is NVIDIA's software library that manages mixed-precision GEMM operations, automatic precision selection, and fused kernels for Transformer training. TE wraps standard PyTorch modules (Linear, LayerNorm, softmax) and transparently handles precision management.

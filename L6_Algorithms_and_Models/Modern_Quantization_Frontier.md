@@ -251,6 +251,8 @@ $D_s$ is chosen so that $X' = X D_s^{-1}$ has reduced outlier magnitude (smoothe
 
 ## 6. Transformer Engine v2
 
+> The FP8 foundation TE v2 builds on — delayed scaling, amax history, and the FP8 GEMM training recipe — is in [Training_Optimization](../L7_Training_Stack/Training_Optimization.md) §5.
+
 ### 6.1 Architecture
 
 NVIDIA's Transformer Engine (TE) is the software layer that manages precision selection at runtime. TE v2 (2024–2025) extends beyond FP8 to support FP6 and FP4:
@@ -512,6 +514,8 @@ The fundamental limit is quality: BitNet is not yet competitive with FP8 or FP4 
 ---
 
 ## 10. Emerging Quantization Formats and KV-Cache Compression
+
+> Baseline KV-format tradeoffs — FP8 E4M3 vs INT8 vs INT4, native tensor-core paths vs dequant kernels, granularity — are in [Quantization](Quantization.md) §9.3; serving-side integration is in [Modern_KV_Compression](../L8_Inference_and_Serving/Modern_KV_Compression.md) §3.
 
 ### 10.1 TurboQuant 2-bit KV cache
 

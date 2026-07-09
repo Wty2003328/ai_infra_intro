@@ -230,6 +230,8 @@ NVIDIA acquired Groq for approximately $20 billion in March 2026, giving NVIDIA 
 
 The Rubin architecture, officially named **Vera Rubin** at GTC March 2026, pairs the Vera CPU with the Rubin GPU:
 
+> The microarchitectural lineage leading here — B100→B300 die configurations, NV-HBI, TMEM, and the NVL72→NVL576 scale-up path — is covered in [Blackwell_Architecture](Blackwell_Architecture.md), with the Rubin outlook in its §9.
+
 - **Confirmed specs**: TSMC 3NP dual-die, NVL576 interconnect, NVLink-6 at 3.6 TB/s unidirectional per-chip bandwidth.
 - **Memory**: 288 GB HBM4 per GPU, 22.0 TB/s memory bandwidth.
 - **Performance**: ~25 PFLOPS FP8 dense, ~50 PFLOPS FP4 dense (estimated).

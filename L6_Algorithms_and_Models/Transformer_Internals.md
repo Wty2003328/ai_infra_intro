@@ -144,6 +144,8 @@ Pre-norm creates a clean residual highway: the gradient flows through $\mathbf{x
 
 ## 4. Self-Attention Block
 
+> This section fixes the dimensions, projections, and FLOP accounting of the attention block. Variant-level treatment — MHA vs MQA vs GQA vs MLA tradeoffs, online softmax, KV-cache implications — lives in [Attention_Mechanisms](Attention_Mechanisms.md).
+
 ### 4.1 QKV projection
 
 Given normalized input $\mathbf{X} \in \mathbb{R}^{B \times S \times D}$:

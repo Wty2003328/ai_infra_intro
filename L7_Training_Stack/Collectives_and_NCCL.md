@@ -473,19 +473,11 @@ SHARP (Scalable Hierarchical Aggregation and Reduction Protocol) is an InfiniBan
 3. Intermediate switches aggregate results from child switches.
 4. The root switch holds the final result and broadcasts it back down the tree.
 
-**Bandwidth savings.** In a standard ring AllReduce, each link carries $2(N-1)/N$ copies of the full message. With SHARP, each GPU sends $M$ bytes *once* (to its leaf switch) and receives $M$ bytes *once* (from the tree). Total data moved per GPU:
+**Bandwidth savings.** In a ring AllReduce, each GPU sends and receives $\frac{2(N-1)}{N} \cdot M \approx 2M$ bytes spread over $2(N-1)$ serialized steps, so the effective AllReduce bandwidth saturates at $\frac{N}{2(N-1)} \cdot B \approx B/2$ per GPU. With SHARP, each GPU sends its $M$-byte contribution *once* (up to its leaf switch) and receives the reduced result *once* (down from the tree):
 
-$$V_{\text{SHARP}} = 2M \quad \text{vs.} \quad V_{\text{ring}} = \frac{2(N-1)}{N} \cdot M \cdot (N-1)$$
+$$V_{\text{SHARP, per GPU}} = M_{\uparrow} + M_{\downarrow} = 2M$$
 
-Wait — the per-GPU send volume for SHARP is $M/N$ bytes (each GPU sends its contribution to the reduction), not $M$. Actually:
-
-$$V_{\text{SHARP, per GPU}} = \frac{M}{N} + M = M \cdot \frac{N+1}{N}$$
-
-The switch absorbs $N-1$ of the $N$ contributions and only forwards the aggregated result. This reduces network traffic by:
-
-$$\text{Reduction ratio} = \frac{V_{\text{ring, per GPU}}}{V_{\text{SHARP, per GPU}}} = \frac{\frac{2(N-1)^2}{N}}{\frac{N+1}{N}} = \frac{2(N-1)^2}{N+1}$$
-
-For $N = 32$: ratio $= 2 \times 31^2 / 33 \approx 58$. SHARP reduces network traffic by ~58× for 32 ranks.
+The per-GPU byte count is comparable to the ring's, but the two transfers use opposite directions of a full-duplex link and overlap, so the operation completes in $\approx M/B$ instead of the ring's $\approx 2M/B$ — the asymptotic ~2× large-message speedup of §6's payoff table, independent of $N$. The structural wins compound from there: the switch absorbs all $N$ contributions and forwards a single reduced result, so inter-switch traffic per tree level drops from $O(N \cdot M)$ to $O(M)$; completion latency scales with tree depth $O(\log N)$ rather than ring steps $O(N)$; and no GPU SMs are spent on the reduction arithmetic.
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -662,15 +654,9 @@ Fusion saves $189 / 4.86 = 38.9\times$.
 
 $$\text{Throughput}_{\text{healthy}} \approx \frac{900}{2} \times \frac{8}{7} \approx 514\text{ GB/s}$$
 
-**Degraded topology:** The ring must traverse one PCIe link (63 GB/s) between GPUs 3 and 4. The ring throughput is bounded by the slowest link:
-
-$$\text{Throughput}_{\text{degraded}} \approx \frac{63}{2} \times \frac{8}{7} \approx 36\text{ GB/s}$$
-
-Wait — this is the ring throughput limited by the PCIe bottleneck. Actually, the ring throughput is:
+**Degraded topology:** The ring must traverse one PCIe link (63 GB/s) between GPUs 3 and 4, and every chunk passes over every link, so ring throughput is set by the slowest link $B_{\text{min}}$:
 
 $$\text{Throughput}_{\text{ring}} = \frac{M}{T_{\text{ring}}} = \frac{M}{\frac{2(N-1)}{N} \cdot \frac{M}{B_{\text{min}}}} = \frac{N \cdot B_{\text{min}}}{2(N-1)}$$
-
-where $B_{\text{min}}$ is the bandwidth of the slowest link in the ring:
 
 $$\text{Throughput}_{\text{degraded}} = \frac{8 \times 63}{14} \approx 36\text{ GB/s}$$
 
@@ -696,4 +682,5 @@ Degradation factor: $514 / 36 = 14.3\times$. A single bad NVLink cable reduces A
 **Cross-references**
 - [Networking_and_Interconnect](../L4_Systems_and_Interconnects/Networking_and_Interconnect.md) — InfiniBand, NVLink, and topology primitives.
 - [Rack_Scale_Design](../L4_Systems_and_Interconnects/Rack_Scale_Design.md) — how NVLink domains map to physical rack layout.
-- [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) — NVLink and NVSwitch within t
+- [GPU_Architecture](../L3_Microarchitecture/GPU_Architecture.md) — NVLink and NVSwitch within the GPU system.
+- [Parallelism_Strategies](Parallelism_Strategies.md) — which para

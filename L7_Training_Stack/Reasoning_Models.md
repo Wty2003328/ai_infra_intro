@@ -506,23 +506,17 @@ flowchart TD
 
 ### Problem 1: KV Cache Capacity Planning for Reasoning
 
-**Question.** You serve DeepSeek-R1 on 8xH100 (80 GB HBM each) with tensor parallelism TP=8. Each GPU holds an equal share of weights (~84 GB FP8 weights + non-weight state = ~90 GB used). How many concurrent reasoning requests can you support at a thinking length of 20,000 tokens (with $T_{\text{prompt}} = 2{,}000$)?
+**Question.** You want to serve DeepSeek-R1 (671 B parameters, FP8) with tensor parallelism TP=8 at a thinking length of 20,000 tokens (with $T_{\text{prompt}} = 2{,}000$). Does the model fit on 8xH100 (80 GB HBM each)? If not, size the deployment on 8xB200 (192 GB each) and compute the concurrent-request capacity.
 
-**Solution.** Available HBM per GPU for KV cache:
+**Solution.** *Step 1 — weight fit.* With TP=8, each GPU holds $671\text{B} \times 1\,\text{B (FP8)} / 8 \approx 84$ GB of weights — more than an H100's 80 GB before any KV or activation memory. 8xH100 cannot host R1 in FP8 without offloading; move to B200.
 
-$$\text{HBM}_{\text{available}} = 80 - 90/8 = 80 - 11.25 \approx 68.75 \text{ GB}$$
+*Step 2 — KV budget per GPU (B200).* Available for KV cache: $192 - 84 = 108$ GB.
 
-Wait -- with TP=8, the weights are sharded across 8 GPUs. Each GPU holds $671\text{B} \times 1\text{B (FP8)} / 8 \approx 84$ GB of weights. That exceeds the 80 GB HBM. We need FP8 quantization plus some offloading, or use B200 (192 GB). Let us recalculate for B200:
-
-Each B200 GPU holds $\approx 84$ GB of FP8 weights. Available for KV cache: $192 - 84 = 108$ GB.
-
-KV cache per request (MLA, $d_c = 512$, $L = 61$):
+*Step 3 — KV per request.* With MLA, the cache is the latent $c_{\text{KV}}$ ($d_c = 512$, $L = 61$), stored once per layer and shared across all heads (each head reconstructs its K/V locally); under TP the latent cache is replicated on every rank:
 
 $$\text{KV}_{\text{per-req}} = 2 \cdot 61 \cdot 512 \cdot (2{,}000 + 20{,}000) \cdot 2\,\text{B} = 2.75 \text{ GB}$$
 
-With TP=8, the KV cache is replicated (each GPU needs the full KV for its shard of attention heads). Actually, with MLA, the KV cache is the latent $c_{\text{KV}}$, and each attention head reconstructs its K/V locally. The latent KV cache is shared across heads, so it is stored once per layer, not per head.
-
-Maximum concurrent requests:
+*Step 4 — capacity.*
 
 $$N_{\text{max}} = \frac{108 \text{ GB}}{2.75 \text{ GB/req}} \approx 39 \text{ requests}$$
 
