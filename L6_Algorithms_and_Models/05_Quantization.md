@@ -1009,4 +1009,6 @@ This is precisely the motivation for SmoothQuant: instead of choosing between ba
 
 ---
 
-**Up the stack:** [Modern_Quantization_Frontier](06_Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Tra
+**Up the stack:** [Modern_Quantization_Frontier](06_Modern_Quantization_Frontier.md) — FP8, FP4, NVFP4, Transformer Engine v2, and the 2025–2026 low-bit frontier. [KV_Cache](../L8_Inference_and_Serving/01_KV_Cache.md) — KV-cache quantization in production serving.
+
+**Down the stack:** [FP_Unit_Design](../L2_Digital_Design_for_AI/02_FP_Unit_Design.md) — the hardware that implements FP16/FP8/INT8/FP4 arithmetic. [Transformer_Internals](01_Transformer_Internals.md) — where the quantized matmuls live.

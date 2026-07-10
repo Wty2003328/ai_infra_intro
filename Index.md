@@ -229,4 +229,12 @@ These numbers come up constantly. Burn them into memory before an interview.
 | Kimi K2.6 Intelligence Index | 54 | Highest-ranked open-weights |
 | Typical TTFT SLO (chat) | <500 ms | Interactive UX |
 | Typical TPOT SLO (chat) | <50 ms | Smooth streaming |
-| Reasoning-mode output length (heavy) | 30K–100K tokens | KV pool si
+| Reasoning-mode output length (heavy) | 30K–100K tokens | KV pool sizing target |
+| GRPO sample group K | 8–64 | Per-prompt rollouts |
+| Mooncake-style cluster prefix hit rate | ~80% | Multi-replica chat workloads |
+| Cerebras WSE-3 die area | 46,225 mm² (full wafer) | Wafer-scale compute |
+| Cerebras IPO date | May 15, 2026 | Public market milestone |
+
+---
+
+*Last updated: May 2026.*

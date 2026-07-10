@@ -107,3 +107,5 @@ Updated June 2026: TPU 8t/8i, NVIDIA Vera Rubin / Rubin CPX, AMD MI455X "Altair"
 The digital IC design / hardware content was split out into its own repository (with git history preserved) — the Silicon Design Notebook.
 
 ## License
+
+[MIT](LICENSE) — use freely for study, interview prep, or teaching.

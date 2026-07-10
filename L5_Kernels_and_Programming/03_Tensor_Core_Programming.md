@@ -715,7 +715,7 @@ cluster_reduce(float *input, float *output, int n) {
     // Step 1: Local block reduction (standard SMEM tree reduction)
     //     Each thread loads input elements, then sequential-addressing
     //     reduction in SMEM down to partial[0] = block's local sum.
-    //     (See the reduction case study in [CUDA_Optimization](CUDA_Optimization.md) for the full optimized pattern.)
+    //     (See the reduction case study in [CUDA_Optimization](02_CUDA_Optimization.md) for the full optimized pattern.)
 
     // Step 2: Cluster-wide exchange
     cg::sync(cluster);  // all blocks have completed local reduction

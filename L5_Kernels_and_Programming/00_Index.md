@@ -47,4 +47,9 @@ L5 explicitly does **not** cover chip architecture (→ L3), network topology (�
 
 ## Reading order
 
-Top-down for orientation: skim this Index → FlashAtten
+Top-down for orientation: skim this Index → FlashAttention_Deep_Dive for the canonical algorithm → back to CUDA_Programming for fundamentals.
+
+Strict bottom-up for depth: CUDA_Programming → CUDA_Optimization → Tensor_Core_Programming → Triton_and_Kernels → FlashAttention_Deep_Dive → Cutting_Edge_Kernels → ML_Compilers.
+
+After this layer, ascend to [L6 — Algorithms & Models](../L6_Algorithms_and_Models/00_Index.md) where kernels become model architectures.
+
