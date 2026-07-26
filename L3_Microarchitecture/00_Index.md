@@ -21,7 +21,7 @@ L3 explicitly does **not** cover system / rack-scale interconnects (→ L4), ker
 ## Pages (read in order)
 
 1. [ISA_and_Execution_Model](01_ISA_and_Execution_Model.md) — what code looks like at the hardware boundary. Foundational; every later page assumes this.
-2. [GPU_Architecture](02_GPU_Architecture.md) — the canonical SIMT chip (Hopper SM as reference). Reads like the textbook GPU.
+2. [GPU_Architecture](02_GPU_Architecture.md) — the canonical SIMT chip in one complete chapter: host/front end, GPC/TPC/SM hierarchy, CUDA kernel/grid/block/warp/thread mapping, registers/shared memory/caches/GMMU/NoC/L2/controllers/HBM, tensor cores, and generation-specific features.
 3. [Memory_Hierarchy_and_Roofline](03_Memory_Hierarchy_and_Roofline.md) — the analytical framework that predicts throughput on every chip below. **Memorize the ridge-point math here.**
 4. [Blackwell_Architecture](04_Blackwell_Architecture.md) — the 2025–2026 frontier NVIDIA part. Specialization of the GPU page with FP4/MX, TMEM, NV-HBI, NVL72.
 5. [AMD_Instinct](05_AMD_Instinct.md) — CDNA 3 → CDNA 4 → CDNA-Next. Chiplet vs monolithic; xGMI vs UALink.
@@ -56,4 +56,3 @@ Top-down for orientation: skim Index → `Accelerator_Landscape_2026` for contex
 Strict bottom-up for depth: ISA → GPU → Roofline → Blackwell → others → Landscape.
 
 After this layer, ascend to [L4 — Networking & Interconnects](../L4_Systems_and_Interconnects/00_Index.md) where chips become racks.
-

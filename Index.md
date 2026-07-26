@@ -39,7 +39,7 @@ Three layers of preparation are interwoven:
 ## L3 — Microarchitecture
 
 8. [ISA and Execution Model](L3_Microarchitecture/01_ISA_and_Execution_Model.md) — PTX/SASS, warp scheduling, instruction pipeline, latency/throughput tables, divergence, SIMT vs VLIW vs spatial dataflow.
-9. [GPU Architecture](L3_Microarchitecture/02_GPU_Architecture.md) — SM internals, tensor cores, Hopper/Blackwell specifics, execution model, Hopper Threadblock Clusters / DSMEM.
+9. [GPU Architecture](L3_Microarchitecture/02_GPU_Architecture.md) — complete host/front-end/GPC/SM/NoC/L2/GMMU/memory-controller/HBM hierarchy; precise CUDA kernel/grid/block/cluster/warp/thread and memory mapping; SM internals, tensor cores, Hopper/Blackwell specifics, and Threadblock Clusters / DSMEM.
 10. [Memory Hierarchy and Roofline](L3_Microarchitecture/03_Memory_Hierarchy_and_Roofline.md) — HBM, SRAM, registers, TMEM, arithmetic intensity, the roofline model, ridge-point math, multi-chip roofline comparisons.
 11. [Blackwell Architecture](L3_Microarchitecture/04_Blackwell_Architecture.md) — B100/B200/B300/GB200/GB300 (128 SMs confirmed), NVLink-5, NVL72/NVL576, TMEM, FP4 hardware, Vera Rubin R100 announced at GTC March 2026, NVLink-6, Rubin Ultra quad-die outlook.
 12. [AMD Instinct](L3_Microarchitecture/05_AMD_Instinct.md) — CDNA 3/4/Next, MI300/MI350/MI400 "Altair" (432 GB HBM4, TSMC N2), Helios rack architecture, UALink, Infinity Fabric, ROCm 7 compute model, ROCm kernel optimization.
