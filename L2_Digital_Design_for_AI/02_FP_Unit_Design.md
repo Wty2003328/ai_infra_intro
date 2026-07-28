@@ -93,7 +93,7 @@ Berkeley HardFloat uses a recoded/internal form so subnormals enter arithmetic a
 #### 1.1.3 One universal operation shell
 
 ```mermaid
-flowchart LR
+flowchart TB
     IN["packed operands"]:::io --> UC["unpack + classify<br/>hidden bit; signed exponent"]:::ctl
     UC --> CORE["operation core<br/>add / mul / FMA / iterative"]:::core
     CORE --> NR["normalize<br/>LZC/LZA + barrel shift"]:::norm
@@ -540,7 +540,7 @@ A wide `P32 × P32` multiplier does not become four useful FP8 lanes merely beca
 An integer CLA can add only bits with the same weight. FP operands generally have different exponents, so the smaller significand's binary point must move before the CLA sees it.
 
 ```mermaid
-flowchart LR
+flowchart TB
     U["unpack + classify"]:::ctl --> CMP["magnitude compare;<br/>swap so |A| ≥ |B|"]:::ctl
     CMP --> DE["ΔE = E_A - E_B<br/>(small CLA)"]:::int
     DE --> AL["right-align B;<br/>discarded-tail/sticky network"]:::shift
@@ -1293,7 +1293,7 @@ $$
 Hardware per iteration:
 
 ```mermaid
-flowchart LR
+flowchart TB
   RR["carry-save remainder<br/>(sum, carry)"] --> EST["take leading bits<br/>of R and D"]
   EST --> QT["quotient-digit table<br/>q ∈ {-2,-1,0,1,2}"]
   QT --> SEL["select 0, ±D, ±2D"]

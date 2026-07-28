@@ -62,7 +62,7 @@ Use FO4 to reject obviously deep architectures and compare prefix/tree choices. 
 A scalar FMA contains several independently placeable cuts. One candidate—not a universal latency—is:
 
 ```mermaid
-flowchart LR
+flowchart TB
     R0["R0<br/>request + mode/tag"] --> C0["classify/unpack;<br/>sign and exponent prep"]
     C0 --> R1["R1<br/>raw operands"]
     R1 --> C1["Booth rows +<br/>early compression"]
@@ -196,7 +196,7 @@ Do not infer one of these from “multi-die GPU.” The package link specificati
 ### 2.2 The phase interpolator + elastic FIFO
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph TX["source die / PHY"]
         TXFF["launch registers"] --> STRIPE["lane striping +<br/>forwarded clock/strobe"]
     end
@@ -324,12 +324,14 @@ The precise proprietary placement is generation-specific. A reconstructable repr
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 45, "htmlLabels": false}}}%%
-flowchart LR
+flowchart TB
     subgraph SW["Software-visible state"]
+        direction TB
         TD["Tensor-map descriptor<br/>base, rank, extents, strides,<br/>element size, swizzle, OOB policy"]
         INS["PTX/SASS bulk-copy launch<br/>coordinates, direction, barrier"]
     end
     subgraph SM["SM-side hardware"]
+        direction TB
         DEC["Instruction decode<br/>scope and completion mode"]
         CQ["Copy command queue<br/>context, barrier, bytes expected"]
         AGU["Nested-loop AGUs<br/>bounds + address generation"]
@@ -341,6 +343,7 @@ flowchart LR
         MB["mbarrier / async-group<br/>transaction accounting"]
     end
     subgraph MEM["Global-memory path"]
+        direction TB
         NI["SM memory network interface"]
         L2["Distributed L2 slices"]
         MC["Memory controllers"]
@@ -430,13 +433,14 @@ For shared→global reuse:
 
 ```mermaid
 sequenceDiagram
-    participant P as Producer threads (generic proxy)
+    participant P as Producer threads
     participant B as Shared mbarrier
-    participant T as Tensor copy engine (async proxy)
+    participant T as Tensor copy engine
     participant C as Consumer threads
     P->>B: initialize barrier
+    Note over P,T: generic-proxy to async-proxy hand-off
     P->>T: proxy fence makes initialization visible
-    P->>T: launch copy; register expected bytes
+    P->>T: launch copy and register expected bytes
     T->>T: generate addresses and move sectors
     T->>B: decrement transaction bytes as data arrives
     C->>B: arrive and wait for phase
@@ -494,7 +498,7 @@ only when $S$ buffered stages plus outstanding capacity cover copy latency and t
 Device-level copy engines use the same core mechanisms at larger scope:
 
 ```mermaid
-flowchart LR
+flowchart TB
     RING["Runtime/driver command ring"] --> DF["Descriptor fetch + validation"]
     DF --> CS["Channel scheduler"]
     CS --> AG["1D/2D/scatter-gather AGU"]
@@ -608,7 +612,7 @@ Coalescing happens before or at the NI: active warp lanes that touch the same ca
 ### 4.3 Router datapath in hardware
 
 ```mermaid
-flowchart LR
+flowchart TB
     RX["Input link<br/>framing + ECC/CRC"] --> IB["Input buffers<br/>port × virtual channel"]
     IB --> RC["Route computation"]
     RC --> VA["Downstream-VC allocation"]
@@ -748,7 +752,7 @@ Test single-router exhaustively where practical, then multi-router backpressure,
 An inter-chip operation traverses two on-die networks plus boundary hardware:
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph GA["GPU/accelerator A"]
         SM["SM/TMA/DMA"] --> NIA["NoC NI<br/>coalesce, ID, order"]
         NIA --> PA["Inter-chip protocol adapter<br/>remote read/write/atomic/message"]
