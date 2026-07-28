@@ -13,9 +13,9 @@ The previous three L2 pages gave you the *building blocks*: memory cells, FP uni
 1. Pipelining and timing closure ($f_{\max}$ derivations, FO4 budget).
 2. Clock-domain crossing (CDC), which becomes mandatory at multi-die scale.
 3. Async copy engines (TMA-style) — the magic that decouples HBM latency from compute.
-4. Network-on-chip (NoC) topology and routing math.
+4. Interconnects from on-die NoC through inter-chip protocol/link/PHY and switched fabrics.
 5. Clock and power gating — the only way to keep TDP within thermal budget.
-6. Verification reality: why formal tools work for arithmetic but fail for FSM interactions, why errata exists.
+6. Verification and RAS: how local formal proofs, constrained-random testing, emulation, fault injection, and silicon observability cover different failure classes.
 
 Read the prior three L2 pages first; this one assumes them.
 
@@ -25,63 +25,93 @@ Read the prior three L2 pages first; this one assumes them.
 
 ### 1.1 The fundamental clock-period equation
 
-For a synchronous pipeline stage, the minimum clock period is
+For one register-to-register setup path, a conservative budget is
 
 $$
-T_{\text{clk}} \;\ge\; t_{c\to q} + t_{\text{logic}} + t_{\text{setup}} + t_{\text{skew}}
+T_{\text{clk}}
+\ge
+t_{c\to q}^{\max}
++t_{\text{comb}}^{\max}
++t_{\text{setup}}
++t_{\text{uncertainty}}
++t_{\text{margin}}.
 $$
 
-- $t_{c\to q}$: clock-to-Q delay of the source flip-flop, typically 30–60 ps at TSMC N4.
-- $t_{\text{logic}}$: combinational delay through the stage's logic (the variable you control).
-- $t_{\text{setup}}$: setup time of the destination flip-flop, ~30–50 ps.
-- $t_{\text{skew}}$: clock-distribution skew between source and destination clocks, ~20–60 ps depending on clock-tree quality.
+- $t_{c\to q}^{\max}$ and $t_{\text{setup}}$ come from the selected sequential cell at the signoff PVT/load/slew condition.
+- $t_{\text{comb}}^{\max}$ includes cell and extracted wire delay through the actual muxes, arithmetic, buffers, and fanout.
+- $t_{\text{uncertainty}}$ covers the signoff treatment of jitter and clock-arrival uncertainty.
+- $t_{\text{margin}}$ represents the project's variation/aging/guard-band methodology when it is not already embedded in derates and libraries.
 
-Total flip-flop overhead is usually budgeted at **~100 ps**. At a 2 GHz target ($T_{\text{clk}} = 500$ ps), the usable logic budget is **~400 ps**.
+Clock skew is not always a positive constant added to every path: launch/capture arrival difference can help one setup path while hurting another and has the opposite effect on hold. Static timing analysis uses propagated clock trees and the selected analysis mode; an architecture spreadsheet may reserve a conservative uncertainty before CTS.
+
+For an **illustrative** 2 GHz target, $T_{\text{clk}}=500$ ps. If characterized sequential overhead, uncertainty, and margin consume 120 ps in one selected corner/mode, about 380 ps remains for extracted combinational delay. Change the cell library, voltage, corner, clock strategy, or load and that number changes. Never copy a picosecond budget from another chip.
 
 ### 1.2 The FO4 unit
 
-Process-independent timing reasoning uses **FO4** — the delay of an inverter driving four identical inverters. Key process-node FO4s:
+FO4 is the delay of an inverter driving four identical inverters. It is useful for comparing logical depth before a cell library and layout exist, but it is not a foundry timing guarantee:
 
-| Node | FO4 (ps) |
-|---|---|
-| TSMC N7 | ~10 |
-| TSMC N5 | ~7 |
-| TSMC N4P | ~6 |
-| TSMC N3E | ~5 |
-| TSMC N2 (proj.) | ~4.2 |
+- a real gate has input slew, output load, threshold-voltage choice, fanout, and wire RC;
+- a barrel shifter and prefix adder are routing structures as much as logic-depth structures;
+- a flip-flop's clock-to-Q/setup/clock power is not captured by counting combinational FO4;
+- process names do not define one universal FO4 number.
 
-A 400 ps logic budget at N4 = ~67 FO4 of usable depth. This is why combinational structures with deep paths (24-bit CPA, FP32 alignment shifter) must be pipelined into multiple stages.
+Use FO4 to reject obviously deep architectures and compare prefix/tree choices. Use synthesis with characterized libraries for the next cut, then placement, clock-tree synthesis, extraction, and MCMM STA for signoff. A statement such as “this FMA stage is 10 FO4” is incomplete without the topology, load, and wire assumption.
 
 ### 1.3 Pipelining a deep MAC
 
-A purely combinational FP32 FMA exceeds 50 FO4 (multiply tree + alignment + CPA + LZA + normalize + round). At N4 (~6 ps/FO4), that's ~300 ps — already past the 400 ps logic budget at 2 GHz, with no margin for variation.
-
-Solution: pipeline. For a 5-stage pipeline:
+A scalar FMA contains several independently placeable cuts. One candidate—not a universal latency—is:
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    IN[FFin]:::ff
-    S1[Stage 1<br/>multiply Wallace tree<br/>~10 FO4]:::stage
-    F1[FF1]:::ff
-    S2[Stage 2<br/>partial-product reduction<br/>~10 FO4]:::stage
-    F2[FF2]:::ff
-    S3[Stage 3<br/>align + CPA<br/>~12 FO4]:::stage
-    F3[FF3]:::ff
-    S4[Stage 4<br/>LZA + normalize shift<br/>~8 FO4]:::stage
-    F4[FF4]:::ff
-    S5[Stage 5<br/>round + repack<br/>~6 FO4]:::stage
-    OUT[FFout]:::ff
-    IN --> S1 --> F1 --> S2 --> F2 --> S3 --> F3 --> S4 --> F4 --> S5 --> OUT
-    classDef ff fill:#fbcfe8,stroke:#9d174d,color:#000
-    classDef stage fill:#bbf7d0,stroke:#15803d,color:#000
+flowchart LR
+    R0["R0<br/>request + mode/tag"] --> C0["classify/unpack;<br/>sign and exponent prep"]
+    C0 --> R1["R1<br/>raw operands"]
+    R1 --> C1["Booth rows +<br/>early compression"]
+    C1 --> R2["R2<br/>carry-save product rows"]
+    R2 --> C2["finish compression;<br/>compare/align C"]
+    C2 --> R3["R3<br/>aligned rows + tail state"]
+    R3 --> C3["carry-save merge;<br/>final CPA + LZA"]
+    C3 --> R4["R4<br/>sum + predicted shift"]
+    R4 --> C4["normalize/correct;<br/>GRS + round/range"]
+    C4 --> R5["R5<br/>packed result + flags/tag"]
 ```
 
-Each stage now has ~10 FO4 of logic + 4 FO4 of FF overhead = ~14 FO4 ≈ 84 ps at N4 — well under the 500 ps budget at 2 GHz. Cost: 5-cycle execution latency per FMA. The warp scheduler must issue independent FMAs to keep the pipeline full (covered in [L3 GPU_Architecture](../L3_Microarchitecture/00_Index.md)).
+Each register stores arithmetic state **and** class bits, format, rounding mode, pending flags, destination tag, valid, and kill. Carry-save cuts store two rows with a documented carry-bit weight. The $C$ aligner carries signed-tail/correction state needed for correct subtraction and final rounding.
+
+Partition using timing reports:
+
+1. synthesize an initial RTL cut with realistic mode muxes and constraints;
+2. inspect worst paths and total negative slack, not only arithmetic depth;
+3. split a compressor level, aligner, CPA/LZA, or normalize/round boundary where physical paths are long;
+4. retime only when sideband/valid/kill movement remains functionally equivalent;
+5. place and route, then repeat with extracted wires and clock uncertainty.
+
+The initiation interval can be one even when latency is five or seven cycles: a new independent FMA enters each cycle and each stage works on a different tag. A dependency chain still waits for result availability or forwarding, so the warp scheduler needs independent instructions/warps to cover latency.
 
 ### 1.4 The pipeline-vs-area tradeoff
 
-Each pipeline boundary inserts $\sim 24 \cdot N_{\text{bits}}$ flip-flops (sum + carry vectors at FP32 = 50 bits → ~1 200 FFs per boundary). At ~10 NAND2-equivalent area per FF, a 5-stage FMA carries ~6 000 NAND2 of pipeline overhead — already comparable to the multiplier itself. Pipelining beyond ~6 stages costs more area than the combinational logic it splits up. This is the practical ceiling: **you can't just keep pipelining to push $f_{\max}$ higher**.
+Count the actual registered bits at each cut:
+
+$$
+N_{\text{state bits}}
+=\sum_i
+\left(
+W_{\text{data},i}
++W_{\text{control},i}
++W_{\text{tag},i}
++W_{\text{valid/kill},i}
+\right).
+$$
+
+For a carry-save product cut, `data` can include two wide rows; another cut may hold aligned $C$, exponent state, LZA inputs, and tail metadata. There is no valid shortcut such as “24 flip-flops per datapath bit.” Map the chosen registers to the actual standard-cell library and include:
+
+- data and clock-pin capacitance;
+- clock-tree buffers and local skew constraints;
+- scan mux/cell overhead;
+- enable/hold muxes for elastic stages;
+- extra bypass/forwarding latency in the execution cluster;
+- placement area and wide-bus routing.
+
+More stages can raise frequency until register overhead, unbalanced logic, routing, clock power, or a feedback loop dominates. There is no universal five- or six-stage ceiling. An iterative accumulator feedback path, for example, must complete within its recurrence interval unless the algorithm is transformed; independent feed-forward compressor levels can be pipelined more freely.
 
 ---
 
@@ -102,11 +132,11 @@ $$
 Two facts make hold the scarier of the pair:
 
 - **It is frequency-independent.** You cannot fix a hold violation by slowing the clock — a hold failure is a race between data and clock at *one* edge. A chip that fails hold is simply broken at any frequency.
-- **It fails on short/fast paths at the *fast* corner** (opposite of setup, which fails on long paths at the slow corner). The fix is to *add* delay — insert buffers ("hold-fixing padding") on the offending fast paths. A modern block can spend a few percent of its cells purely on hold buffers, and positive clock skew toward the capture flop directly eats hold margin.
+- **It fails on minimum-delay paths.** A fast-process/high-voltage corner is often important, but the actual worst analysis also depends on temperature inversion, RC corner, clock derates, and propagated skew. Fixes add controlled data delay, change cells/routing, or adjust the clock tree while rechecking setup; positive capture skew that helps setup can hurt hold.
 
 ### 1b.2 The clock tree (CTS)
 
-A 2 GHz edge has to arrive at millions of flip-flops with minimal **skew** (spatial arrival mismatch) and **jitter** (cycle-to-cycle temporal wander). The distribution network is built by **clock-tree synthesis (CTS)**, which inserts balanced buffers so every leaf sees nearly the same **insertion delay** (root-to-leaf latency, tens of ps to >100 ps):
+A high-rate clock must reach a large sequential load with controlled **skew** (spatial arrival mismatch), slew, insertion delay, duty cycle, and jitter. **Clock-tree synthesis (CTS)** inserts and routes clock cells to satisfy those limits under the selected modes/corners:
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 40, "htmlLabels": false}}}%%
@@ -131,15 +161,15 @@ flowchart TB
 
 - **H-tree**: a balanced binary tree — naturally low skew, moderate power.
 - **Clock mesh/grid**: straps that short the leaves together — near-zero skew but high power (the whole mesh switches every cycle). Frontier CPUs/GPUs use a mesh on the top level for the tightest skew.
-- The clock network alone burns **~30% of dynamic power** — which is exactly why clock gating (§5.1) targets it first.
+- The clock network and clocked state can consume a large share of dynamic power because they switch every active cycle. Measure the share from the implemented clock tree and activity; this is why clock gating (§5.1) is a first-class design feature.
 
 ### 1b.3 Useful skew, time borrowing, and retiming
 
-Zero skew is not actually optimal. **Useful skew** *deliberately* delays a capture clock to hand a too-slow stage some of the next stage's slack (clock-skew scheduling). Latch-based pipelines do the analog automatically — **time borrowing**, where a transparent latch lets a fast stage lend slack to a slow neighbor. And **retiming** (Leiserson–Saxe) moves registers *across* combinational logic without changing what the circuit computes — like re-spacing mile-markers so no single stretch is too long — so synthesis can even out the lumpy FMA stages of §1.3 (if stage 3 is the slow one, push a register earlier to hand it some of stage 2's time). These three levers win the last 10–15% of $f_{\max}$ after raw pipelining runs out.
+Zero skew is not automatically optimal. **Useful skew** deliberately changes capture arrival to trade setup slack between neighboring stages while respecting hold. Latch-based pipelines allow **time borrowing**, where a transparent phase lets a slow stage use part of the next stage's time. **Retiming** moves registers across combinational logic without changing the cycle-level function when its legality conditions hold. These can balance lumpy FMA stages, but their benefit is design- and constraint-dependent; they also move hold, test, enable, and sideband-control obligations.
 
 ### 1b.4 Signoff: multi-corner, multi-mode (MCMM)
 
-You never close timing *once*. Silicon must work across **process** (slow/typical/fast — SS/TT/FF), **voltage** (Vmin…Vmax), **temperature** (−40 … 125 °C), and RC-extraction corners — the **MCMM** matrix. The rules of thumb:
+Timing must close across the product's required **process**, **voltage**, **temperature**, RC-extraction, and functional/test modes—the **MCMM** matrix. The rules of thumb:
 
 - **Setup signs off at the slow corner**, **hold at the fast corner** — you must pass *both* simultaneously.
 - **Temperature inversion**: at the low voltages AI chips run (§L0), cells get *slower when cold*, inverting the classic assumption — so both temperature extremes must be checked for *both* setup and hold.
@@ -151,94 +181,104 @@ You never close timing *once*. Silicon must work across **process** (slow/typica
 
 ### 2.1 The mesochronous problem
 
-A multi-die GPU (e.g., B200 with two dies bridged by NV-HBI) runs both dies at nominally 2 GHz. But:
+A die-to-die boundary can use several clock contracts:
 
-- Each die has its own PLL, so frequencies match to ±100 ppm but phase relationship is unknown.
-- Voltage droop, thermal drift, and routing delay over the 5–10 mm bridge introduce sub-cycle phase wandering.
-- Time-of-flight across the bridge is ~50 ps — already 25% of a 2 GHz cycle.
+| Contract | Frequency relation | Receiver hardware |
+|---|---|---|
+| common synchronous clock | same distributed clock with bounded skew | ordinary STA if the complete cross-die clock/data path is timed |
+| source-synchronous/forwarded clock | transmitter sends clock/strobe with data | input sampling phase training, lane deskew, then transfer into core clock |
+| mesochronous | same frequency, unknown phase | phase aligner and/or elastic buffer |
+| plesiochronous | nominally close frequencies that can slip | elastic/async FIFO sized for frequency offset and service interval |
+| asynchronous | no bounded relation | synchronizers for controls; handshake or async FIFO for data |
 
-Sending data across this boundary requires explicit synchronization. **Mesochronous** = same nominal frequency, unknown drifting phase. Sub-classes:
-
-- **Synchronous:** same clock signal physically distributed → trivial.
-- **Mesochronous:** same frequency, fixed phase offset → easy (delay-line tune).
-- **Plesiochronous:** very-close-but-not-equal frequencies → needs occasional FIFO drain.
-- **Asynchronous:** unrelated frequencies → expensive synchronizers.
-
-NV-HBI is mesochronous-with-phase-drift; the receiver needs phase tracking but not full-blown async sync.
+Do not infer one of these from “multi-die GPU.” The package link specification must define clock source, maximum frequency offset/drift, lane skew, training, reset order, and whether the receive clock is related to the destination core clock. Vendor products can use proprietary mechanisms not publicly specified.
 
 ### 2.2 The phase interpolator + elastic FIFO
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    subgraph TX[Die A — transmitter]
-        direction TB
-        TXFF[Source FF<br/>clk_A]:::ff
-        TXDR[Driver]:::drv
-        TXFF --> TXDR
+flowchart LR
+    subgraph TX["source die / PHY"]
+        TXFF["launch registers"] --> STRIPE["lane striping +<br/>forwarded clock/strobe"]
     end
-    subgraph LINK[NV-HBI bridge<br/>~5–10 mm silicon trace<br/>~50 ps ToF]
-        TXDR -. signal .-> RXAMP
+    STRIPE --> CH["package channel"]
+    subgraph RXPHY["destination receive PHY"]
+        CH --> SAMP["samplers + delay/phase adjust"]
+        SAMP --> DESKEW["lane alignment / deskew FIFOs"]
+        DESKEW --> EL["elastic buffer"]
     end
-    subgraph RX[Die B — receiver]
-        direction TB
-        RXAMP[RX amplifier]:::drv
-        PI[Phase interpolator<br/>steps clk_B in 10 ps increments]:::pi
-        RXFF["Sample FF<br/>clk_B' (PI-adjusted)"]:::ff
-        FIFO[Elastic FIFO<br/>4–8 entries<br/>write w/ clk_B'<br/>read w/ clk_B core]:::fifo
-        CORE[Die B core logic<br/>clk_B native]:::core
-        RXAMP --> RXFF
-        PI --> RXFF
-        RXFF --> FIFO --> CORE
+    subgraph CORE["destination core domain"]
+        EL --> CDC["defined CDC boundary"]
+        CDC --> EP["protocol endpoint"]
     end
-    classDef ff fill:#fbcfe8,stroke:#9d174d,color:#000
-    classDef drv fill:#fde68a,stroke:#b45309,color:#000
-    classDef pi fill:#bae6fd,stroke:#0369a1,color:#000
-    classDef fifo fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef core fill:#c7d2fe,stroke:#4338ca,color:#000
 ```
 
-How it works:
+One possible receive implementation:
 
-1. **Phase interpolator (PI):** a mixed-signal block that mixes two phase-shifted clocks (e.g., 0° and 90°) in continuous proportion to produce an arbitrary phase $\phi \in [0, 360°)$. Resolution typically 16–64 phase steps per cycle.
-2. **Per-pin training:** at boot, a pseudo-random pattern is sent. The receiver sweeps the PI across phase, sampling each setting and measuring bit-error rate (BER). The sweep finds the *phase that centers the eye*.
-3. **Elastic FIFO:** writes occur on the PI-adjusted sample clock; reads occur on the receiver's native core clock. The FIFO depth (4–8 entries) absorbs the small phase drift between the two clocks during runtime.
+1. Training sends known patterns and sweeps delay/phase settings to find a valid sampling window.
+2. Per-lane delay and deskew FIFOs align bits/lanes to a common word boundary.
+3. A phase interpolator or delay-locked loop tracks the sampling phase if the PHY architecture uses one.
+4. An elastic buffer absorbs bounded phase/frequency slip and decouples PHY delivery from endpoint service.
+5. A defined CDC transfers words/status into the core domain.
+
+Derive elastic depth from worst-case frequency difference, maximum interval between compensation opportunities, burst/service jitter, and safety margin:
+
+$$
+D_{\text{slip}}
+\ge
+\left|f_w-f_r\right|T_{\text{max-service}}
++D_{\text{burst}}
++D_{\text{margin}}.
+$$
+
+If no bound exists on $f_w-f_r$, use a true dual-clock FIFO and backpressure; a small “phase FIFO” cannot absorb unlimited drift.
 
 ### 2.3 CDC latency cost
 
-Each CDC adds 2–4 cycles (PI + FIFO traverse). For a B200 with NV-HBI between two dies, a memory access from die A to die B's HBM pays:
+Account for each implemented stage:
 
 $$
-\text{cross-die latency} \;\approx\; \underbrace{\text{NV-HBI traverse}}_{\sim 4\text{ cyc}} \;+\; \underbrace{\text{die-B local path}}_{\sim 2\text{ cyc}} \;+\; \underbrace{\text{HBM access}}_{300\text{ cyc}}
-\;\approx\; 306\text{ cyc}
+L_{\text{cross-die}}
+=L_{\text{source adapter}}
++L_{\text{TX/RX PHY}}
++L_{\text{deskew/elastic}}
++L_{\text{CDC}}
++L_{\text{destination adapter}}
++L_{\text{remote NoC/target}}.
 $$
 
-vs ~302 cycles on the local die. <2% latency penalty. This is why NVIDIA can claim "single GPU" coherency on B200 — the CDC is engineered to be invisible to software at typical access granularity.
+Some components are fixed pipeline latency; elastic/async FIFO wait depends on phase and occupancy; target/NoC delay depends on traffic. Measure minimum, average, and tail separately. Coherence or a single-device software abstraction comes from the complete memory/protocol contract, not from CDC latency being a small percentage of DRAM access.
 
 ### 2.4 True async CDC: the synchronizer chain
 
-When two clock domains have *unrelated* frequencies (e.g., a peripheral clock domain at 200 MHz vs core at 2 GHz), simple PI + FIFO doesn't help. You need a **multi-flop synchronizer**:
+For one slowly changing **single-bit level**, use a destination-clock synchronizer:
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    SRC["Source FF<br/>clk_A (e.g., 200 MHz)"]:::a
-    SYNC1["Sync FF 1<br/>clk_B (e.g., 2 GHz)"]:::b
-    SYNC2[Sync FF 2<br/>clk_B]:::b
-    SYNC3[Sync FF 3<br/>clk_B]:::b
-    USE[Logic uses synced signal]:::b
-    SRC --> SYNC1 --> SYNC2 --> SYNC3 --> USE
-    classDef a fill:#fde68a,stroke:#b45309,color:#000
-    classDef b fill:#bae6fd,stroke:#0369a1,color:#000
+    SRC["source-domain registered level"] --> S1["destination synchronizer FF 1"]
+    S1 --> S2["destination synchronizer FF 2"]
+    S2 --> SN["optional extra resolution stages"]
+    SN --> USE["destination logic"]
 ```
 
-The reason for multiple stages: when clk_A's edge arrives within the metastability window of SYNC1, SYNC1's output may oscillate (metastability) for several picoseconds. Each subsequent stage gives metastability more time to resolve. **Mean Time Between Failure (MTBF):**
+The first stage may become metastable when the source changes near its sampling aperture. Later stages provide resolution time before destination logic observes the value. A common MTBF model is
 
 $$
-\text{MTBF} \;\propto\; \frac{1}{T_{\text{clk}}} \cdot \exp\!\left(\frac{N \cdot T_{\text{slack}}}{\tau}\right)
+\text{MTBF}
+\approx
+\frac{\exp(T_{\text{resolve}}/\tau)}
+C f_{\text{dst}} f_{\text{toggle}}},
 $$
 
-where $N$ is the number of sync stages, $T_{\text{slack}}$ is the time per stage minus FF setup, and $\tau$ is a process-dependent metastability time constant (~10–30 ps). 3 stages typically gives MTBF > 10⁹ years. The multi-flop synchronizer is the single most important RTL pattern in chip-multi-clock-domain design.
+where $\tau$ and $C$ come from characterization, $T_{\text{resolve}}$ is the actual resolution time after clock uncertainty/routing/setup, and the two frequencies are destination sampling and source toggle rates. Choose the stage count from the characterized synchronizer cell, routing constraint, required FIT/MTBF, voltage/corner, and number of crossings. There is no universal “three stages means $10^9$ years.”
+
+Do not synchronize every bit of a bus independently: bits can settle on different cycles and form a word that never existed. Use:
+
+- request/acknowledge handshake for a stable multi-bit payload;
+- toggle/pulse-stretch protocol for events;
+- Gray-coded pointers plus dual-port storage for a dual-clock FIFO;
+- bundled-data/source-synchronous capture when that timing contract is explicitly verified.
+
+CDC verification checks reconvergence, pulse loss/duplication, reset release, FIFO full/empty correctness, Gray-pointer synchronization, and constraints/placement of the synchronizer chain—not only the presence of two flip-flops.
 
 ---
 
@@ -934,25 +974,49 @@ flowchart TD
     classDef log fill:#bbf7d0,stroke:#15803d,color:#000
 ```
 
-When EN is low, GCLK doesn't toggle → flip-flops in the cluster don't update → no internal switching. Saves the *clock-tree* portion of dynamic power (which is itself ~30% of total dynamic power on a frontier accelerator) plus the FF and combinational power downstream.
+When EN is low, GCLK does not toggle, so the gated flip-flops stop receiving active clock edges. This saves their clock-pin/local-tree power and can prevent downstream combinational switching when state stays constant. The saving depends on the implemented clock tree, enable duty cycle, data activity, and gating boundary; measure it rather than assuming a universal percentage.
 
 The latch in the ICG cell is critical: it prevents glitches on EN from creating spurious clock edges — a glitch through a plain AND gate would clock the entire cluster mid-cycle, corrupting state.
 
 ### 5.2 Power gating
 
-For deeper savings, *cut the supply rail* to an idle block via a header switch (PMOS pass transistor). Eliminates leakage as well as dynamic. Cost:
+For deeper savings, disconnect an idle voltage domain with distributed header or footer switch cells. The implementation also needs:
 
-- Header switch area: ~5% of the gated block.
-- Wakeup time: ~10s of cycles to charge the rail back up (deep-trench-cap recharge rate limits).
-- State loss: gated FFs lose their state — must save to retention FFs or to L2 before powering off.
+- isolation cells on outputs so a collapsed domain cannot drive X/illegal levels;
+- retention flops or an architectural save/restore path for state that must survive;
+- always-on control, reset, test, and acknowledgement logic;
+- a switch network sized for active current and acceptable virtual-rail IR drop;
+- staged turn-on to limit inrush and package/die droop;
+- power-intent specification and checks for every legal domain combination.
 
-GPU SMs use coarse-grain power gating: when fewer than N warps are active, idle SMs are fully powered off until the kernel scales up. Wakeup cost is amortized over the kernel runtime.
+The sequence is a hardware/firmware state machine:
+
+```text
+quiesce new work -> drain/abort outstanding transactions
+-> save retention state -> assert isolation -> gate clock
+-> turn off switches -> wait for acknowledged off state
+
+turn on switches in stages -> wait for rail-good
+-> restore/reset state -> enable clock -> deassert isolation
+-> reopen admission
+```
+
+Switch area and wake time depend on domain size, leakage target, rail capacitance, allowed inrush, PDN impedance, retention choice, voltage monitors, and clock/reset sequence. Estimate them from the actual power-domain implementation, not a fixed percentage or cycle count.
 
 ### 5.3 DVFS — dynamic voltage and frequency scaling
 
-The chip can drop $V_{dd}$ when it doesn't need peak frequency. Power scales as $V^2 f$, and at fixed $f$ you can lower $V$ by ~50–100 mV before timing fails. Saves ~25% of dynamic power for free during memory-bound phases.
+Dynamic power contains the familiar $\alpha C V^2f$ term, while leakage and regulator losses also change with voltage/temperature. Each operating point must have characterized timing, memory/PHY limits, reliability margin, and a legal clock/voltage sequence.
 
-Modern GPUs DVFS at sub-millisecond granularity, with ~10 distinct V/f operating points selected by the on-die power-management controller (PMU) responding to telemetry from MAC utilization counters.
+A PMU transition can:
+
+1. throttle/park request injection;
+2. move the clock to a safe divider/source;
+3. request the regulator voltage and wait for rail-good;
+4. reprogram/lock PLL or clock divider;
+5. update memory/interconnect timeout and QoS assumptions if required;
+6. release traffic and monitor droop/thermal/error telemetry.
+
+When lowering performance, frequency normally falls before voltage. When raising it, voltage rises before frequency. Rail slew and PLL lock make transition latency product-specific, and rapid transitions consume energy. “Lower voltage at fixed frequency” is safe only if STA/silicon characterization says the target frequency still closes at that voltage and environment.
 
 ---
 
@@ -979,104 +1043,169 @@ flowchart TB
     classDef e fill:#bbf7d0,stroke:#15803d,color:#000
 ```
 
-1. **Floorplan.** Place the big hard macros first — the SRAM banks (§2b), HBM PHYs, NoC routers — then define the **power delivery network (PDN)** and I/O. For an AI die this step is macro-dominated: SMEM/RF/L2 arrays are most of the area, and the PDN must deliver ~1 kW without the IR-drop / $L\,di/dt$ droop that L0 warns about.
+1. **Floorplan.** Place the big hard macros first—SRAM/register-file/cache macros, PHYs, and major fabric endpoints—then define I/O, channels, and the **power delivery network (PDN)**. The PDN must deliver the product's worst legal current step within static IR-drop, dynamic droop, electromigration, and thermal limits.
 2. **Placement.** Standard cells are placed under simultaneous timing- and congestion-driven optimization. Regular datapaths (the multiplier arrays, the systolic PEs) are often **structured/relationally placed** by hand or datapath tools so the bit-slice regularity of §FP survives into silicon.
 3. **CTS** (§1b.2) builds the balanced clock network.
 4. **Routing.** Detailed routing over a dozen-plus metal layers, DRC-clean, honoring the same wire-dominated reality that made 4:2 compressors and Booth attractive in the first place.
 5. **Signoff.** MCMM STA (§1b.4) **plus** DRC (design rules), LVS (layout-vs-schematic), and **EM/IR** (electromigration + IR-drop on the PDN). Violations loop back into placement/routing. Only a clean signoff yields **GDSII** for tape-out.
 
-The reticle limit (~858 mm²) caps a single die here — which is precisely why the biggest accelerators go multi-die and pay the CDC cost of §2 (and the packaging cost of L1).
+The exposure-field/reticle limit is one upper bound on die dimensions, but yield, cost, IP partitioning, memory shoreline, power delivery, and package technology usually constrain the economically useful die earlier. Multi-die partitioning trades those benefits against D2D PHY/adapter area, CDC, latency, power, verification, and package cost.
 
 ## 6. Verification reality
 
 ### 6.1 Why exhaustive simulation fails
 
-A single FP MAC has $2^{64}$ possible input combinations. At 1 ns per simulated FMA, exhaustive testing takes $2^{64} \cdot 10^{-9}$ s ≈ 585 years. Multiply by hundreds of thousands of MACs and millions of FSM states — *totally* infeasible.
+FP32 addition already has $2^{64}$ ordered operand bit pairs before rounding mode and control state. A three-operand FP32 FMA has $2^{96}$ operand tuples. Pipelines, stalls, flushes, power/reset, and interacting queues multiply the sequential state. Simulation therefore samples behavior; it cannot enumerate the complete design.
+
+Use different methods for different proof shapes:
+
+- exact arithmetic equivalence and local invariants: formal/equivalence checking;
+- long transaction interactions and software-visible sequences: constrained-random simulation/emulation;
+- analog/CDC/physical assumptions: dedicated structural tools, characterization, and signoff;
+- post-silicon rare events: assertions, trace, counters, error injection, and recovery telemetry.
 
 ### 6.2 Formal verification
 
-Mathematical proof (SAT/SMT solvers) checks logical properties:
+Formal tools check assertions over all behaviors allowed by the assumptions, for example:
 
-- "For all inputs A, B with A=0, the multiplier output is exactly 0."
-- "For all sequences, no two threads write to the same RF entry in the same cycle."
-- "The wgmma issue FSM never enters the deadlock state where READY and ACK are both stuck low."
+- accepted request is eventually retired or explicitly killed under a stated fairness assumption;
+- no FIFO/credit counter overflows or underflows;
+- each supported tiny FP format matches an exact integer reference for every input/mode;
+- an iterative context cannot be overwritten;
+- two grants cannot claim one single-ported resource in the same cycle.
 
-Formal scales to ~10^7 state-space exploration; large enough to verify isolated arithmetic blocks (multipliers, adders) and small FSMs but not entire SMs.
+There is no universal “number of states formal can handle.” Capacity depends on property, abstraction, structure, depth, memories, datapath width, assumptions, and engine. Use assume-guarantee decomposition, cut points, symmetry, parameter reduction, and targeted abstractions; separately validate that assumptions match integration.
 
 ### 6.3 Coverage-driven simulation (UVM)
 
-For larger blocks, randomized testing with coverage tracking. Stimulus generators randomize input streams; coverage points (FSM state visits, edge cases, corner-case interactions) are tracked. Test ends when coverage closes, not when "no bug found".
+For larger blocks, constrained-random stimulus drives legal and deliberately erroneous traffic while scoreboards compare architectural results. Coverage must include:
 
-Typical bring-up campaign: 10⁹–10¹² simulated cycles per major block, taking 6+ months on a server farm.
+- functional crosses such as operation × format × class × rounding × stall/flush;
+- assertion coverage and vacuity checks;
+- code/toggle/FSM coverage with justified exclusions;
+- queue occupancy, simultaneous completion, reset/power/clock transitions;
+- injected corruption, timeout, replay, poison, and containment cases.
+
+Coverage closure means every planned requirement has evidence or an approved justification. It does not prove the absence of bugs, and raw simulated cycle count is not a portable quality metric.
 
 ### 6.4 Errata: where verification fails
 
-State-space explosion masks deep corner-case bugs in *interacting* FSMs. Examples that have shipped:
+Escapes often occur at specification ambiguity or subsystem boundaries: arithmetic mode plus flush, DMA plus page fault, credit return plus reset, atomic response plus replay, power transition plus outstanding work, or firmware programming an unverified combination. The response can be:
 
-- Hopper TMA + wgmma + interrupt corner case → silent NaN.
-- AMD MI250 inter-XCD coherency violation under specific atomics ordering → data race.
-- TPU v4 SparseCore matmul truncation under specific batch shapes → silent wrong answer.
+- microcode/firmware/driver workaround;
+- feature disable or constrained operating mode;
+- reset/retry/containment procedure;
+- new mask revision for logic that software cannot safely work around.
 
-When found, vendors release **errata** documents and driver-level workarounds. AI researchers occasionally hit "non-deterministic NaNs on specific matrix sizes" — usually an undocumented erratum being sloppily masked.
+Do not diagnose a model NaN as a silicon erratum without reproducing it, checking software/race/numeric causes, collecting hardware error state, and matching a published or vendor-confirmed issue.
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
     A[Spec the design] --> B[Write RTL]
-    B --> C{Block-level}
-    C --> D["Formal proof<br/>(arithmetic correctness)"]
-    C --> E[Coverage-driven sim<br/>FSM behavior]
-    D & E --> F{Top-level integration}
-    F --> G[Multi-block UVM tests<br/>10⁹–10¹² cycles]
-    G --> H{Tape out}
-    H --> I["Silicon comes back —<br/>find escape bugs"]
-    I -->|fix in driver / ucode| J[Driver workaround]
-    I -->|cannot fix| K[Errata documented]
-    K -.workaround.-> L[Future revision]
-    J -.user-visible.-> M["AI researcher: 'Why is my model NaNing?'"]
+    B --> C["lint + CDC/RDC +<br/>equivalence/formal"]
+    B --> D["reference-model simulation +<br/>coverage/fault injection"]
+    C & D --> E["subsystem/full-chip<br/>emulation and software tests"]
+    E --> F["STA, power, DFT,<br/>physical verification"]
+    F --> G[Tapeout]
+    G --> H["silicon bring-up:<br/>diagnostics + characterization"]
+    H --> I["workaround, recovery update,<br/>or new revision when needed"]
 ```
 
 ---
 
 ## 7. RAS for AI Accelerators
 
-RAS = **Reliability, Availability, Serviceability**. At rack scale, a single GPU failure rate of ~0.1% per month means a 72-GPU NVL72 pod expects a GPU failure roughly every 2 weeks. RAS features are the hardware and firmware mechanisms that keep the cluster productive despite component failures.
+RAS means **reliability, availability, and serviceability**. The chip-design task is to define, for every storage/transport structure:
+
+```text
+fault model -> detection coverage -> correction/retry/containment
+-> architectural indication -> telemetry -> recovery owner
+```
+
+A parity bit, SECDED code, CRC, or timeout is not “RAS” by itself. It is one detector inside a recovery contract.
 
 ### 7.1 ECC in datapaths
 
-SRAM arrays throughout the accelerator (SMEM, register file, L2 slices) are protected by **SECDED** — Single Error Correction, Double Error Detection — typically using a Hamming code (e.g., 72-bit codeword = 64 data bits + 8 check bits).
+For a Hamming-style 64-data-bit SECDED word, seven location parity bits satisfy $2^7\ge64+7+1$, and one additional overall parity bit enables double-error detection: 72 stored bits before macro granularity, tags, spare rows, and routing. The raw check-bit overhead is therefore $8/64=12.5\%$, not a universal cache-area percentage.
 
-- **Area overhead**: ~6.25% for 64-bit data (8 check bits / 128 total with ECC).
-- **Behavior on single-bit error**: hardware transparently corrects the bit in-line; no pipeline stall, no software notification required.
-- **Behavior on double-bit error**: uncorrectable; raises a machine-check interrupt. The driver must decide whether to kill the workload or attempt recovery.
+Read hardware computes a syndrome and overall parity:
 
-HBM uses a two-layer protection scheme:
-- **On-die ECC**: per-HBM-chip, transparent to the GPU. Each HBM DRAM chip stores extra check bits alongside data; single-bit errors within the DRAM chip are corrected before the data leaves the HBM package.
-- **Link-level CRC**: data in transit across the HBM PHY is protected by a CRC that detects multi-bit transmission errors (caused by EMI, voltage droop, or clock jitter on the PHY). CRC failure triggers a link-level retry.
+| Syndrome | Overall parity | Interpretation/action |
+|---:|---:|---|
+| zero | zero | no detected error |
+| nonzero | one | correct the addressed codeword bit |
+| zero | one | correct/ignore the overall-parity bit according to convention |
+| nonzero | zero | detected uncorrectable even-weight error for SECDED |
+
+The exact table depends on the parity convention, so encode and verify the chosen code matrix. Correction uses a syndrome decoder plus bit-flip mux/XOR network. That logic can sit:
+
+- before the consumer in one cycle, increasing read latency/critical path;
+- in a registered correction stage;
+- on a replay path where the consumer is stalled and the corrected read is reissued.
+
+Different structures choose different policies. Register files, shared memory, cache data, cache tags, queues, and control SRAMs have different widths, port counts, latency budgets, and consequences of an uncorrectable error. Some use parity plus replay, some SECDED, some stronger/burst-oriented codes, and some duplicate critical control state. HBM-side and link protection are generation/platform contracts; do not assume every detected transfer error supports transparent retry.
 
 ### 7.2 NoC error detection
 
-The on-chip NoC (Section 4) carries flits (flow-control units) between SMs, L2 slices, and HBM controllers. Error detection is applied at the flit level:
+Protect the fields according to consequence:
 
-- **Parity on flit headers**: a single parity bit covers the routing, virtual-channel, and control fields. Header parity failure indicates a routing or arbitration error.
-- **ECC on flit payload**: SECDED protection on the data payload, matching the L2/SRAM ECC scheme.
-- **Credit-based flow control with timeout-based deadlock detection**: each VC maintains a credit counter. If credits are not returned within a timeout window (typically ~1 us), the NoC raises a deadlock alert. This catches both hardware routing bugs and software-induced protocol deadlocks.
+- header corruption can misroute or change operation/length, so validate it before route/state allocation;
+- payload corruption can be corrected, replayed, or delivered as poison depending on the code and end-to-end protocol;
+- router/NI buffers need ECC/parity because a flit may sit there for many cycles;
+- credit counters, VC state, and route tables are control state and may need parity/duplication plus a recovery action.
+
+A hop can use CRC/parity and replay if the transmitter retains an immutable copy and the receiver suppresses duplicates. Without replay state, detection must drop/poison/escalate; “CRC” does not itself retransmit.
+
+Timeout is a watchdog, not proof of deadlock. Congestion, a powered-down destination, clock gating, or an intentionally long operation can all delay progress. Hardware should expose age/occupancy/credit/route diagnostics and apply a staged policy: warn, snapshot, stop injection, isolate a route/domain, then reset only when outstanding transaction disposition is defined.
 
 ### 7.3 Hardware scrubbers
 
-Soft errors (cosmic-ray-induced bit flips) accumulate in SRAM arrays over time. At the error rates typical of frontier silicon (~100–400 FIT per Mb), a 50 MB L2 cache expects ~0.5–2 soft errors per day. **Background ECC scrubbers** scan SRAM arrays during idle cycles, reading each location, checking ECC, and correcting single-bit errors before they accumulate into uncorrectable double-bit errors. Scrubbing rate is typically one full scan every 1–10 seconds.
+A scrubber is an address generator plus read/check/correct/writeback FSMD:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Read: "bandwidth/port grant"
+    Read --> Check
+    Check --> Advance: "clean"
+    Check --> Rewrite: "correctable"
+    Check --> Escalate: "uncorrectable"
+    Rewrite --> Advance
+    Advance --> Read: "more addresses"
+    Advance --> Idle: "pass complete or throttled"
+    Escalate --> Idle: "fault recorded/contained"
+```
+
+The scrub interval is derived from measured/qualified upset rate, codeword organization, acceptable probability of a second fault before repair, array availability target, and port/bandwidth cost. It is not a universal seconds value. The scrubber arbitrates with demand traffic, respects dirty/tag/coherence state, records syndrome/address counts, and must not overwrite a newer demand write.
 
 ### 7.4 RAS implications for rack-scale
 
-At production scale, RAS is not optional — it is a survival requirement:
+Hardware fault containment can:
 
-- **Single GPU failure rate**: ~0.1% per month in production (based on Google and Meta fleet data). For a 72-GPU NVL72 pod, this translates to an expected GPU failure every ~2 weeks.
-- **NVL72 fault containment**: the rack-level interconnect must handle single-GPU failures without killing the entire job. Two strategies: (a) **checkpoint-restart** — periodically snapshot model state to shared storage; on failure, restart the job on the remaining 71 GPUs. (b) **Live migration** — dynamically remap the failed GPU's shard to a spare GPU in the rack, with minimal interruption. NVIDIA's NVL72 architecture includes spare GPU slots for this purpose.
-- **PCIe/CXL AER (Advanced Error Reporting)**: the PCIe/CXL link between the GPU and the host CPU provides detailed error status for link-level errors (correctable and uncorrectable), enabling the driver to distinguish between transient errors (retry) and permanent failures (isolate the GPU).
+1. stop new traffic to a failed endpoint;
+2. classify outstanding operations as completed, replayable, poisoned, or aborted;
+3. contain dirty cache/memory ownership or report that it cannot be recovered;
+4. preserve error logs and first-failure state;
+5. reset/retrain a link, engine, SM partition, memory stack, or whole device;
+6. expose health and topology changes to firmware/driver/fabric management.
+
+Software owns checkpoint cadence, rank/job restart, spare allocation, tensor-shard reconstruction, and whether a degraded topology is usable. Hardware cannot infer how to rebuild distributed optimizer/model state. PCIe/CXL and accelerator fabrics expose their specified error/status/recovery mechanisms, but a link-level correctable error, an endpoint-fatal error, and lost application state require different responses.
 
 ### 7.5 RAS in the verification flow
 
-RAS features add to the verification burden (Section 6). Error-injection tests (deliberately flipping bits in SRAM, injecting CRC errors on HBM links, forcing NoC timeouts) are a standard part of the bring-up campaign. Formal verification can prove that SECDED correction logic is correct for all single-bit error patterns, but system-level RAS behavior (e.g., "a GPU failure during a distributed all-reduce does not corrupt the remaining GPUs") requires full-system UVM tests that are among the most complex in the verification campaign.
+Verify by fault site and recovery phase:
+
+- exhaustively prove each single-bit codeword error corrects and every promised double-bit pattern detects;
+- inject errors before/after ECC, in tags, route state, FIFOs, credits, replay buffers, and completion records;
+- corrupt one link unit and prove replay does not duplicate an architectural write/atomic;
+- collide scrub rewrite with demand read/write, eviction, and reset;
+- fail an endpoint with outstanding reads, writes, atomics, and dirty ownership;
+- prove poisoned data cannot be consumed silently;
+- prove fatal-error containment stops new admission and preserves the first useful diagnostic;
+- test repeated/cascading faults and failure of the recovery mechanism itself.
+
+Arithmetic/formal proof covers the code and local control. Full-chip emulation/UVM/software tests cover firmware notification, reset sequencing, driver recovery, and distributed-job behavior.
 
 ---
 
@@ -1085,8 +1214,8 @@ RAS features add to the verification burden (Section 6). Error-injection tests (
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    A[FO4 budget at N4 ≈ 6 ps] --> B[5-stage FMA at 2 GHz]
-    B --> C[Pipelined latency = 5 cycles]
+    A["format + timing target +<br/>library/PVT/wire assumptions"] --> B["derive FMA widths and<br/>candidate register cuts"]
+    B --> C["post-route STA sets<br/>actual latency and fmax"]
     C --> D["L3 warp scheduler must hide via ILP / TLP"]
 
     E[Multi-die / multi-chip boundary] --> F[Protocol adapter + reliable link<br/>+ PHY + remote endpoint]
@@ -1099,14 +1228,14 @@ flowchart TD
     L[NoC latency = NI + hops + serialization<br/>+ queueing + target] --> M[L2/memory access is load- and<br/>topology-dependent]
     M --> N["Why programmers care about locality,<br/>partition balance, and L2 hit rate"]
 
-    O["Power = αCV²f"] --> P[Clock gating at idle clusters]
-    O --> Q[Power gating at idle SMs]
-    O --> R[DVFS at sub-ms granularity]
-    P & Q & R --> S[Maintain 1 kW package within<br/>thermal budget]
+    O["Power = αCV²f plus leakage"] --> P[Clock gating at idle clusters]
+    O --> Q[Power gating at eligible domains]
+    O --> R[DVFS under PMU control]
+    P & Q & R --> S[Meet the product power,<br/>thermal, droop, and reliability limits]
 
-    T[Formal coverage capped ~10^7 states] --> U[FSM corner cases escape]
-    U --> V[Errata + driver workarounds]
-    V --> W["User-visible non-determinism in models"]
+    T["state space grows across interacting engines"] --> U["prove local invariants;<br/>simulate/emulate system scenarios"]
+    U --> V["fault injection + coverage +<br/>silicon observability"]
+    V --> W["fewer arithmetic, ordering,<br/>and recovery escapes"]
 ```
 
 ---
@@ -1115,17 +1244,12 @@ flowchart TD
 
 | Quantity | Value | Why |
 |---|---|---|
-| FF clk-to-Q delay (TSMC N4) | 30–60 ps | Pipeline overhead floor |
-| FF setup time | 30–50 ps | Pipeline overhead floor |
-| Clock skew typical | 20–60 ps | Distribution-tree quality |
-| Total FF overhead per stage | ~100 ps | What you "lose" to pipelining |
-| FO4 (TSMC N4) | ~6 ps | Process-independent timing unit |
-| FO4 (TSMC N2 proj.) | ~4.2 ps | Next gen |
-| Logic budget per stage at 2 GHz | ~400 ps ≈ 67 FO4 | Usable depth |
-| FP32 FMA combinational depth | ~50 FO4 | Why pipelined |
-| Typical FMA pipeline depth | 4–6 stages | Latency vs $f_{\max}$ |
-| Multi-flop sync stages for MTBF > 10⁹ y | 3 | Async CDC standard |
-| NV-HBI mesochronous CDC penalty | 2–4 cycles | Cross-die access |
+| setup budget | $T_{clk}\ge t_{cq}^{max}+t_{comb}^{max}+t_{setup}+t_{uncertainty}+t_{margin}$ | derive from the selected library/corner |
+| hold constraint | $t_{cq}^{min}+t_{comb}^{min}\ge t_{hold}+\text{clock-arrival effect}$ | frequency-independent min-delay check |
+| FO4 | inverter driving four identical inverters | logical-depth comparison, not a foundry ps guarantee |
+| FMA latency/II | implementation and contract dependent | register cuts come from arithmetic state plus post-route timing |
+| pipeline storage | $\sum_i(W_{data}+W_{control}+W_{tag}+W_{valid/kill})$ | count real registered bundles |
+| synchronizer MTBF | proportional to $e^{T_{resolve}/\tau}/(f_{src}f_{dst}C)$ | choose stages from characterized library and target reliability |
 | Async-copy address | $base+\sum i_d stride_d$ | nested-loop AGU |
 | Data required in flight | $BL$ | bandwidth × round-trip latency |
 | NoC link useful bandwidth | $wf\eta$ | width × frequency × efficiency |
@@ -1137,17 +1261,11 @@ flowchart TD
 | transaction ID versus link sequence | end-to-end operation versus hop retry | enables exactly-once atomics/writes |
 | D2D bandwidth density | one-way GB/s per mm die edge | chiplet shoreline/bump constraint |
 | UALink 1.0 cache coherence | software across accelerator caches | remote memory semantics are not full snoop coherence |
-| ICG cell area overhead | ~5% of gated block | Standard |
-| Power-gating wakeup time | ~10s of cycles | DTC recharge |
-| DVFS granularity | sub-ms | PMU-driven |
-| Formal verification scaling ceiling | ~10⁷ states | Why FSMs escape |
-| Block-level UVM cycles | 10⁹–10¹² | Months on farm |
-| Errata count per major GPU launch | 50–200 | Documented post-tape-out |
-| Hold constraint | t_cq,min + t_logic,min ≥ t_hold + t_skew | frequency-independent; fixed by padding |
-| Clock insertion delay | tens–>100 ps | root-to-leaf latency |
-| Clock-network power share | ~30% of dynamic | why clock gating targets it |
-| Signoff matrix | MCMM: SS/TT/FF × Vmin..max × T | setup@slow, hold@fast |
-| Temperature inversion | slower when cold at low V | check both T extremes |
+| ECC raw check overhead example | 64 data + 8 SECDED bits = 72 bits | 12.5% raw bits before macro/system overhead |
+| scrub rate | reliability target / upset model / port budget dependent | no universal patrol interval |
+| clock/power gating cost | library, domain, CTS, isolation, retention dependent | verify timing, test, wake, and energy |
+| signoff matrix | all required PVT/RC/mode/variation analyses | setup and hold can have different worst cases |
+| temperature inversion | possible at low voltage | check characterized corners, not a fixed hot/slow rule |
 | PD signoff checks | STA + DRC + LVS + EM/IR | all must be clean for GDSII |
 
 ---

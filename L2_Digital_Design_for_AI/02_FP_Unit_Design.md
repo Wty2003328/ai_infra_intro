@@ -18,11 +18,11 @@ L0 sets the silicon area budget; L1 sets the operand-bandwidth ceiling; L2 deter
 
 ---
 
-## 1. The IEEE-754 vs MX format zoo
+## 1. IEEE binary, AI finite variants, and MX formats
 
-### 1.1 IEEE-754 representation
+### 1.1 IEEE-style binary representation
 
-A floating-point number:
+For a **normal** value in a conventional IEEE-style binary encoding:
 
 $$
 V \;=\; (-1)^S \cdot (1.M) \cdot 2^{E - \text{bias}}
@@ -30,11 +30,11 @@ $$
 
 with sign bit $S$, mantissa $M$ ($m$ explicit bits + 1 implicit leading 1), exponent $E$ ($e$ bits) and bias $= 2^{e-1} - 1$.
 
-| Format | Bits | S | E | M | Bias | Dynamic range | AI use |
+| Format/profile | Logical bits | S | E | M | Bias | Approximate maximum finite magnitude | AI use |
 |---|---|---|---|---|---|---|---|
 | FP64 | 64 | 1 | 11 | 52 | 1023 | $\pm 1.8\times 10^{308}$ | scientific only |
 | FP32 | 32 | 1 | 8 | 23 | 127 | $\pm 3.4\times 10^{38}$ | accumulation, softmax, master weights |
-| TF32 | 19 | 1 | 8 | 10 | 127 | $\pm 3.4\times 10^{38}$ | Ampere matmul |
+| TF32 arithmetic input | 19 significant encoding bits conceptually; commonly sourced from an FP32 container | 1 | 8 | 10 | 127 | $\pm 3.4\times 10^{38}$ | tensor matmul |
 | BF16 | 16 | 1 | 8 | 7 | 127 | $\pm 3.4\times 10^{38}$ | training (gradient-robust) |
 | FP16 | 16 | 1 | 5 | 10 | 15 | $\pm 65 504$ | legacy inference |
 | FP8 E4M3 | 8 | 1 | 4 | 3 | 7 | $\pm 448$ | forward, activations |
@@ -44,9 +44,11 @@ with sign bit $S$, mantissa $M$ ($m$ explicit bits + 1 implicit leading 1), expo
 
 Range vs precision tradeoff: BF16 and FP8 E5M2 keep wide range (large exponent) at the cost of mantissa precision. FP16 and FP8 E4M3 do the inverse.
 
+The rows are not one uniform IEEE encoding family. TF32 is an arithmetic precision/profile rather than a general 19-bit memory format in common GPU usage. FP8 E4M3 profiles can reserve the top encodings differently from IEEE binary interchange formats and may omit infinity; FP4/FP6 vendor profiles also define their own exceptional-value behavior. The format decoder must use the selected profile's exact encoding table, not blindly apply FP32's all-zero/all-one rules.
+
 #### 1.1.1 The five encoded classes
 
-An FP word is not always `1.M × 2^(E-bias)`. The exponent field selects a class:
+For IEEE binary interchange formats, an FP word is not always `1.M × 2^(E-bias)`. The exponent field selects a class:
 
 | Exponent field | Fraction | Class | Hidden bit | Value/meaning |
 |---|---|---|---:|---|
@@ -68,7 +70,7 @@ is_inf       = exp_is_ones & frac_is_zero
 is_nan       = exp_is_ones & ~frac_is_zero
 ```
 
-These are AND/OR reductions plus a few gates. They run in parallel with operand unpacking and control the final result mux. The wide significand datapath should be operand-gated when a special-case result wins.
+These are AND/OR reductions plus a few gates. They run in parallel with operand unpacking and control the final result mux. A finite-only or non-IEEE AI profile uses a profile-specific classifier. The wide significand datapath should be operand-isolated when a special-case result wins.
 
 #### 1.1.2 Use an internal raw representation
 
@@ -154,6 +156,46 @@ A typical IEEE-style ISA exposes five accrued conditions:
 | inexact | discarded information changed or could change exactness | most divisions |
 
 The flags travel beside the transaction through every pipeline register. A result with the wrong flags is architecturally wrong even when its data bits look plausible.
+
+#### 1.1.6 Write the implementation contract before writing RTL
+
+“Supports FP32” is not a hardware specification. Freeze this table first:
+
+| Item | Questions the RTL must answer |
+|---|---|
+| formats | encoded exponent/fraction widths; finite-only variants; NaN payload policy |
+| operations | add/sub, multiply, four FMA sign variants, conversions, compare/minmax, divide/root, estimates |
+| rounding | supported modes; one or multiple destination precisions; stochastic/round-to-odd if present |
+| tiny values | full subnormal, input DAZ, output FTZ, or finite-only behavior |
+| flags | per-operation output, accrued architectural state, trapping/nontrapping behavior |
+| latency | fixed or variable cycles per engine; initiation interval; simultaneous issue rules |
+| flow control | ready/valid, fixed unstalled pipe, output FIFO depth, kill/flush/reset behavior |
+| precision sharing | whether a wide lane segments into independent BF16/FP8/FP4 lanes |
+| power/test | operand isolation, clock gates, scan access, table/ROM test, safe mode changes |
+
+Use explicit parameters:
+
+```text
+EW = encoded exponent bits
+FW = stored fraction bits
+P  = FW + 1               // normal significand including hidden bit
+XW = EW + 2               // example signed exponent headroom; prove for the format set
+AW = P + 3                // retained precision plus G/R/S positions
+```
+
+The internal record should be a typed bundle, not loose wires:
+
+```text
+raw_fp = {
+  class, sign, signedExponent, explicitSignificand,
+  format, roundingMode, pendingFlags,
+  destinationTag, valid, kill
+}
+```
+
+Every pipeline transformation consumes one bundle and produces another. This prevents the common integration failure where the numeric bits are correct but a stalled or flushed operation uses the next instruction's rounding mode, format, or destination tag.
+
+The special-case path is parallel control hardware. Classification can determine NaN/infinity/zero results before the wide datapath finishes, but a fixed-latency engine normally delays `special_valid/data/flags` through matching registers and selects it at the ordinary response boundary. An early bypass creates a variable-latency execution port and must be designed as such in the scoreboard and completion network.
 
 ### 1.2 OCP MX (microscaling) formats
 
@@ -462,6 +504,33 @@ An IEEE-conforming operation profile defines:
 
 Some tensor and DSP profiles deliberately choose FTZ/DAZ, one rounding mode, saturation, finite-only encodings, or an approximate error bound. Those choices are legal only because the instruction/format contract says so; they are not “almost IEEE.” Even a narrow AI unit needs enough discarded-bit information to meet its stated rounding/error contract. Do not quote a universal area percentage for these trims: the saving depends on format width, pipeline sharing, whether subnormals were normalized at decode, and how much of the rounder/classifier is amortized across lanes.
 
+### 3.5 What is registered in a real multiplier pipe?
+
+A possible throughput-oriented register plan is:
+
+| Boundary | Stored state | Logic that feeds it |
+|---|---|---|
+| `M1` | classes, signs, signed exponents, explicit `P`-bit significands, mode/tag | classify, unpack, optional subnormal recode |
+| `M2` | product sign/exponent, Booth digits and partial-product rows | radix-4 recoding and row generation |
+| `M3...` | carry-save sum/carry rows | physically balanced compressor levels |
+| `MN` | exact `2P`-bit product and exponent candidate | final CPA |
+| `MN+1` | normalized significand, G/R/S, exponent, flags | top-bit select, subnormal shift-right-jam |
+| response | packed result, flags, tag | round, range, special-case mux |
+
+The carry-save register convention must be explicit. If `sum + (carry << 1)` is the represented value, label the bit weights that way at every pipeline cut. Registering an unshifted carry row on one side and interpreting it as shifted on the next is an arithmetic bug, not a synthesis detail.
+
+Radix-4 Booth sign-extension and negative-multiple correction bits belong in the partial-product column-height drawing. Compression depth is chosen after those columns are known. The final prefix adder should be placed close to the two reduced rows; a nominally shallow Wallace tree can be slower and higher power than a locality-friendly Dadda schedule after routing.
+
+Multi-format packing requires physical segmentation:
+
+- independent Booth/reduction columns or explicitly partitioned small multipliers;
+- carry barriers at every narrow-lane boundary;
+- separate sign/exponent/classification/round state per lane;
+- mode-controlled operand routing and response packing;
+- isolation so unused segments do not toggle in wide or narrow modes.
+
+A wide `P32 × P32` multiplier does not become four useful FP8 lanes merely because FP8 has fewer bits. The hardware only gains parallel throughput if those four independent products, exponent tracks, rounders, and data routes were provisioned.
+
 ---
 
 ## 4. Floating-point addition and fused multiply-add
@@ -474,7 +543,7 @@ An integer CLA can add only bits with the same weight. FP operands generally hav
 flowchart LR
     U["unpack + classify"]:::ctl --> CMP["magnitude compare;<br/>swap so |A| ≥ |B|"]:::ctl
     CMP --> DE["ΔE = E_A - E_B<br/>(small CLA)"]:::int
-    DE --> AL["right barrel shift B;<br/>shift-right-jam sticky"]:::shift
+    DE --> AL["right-align B;<br/>discarded-tail/sticky network"]:::shift
     AL --> AS["p+4-bit magnitude<br/>add/subtract (CLA)"]:::int
     AS --> NZ["carry normalize or<br/>LZC/LZA + left shift"]:::shift
     NZ --> RD["GRS round increment;<br/>repair rounding carry"]:::round
@@ -491,7 +560,7 @@ For destination precision $p$, a straightforward datapath carries the explicit s
 1. Classify and unpack each operand.
 2. Compare magnitudes and swap so $|A|\ge|B|$.
 3. Compute $\Delta E=e_A-e_B\ge0$.
-4. Append GRS zeros and right-shift-jam $B$ by $\Delta E$.
+4. Append GRS zeros and right-align $B$ by $\Delta E$, retaining explicit discarded-tail-nonzero state. Fold it into sticky for positive addition or into the proved borrow/round correction for effective subtraction.
 5. Equal signs: add magnitudes and keep the sign. Different signs: subtract smaller magnitude from larger and take the larger's sign.
 6. Equal-sign carry-out: right-shift one and increment exponent.
 7. Opposite-sign cancellation: count leading zeros, left-shift, and decrement exponent down to the subnormal floor.
@@ -514,6 +583,8 @@ shifted = sig >> d
 sticky  = OR(sig[d-1:0])
 shifted[0] |= sticky
 ```
+
+This snippet is the positive-magnitude form used when the discarded tail only feeds rounding. In effective subtraction, keep `sticky/tail_nonzero` separate or apply the design's proved complement/borrow correction rather than treating the jammed bit as an exact tail value.
 
 In synthesizable RTL, guard against $d$ greater than the vector width; use a saturating shift amount and an OR-reduction of the whole input. An unsized dynamic slice is a common bug at exactly the exponent-gap tests that determine correct rounding.
 
@@ -577,6 +648,50 @@ A single path puts a large right aligner and a large left normalizer in series. 
 - near-equal exponents → cancellation may require a large left shift, but alignment is only zero or one bit.
 
 The dual-path implementation in §4.3 exploits this mutual exclusion.
+
+#### 4.0.6 Adder RTL stage map
+
+For `P` retained significand bits, carry `P+3` low-order positions (retained field plus G/R/S) and one high carry/sign position through the magnitude add. A concrete pipeline can be:
+
+| Boundary | State that must be registered |
+|---|---|
+| `A1` | decoded classes/signs/exponents/significands; special result/flags; mode/tag |
+| `A2` | magnitude-ordered `hi/lo`, saturated $\Delta E$, effective add/subtract, result-sign candidate, near/far select |
+| `A3` | unshifted `hi`, aligned `lo`, discarded-tail-nonzero state, common exponent, LZA inputs |
+| `A4` | raw add/subtract value, predicted leading-zero count, exact-zero bit, sign/exponent |
+| `A5` | normalized retained field and G/R/S, exponent, pending range/exception state |
+| response | rounded/packed result, flags, tag |
+
+The near path should be selected for
+
+```text
+effective_subtract && (delta_exp <= 1)
+```
+
+because only effective subtraction can catastrophically cancel. Same-sign addition with equal exponents can remain on the far/add path. The finite and special paths use the same response timing unless the execution port explicitly supports variable latency.
+
+A barrel shifter is a stack of conditional mux stages for shifts 1, 2, 4, … bits. Build sticky beside those stages:
+
+```text
+at shift-by-1 stage: sticky |= bit shifted out
+at shift-by-2 stage: sticky |= OR(two bits shifted out)
+at shift-by-4 stage: sticky |= OR(four bits shifted out)
+...
+```
+
+This avoids waiting for a second variable mask and wide OR after alignment. Saturate the control at the datapath width: an exponent gap greater than the useful window produces zero retained data and `tail_nonzero=OR(original significand)`.
+
+For effective subtraction, do not blindly treat an OR-jammed bit as the exact discarded magnitude and then complement it. Carry tail-nonzero state into a proved subtraction/round correction or use a verified round-odd/complement convention. The close subtraction path with $\Delta E\le1$ is normally kept exact at the chosen extended width; the far subtraction path still needs correct signed-tail handling.
+
+The rounding decision travels into either:
+
+- a short retained-field incrementer;
+- a compound prefix adder producing `sum` and `sum+1`;
+- a rounding constant injected into an existing carry-save/CPA path.
+
+The last two avoid placing a second full carry propagation after the main adder. They cost duplicated prefix/sum logic or more complex correction control, so compare post-route slack and energy.
+
+For an elastic pipeline, each register has `valid` and an enable derived from downstream readiness. For a fixed unstalled interior, admission control and an output FIFO must guarantee that a response slot exists before acceptance. Never allow output `ready` to become a combinational path through five FP stages back to issue; insert a skid/FIFO boundary or register the control.
 
 A tensor core or scalar FMA does not compute $A \times B$ then $+ C$ as two rounded operations. It computes $D=A\times B+C$ while holding the unrounded product at full precision, then rounds the final sum once.
 
@@ -700,9 +815,9 @@ The §4.0 datapath hides a subtlety: an FP add needs **two** variable shifts —
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 55, "rankSpacing": 50, "htmlLabels": false}}}%%
 flowchart TB
-    DE["|ΔE| = |E_a − E_b|"]:::ctl
-    DE -->|"|ΔE| ≤ 1"| NEAR
-    DE -->|"|ΔE| ≥ 2"| FAR
+    DE["effective operation +<br/>|ΔE| = |E_a − E_b|"]:::ctl
+    DE -->|"subtract and |ΔE| ≤ 1"| NEAR
+    DE -->|"all adds; or subtract with |ΔE| ≥ 2"| FAR
     subgraph NEAR["NEAR path (subtraction, cancellation)"]
         direction TB
         NA["align ≤ 1 bit (fixed mux)"]:::near
@@ -726,10 +841,10 @@ flowchart TB
     classDef rnd fill:#bbf7d0,stroke:#15803d,color:#000
 ```
 
-- **FAR path ($|\Delta E| \ge 2$):** the smaller operand is right-shifted by up to the full width — one big barrel shifter — but because the exponents differ by ≥ 2, catastrophic cancellation is impossible, so the result needs **at most a 1-bit** normalize. The bits shifted out feed the sticky-bit OR-tree.
-- **NEAR path ($|\Delta E| \le 1$):** alignment is 0 or 1 bit (a cheap fixed mux), so there is **no** big aligner — but a subtraction of near-equal magnitudes can leave many leading zeros, so this path carries the **LZA + full-width normalization shifter** (§4.2). It typically computes both $A-B$ and $B-A$ so the sign is resolved without a second pass.
+- **FAR/add path:** every effective addition and subtraction with $|\Delta E|\ge2$ uses the right barrel shifter. Effective addition may create one carry; far subtraction cannot catastrophically cancel, so post-normalization is at most a small fixed correction. Shifted-out bits feed the sticky OR tree.
+- **NEAR subtraction path:** only effective subtraction with $|\Delta E|\le1$ enters this path. Alignment is 0 or 1 bit (a cheap fixed mux), but near-equal magnitudes can leave many leading zeros, so the path carries the **LZA + full-width normalization shifter** (§4.2). It can compute both $A-B$ and $B-A$ or compare magnitudes first so sign/magnitude is available without a second wide pass.
 
-Neither path contains a big aligner *and* a big normalizer in series, so the longest combinational chain is reduced. The actual frequency gain depends on duplicated logic, mux placement, wiring, and pipeline cuts. A final mux picks the path by $\Delta E$ and result sign.
+Neither path contains a big aligner *and* a big normalizer in series, so the longest combinational chain is reduced. The actual frequency gain depends on duplicated logic, mux placement, wiring, and pipeline cuts. A final mux selects using effective operation and $\Delta E$, with sign/magnitude correction from the chosen path.
 
 ### 4.4 Rounding at the gate level (round-by-injection)
 
@@ -764,44 +879,106 @@ flowchart TB
 
 "Fused" is a hardware contract: in $D=A\times B+C$, the aligned addend is merged with the full-precision product—often while the product is still in carry-save form—before the one final normalization and rounding. Depending on alignment, $C$ can occupy several product-relative regions, so the internal fixed-point window is wider than the destination significand. The implementation may inject one or more aligned/correction rows into a compressor tree or use an equivalent wide add path. Correctly rounded FMA guarantees the nearest destination result (at most half an ULP under RNE) because no intermediate product rounding occurs.
 
-### 4.6 From one FMA to the tensor-core dot-product datapath
+#### 4.5.1 Derive the FMA binary point and registered state
 
-A tensor/matrix instruction commonly forms several products in parallel and reduces them into a wider accumulator. The exact architectural rounding boundary varies: some instructions define a fused dot-product-like operation; others update an accumulator across instructions, so rounding/precision semantics must be read from the ISA. A representative wide-accumulation datapath is:
+Treat the `P`-bit explicit significand as an integer:
 
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 50, "rankSpacing": 50, "htmlLabels": false}}}%%
-flowchart TB
-    subgraph MUL["K parallel multipliers (Booth, carry-save out)"]
-        direction LR
-        M0["A0×B0"]:::mul
-        M1["A1×B1"]:::mul
-        Mk["A_K-1×B_K-1"]:::mul
-    end
-    ALIGN["align each product to block max exponent<br/>(fixed-width, no per-cycle renorm)"]:::al
-    CSA["one big 3:2/4:2 CSA tree<br/>sums K products (still carry-save)"]:::csa
-    ACC["wide fixed-point accumulator<br/>kept in carry-save across cycles<br/>(FP32-equivalent width)"]:::acc
-    CPA["final CPA — once, at drain"]:::cpa
-    NR["single normalize + round"]:::nr
-    MUL --> ALIGN --> CSA --> ACC
-    ACC -->|feedback each cycle| CSA
-    ACC --> CPA --> NR
-    classDef mul fill:#fde68a,stroke:#b45309,color:#000
-    classDef al fill:#bae6fd,stroke:#0369a1,color:#000
-    classDef csa fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef acc fill:#e9d5ff,stroke:#7c3aed,color:#000
-    classDef cpa fill:#fbcfe8,stroke:#9d174d,color:#000
-    classDef nr fill:#fca5a5,stroke:#991b1b,color:#000
+$$
+m=\frac{\texttt{sig}}{2^{P-1}}.
+$$
+
+Then one unambiguous common-radix convention is:
+
+```text
+prod = sigA * sigB                // exact 2P-bit integer
+prod_fixed = prod << 1            // 2P+1-bit field
+c_fixed    = sigC << P
+
+prod_fixed / 2^(2P-1) = mA*mB
+c_fixed    / 2^(2P-1) = mC
 ```
 
-Three ideas do all the work, and they explain numbers elsewhere in this note:
+The appended zeros only match binary-point positions; they do not create information. Associate `prod_fixed` with raw exponent `eA+eB` and `c_fixed` with `eC`, compare those exponents, and align the lower-exponent term into a proved common window. Another design may normalize the product scale first, but it must update exponent/radix interpretation without dropping the product LSB and must place $C$ consistently.
 
-1. **Wide accumulation.** The accumulator is wider than the inputs—often FP32-like or a wide fixed-point field—so more product bits survive a long reduction. Width and rounding points are architecture-specific.
-2. **Carry-save reduction.** Parallel products can be compressed to two rows before a CPA. Some designs also keep accumulator feedback redundant across internal steps; others resolve at instruction boundaries.
-3. **Amortized alignment/normalization.** Shared exponents or a common accumulator scale can reduce per-product work, but the exact number of shifts/rounds follows the instruction and format contract.
+Do not specify that window with an unexplained constant such as “`2P+4` bits.” Derive it from exact product width, carry/sign headroom, close-cancellation requirement, G/R/S, subnormal support, and the representation of discarded **signed** tails. In effective subtraction, a nonzero tail can generate a borrow; simply OR-jamming the tail into bit 0 and complementing the word is not automatically equivalent to exact subtraction. Carry explicit tail/correction metadata or keep a sufficiently exact close path, then prove the result against integer arithmetic.
 
-The MX “sum-together” optimization (§6) specializes this idea to a shared block scale. When algebra and format semantics permit factoring the common scale outside a local integer reduction, scale alignment can be amortized once per block rather than repeated per element. This is a design option to verify, not a requirement of every MX implementation.
+A representative FMA register plan is:
 
-**Why low precision is "mostly wires and accumulator."** For FP4 the mantissa multiply is a $2\times2$ array (four PP bits — trivial); for FP8 it is $4\times4$. At those widths the Booth/compressor machinery nearly vanishes and the MAC is dominated by the exponent logic, the aligners, the format MUXes (§8) and that wide shared accumulator. This is the gate-level reason throughput scales *sublinearly* as you drop bits — and why the roadmap chases packing and accumulator sharing rather than ever-smaller multipliers.
+| Boundary | Registered state |
+|---|---|
+| `F1` | three decoded operands; FMA sign variant; mode/tag; special-case candidate |
+| `F2` | product sign/exponent and Booth/compressor rows |
+| `F3` | full product carry-save rows, normalized product scale, product-vs-$C$ exponent difference |
+| `F4` | aligned $C$ or product, signed-tail/correction state, working exponent |
+| `F5` | two final compressor rows and LZA inputs |
+| `F6` | wide CPA result, predicted normalization count, exact-zero/sign state |
+| `F7` | normalized retained field plus G/R/S, exponent, pending flags |
+| response | one rounded/packed result and tag |
+
+The aligned addend can enter the multiplier's compressor network as another row if timing permits, so an intermediate product CPA is unnecessary. Another implementation resolves/alines later. Both are valid only if no information that can change the one final rounding is lost.
+
+The critical paths to measure are partial-product generation→compressor register, wide alignment→carry-save merge, final CPA in parallel with LZA, and normalize→round/pack. Mode muxes and cross-lane routing often dominate a nominal arithmetic stage in a transprecision tensor unit.
+
+### 4.6 From one FMA to the tensor-core dot-product datapath
+
+A tensor/matrix instruction forms many products in parallel, but there is no universal “tensor-core accumulator.” The ISA/profile defines input formats, accumulator format, update points, and final output rounding. Hardware can realize that contract in several ways:
+
+| Realization | Hardware behavior | Cost/accuracy consequence |
+|---|---|---|
+| bank of ordinary FP FMAs | each product aligns to an FP accumulator and rounds at the defined update boundary | modular; repeated alignment/normalization and possible swamping |
+| fused local dot product | several exact products align and reduce before one local rounding | wider aligners/compressor tree; fewer rounding points |
+| wide fixed/superaccumulator | products map into exponent-indexed fixed-point positions and accumulate exactly or with a proved wide bound | large register/wire footprint; simple final normalize/round |
+| block/MX common scale | shared scale permits mostly integer products/reduction inside a block | low alignment cost; range/accuracy coupled within each block |
+
+A fused local dot-product slice looks like:
+
+```mermaid
+flowchart TB
+    subgraph DECODE["K lane front ends"]
+        D0["class/sign/exponent/sig 0"]
+        D1["class/sign/exponent/sig 1"]
+        DK["class/sign/exponent/sig K-1"]
+    end
+    subgraph MUL["K exact narrow products"]
+        M0["sigA0 × sigB0<br/>product exponent e0"]
+        M1["sigA1 × sigB1<br/>product exponent e1"]
+        MK["sigAk × sigBk<br/>product exponent ek"]
+    end
+    MAX["choose local anchor exponent<br/>or accumulator exponent"]
+    AL["per-product bounded aligners<br/>with signed tail metadata"]
+    CSA["compress aligned products<br/>plus accumulator rows"]
+    REG["registered carry-save or<br/>resolved accumulator state"]
+    FIN["final CPA, normalize,<br/>round/pack at defined boundary"]
+    DECODE --> MUL --> MAX --> AL --> CSA --> REG
+    REG -->|"feedback if instruction spans steps"| CSA
+    REG --> FIN
+```
+
+The hardware design sequence is:
+
+1. Decode every lane's class/sign/exponent and generate exact narrow significand products.
+2. Choose an anchor: maximum product exponent, current accumulator exponent, an exponent bin, or the MX shared scale.
+3. Shift each product to that binary point. Cap the physical shift and retain sufficient signed-tail information for the promised rounding.
+4. Convert signed magnitudes into compressor rows and reduce all lane products plus old accumulator state.
+5. Register the redundant or binary accumulator. If feedback remains carry-save, define the sum/carry weights exactly.
+6. At the architecturally defined boundary, perform the final CPA, normalization, rounding, flags, and conversion to the destination format.
+
+The accumulator-width derivation starts from the worst product exponent span and the number of terms. Summing $K$ same-sign maximum magnitudes needs approximately $\lceil\log_2 K\rceil$ integer headroom bits in addition to product precision. If the contract is not exact, specify the retained low bits and prove an error/rounding bound; “FP32 accumulate” describes an architectural format, not a guarantee that an internal wire is exactly 32 bits or that a whole dot product rounds only once.
+
+**Hardware versus software.**
+
+| Hardware owns | CUDA/HIP/compiler/runtime owns |
+|---|---|
+| lane multipliers, exponent compare, aligners, compressor/accumulator, rounding | instruction shape, tile scheduling, operand layout, scale values |
+| supported input/accumulator/output formats and sparse modes | choosing a legal mode and inserting conversions/scales |
+| instruction completion and documented numeric contract | deciding reduction order across multiple instructions/tiles |
+| lane segmentation and operand isolation | providing enough independent work to fill the pipeline |
+
+Software cannot invent more accumulator precision or a different rounding boundary than the instruction provides. Hardware does not know that a set of matrix instructions mathematically belongs to one dot product unless the ISA explicitly encodes that accumulation relationship.
+
+The MX “sum-together” optimization (§6) is the common-scale case. It can factor scale handling around a local integer-like reduction because the format supplies a block scale. Ordinary BF16/FP16 inputs do **not** automatically have one shared exponent, so do not draw a single block-max aligner for every tensor instruction without stating the numeric contract.
+
+At FP4/FP8 widths, exponent/class/control, scale distribution, accumulator storage, mode muxes, register files, and wires can outweigh the tiny significand multipliers. That is why halving input bits does not guarantee doubling useful tensor throughput: the array must also duplicate lanes, route twice as many operands, provision accumulation bandwidth, and remain within clock/power limits.
 
 ---
 
@@ -1134,6 +1311,50 @@ $$
 
 for the chosen redundancy factor $\rho$. Formally prove every table entry maps its input region to a legal next remainder. The Pentium FDIV incident is the canonical warning: a few missing quotient-table entries can escape ordinary random testing.
 
+#### 10.3.1 Divider FSMD and context registers
+
+The recurrence becomes hardware only after defining state and enables:
+
+```text
+context = {
+  resultSign, resultExponent, normalizedDivisor,
+  remainderSum, remainderCarry,
+  quotientPositive, quotientNegative,
+  iterationCount, residualNonzero,
+  roundingMode, format, pendingFlags, destinationTag,
+  valid, killed
+}
+```
+
+`quotientPositive/quotientNegative` support on-the-fly conversion of redundant SRT digits without waiting for a serial signed-digit conversion at the end. `remainderSum/remainderCarry` preserve a carry-save remainder; document the carry-row bit weights exactly.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Prepare: "request handshake"
+    Prepare --> Special: "class bypass"
+    Prepare --> Iterate: "finite nonzero"
+    Iterate --> Iterate: "counter not done"
+    Iterate --> Correct: "last digit"
+    Correct --> Round
+    Special --> Respond
+    Round --> Respond
+    Respond --> Idle: "response handshake"
+```
+
+One context has initiation interval close to total divide latency. A bank of contexts can feed one arithmetic recurrence slice round-robin, but the quotient-table output, multiple selection, remainder rows, and tag must be selected from and written back to the same context each cycle.
+
+For radix $r$, estimate
+
+$$
+N_{\text{iter}}\approx
+\left\lceil\frac{P+n_{\text{guard}}}{\log_2r}\right\rceil,
+$$
+
+then add prepare, correction, round, and response cycles. The exact guard count follows the rounding proof. A divide response held under backpressure must keep result, flags, and tag stable; accepting a new request must never overwrite a live remainder.
+
+The recurrence register is normally a one-cycle timing endpoint. Declaring it multicycle because the *operation* takes many cycles is incorrect unless the control actually holds that exact source/destination pair for multiple clocks.
+
 ### 10.4 Reciprocal by Newton–Raphson
 
 Normalize $B$, index a ROM with its leading fraction bits, and obtain $X_0\approx1/B$. Iterate:
@@ -1251,6 +1472,31 @@ and use the even significand on an exact tie. Other rounding modes select from t
 | signaling NaN | quiet NaN | invalid |
 
 Approximate `rsqrt` instructions may define different FTZ, error, and special-value behavior. Keep that contract separate from a correctly rounded `sqrt`.
+
+### 11.4 Root-engine state and sharing with divide
+
+A digit-recurrence square-root context stores:
+
+```text
+normalized radicand and paired-bit position
+partial remainder
+partial root
+trial-divisor state
+iteration counter
+result exponent/sign/class
+rounding mode, flags, destination tag, valid/kill
+```
+
+The datapath reuses a divider's shift, add/subtract, mux, remainder register, and final rounder, but the trial divisor depends on the partial root rather than a fixed divisor. A `mode={DIV,SQRT}` bit changes recurrence input selection and correction rules. Sharing saves area but couples availability: a long divide blocks root unless multiple contexts and an interleaved recurrence schedule are implemented.
+
+For Newton `rsqrt`, the controller is a micro-op sequencer over a seed ROM and multiplier/FMA pipe:
+
+```text
+LOOKUP -> y*y -> fma(-x, y*y, 3) -> 0.5*y*residual
+       -> repeat if required -> optional x*y -> CORRECT -> ROUND
+```
+
+Each temporary has a specified internal format and destination tag/context ID. The sequencer must reserve or arbitrate FMA issue/writeback slots and survive stalls. Seed address width, ROM output precision, number of refinements, temporary rounding, and final residual test are co-designed from the promised error. An estimate instruction can stop after the seed/one refinement; correctly rounded `sqrt` needs the bracket/correction proof.
 
 ---
 
@@ -1389,6 +1635,44 @@ Choose explicitly:
 
 An approximate ISA operation and a correctly rounded operation are different products. NVIDIA PTX, for example, names several operations with an explicit `.approx` contract. The compiler, framework, and model-quality tests must know which contract the RTL implements.
 
+### 13.6 SFU pipeline, coefficient memory, and error signoff
+
+A table/polynomial SFU can be registered as:
+
+| Boundary | Registered state |
+|---|---|
+| `S1` | class/sign, reduced-range control, segment/quadrant, mode/tag |
+| `S2` | reduced argument, table index, interpolation residual, reconstruction exponent |
+| `S3` | coefficient ROM outputs and residual powers |
+| `S4...` | Horner/Estrin partials in the selected internal fixed/FP format |
+| `SN` | reconstructed extended result plus exception/domain state |
+| response | rounded/packed result, flags/error contract, tag |
+
+Coefficient storage is hardware:
+
+- ROM/SRAM depth equals the segment count times coefficients per segment;
+- word width comes from coefficient quantization analysis, not the destination width alone;
+- synchronous memory adds a pipeline cycle;
+- lanes need enough read ports, replicated/banked tables, or an arbitration schedule;
+- parity/ECC and production test may be required for a large table;
+- versioned coefficient-generation scripts and ROM images must match the RTL segment decoder.
+
+Break the error budget into:
+
+$$
+\epsilon_{\text{total}}
+\le
+\epsilon_{\text{range reduction}}
++\epsilon_{\text{approximation}}
++\epsilon_{\text{coefficient quantization}}
++\epsilon_{\text{evaluation rounding}}
++\epsilon_{\text{reconstruction/final round}}.
+$$
+
+Search the reduced interval for worst cases using higher-precision arithmetic, then add directed tests at every segment boundary, quadrant transition, clamp threshold, table address, coefficient sign change, and final rounding midpoint. Monotonicity is a separate property: adjacent table segments can each meet a pointwise error bound yet create a backward step at their boundary.
+
+For very large trigonometric arguments, the range reducer can be larger than the polynomial core. Its fixed-point product with stored $2/\pi$, quotient extraction, extended subtraction, and quadrant bits need an independent width/error proof and often a separate slow path.
+
 ---
 
 ## 14. FPU integration, control, and verification
@@ -1417,6 +1701,43 @@ flowchart TB
 Every register/context must carry operation, format, rounding mode, class bits, pending flags, destination tag, valid, and kill/flush state. For example, a fixed pipeline might have latency 4 and initiation interval 1, while a simple iterative divider might have latency 20 and initiation interval 20; interleaved contexts can improve the latter's throughput. These are illustrative parameters, not format constants. Latency and initiation interval are not synonyms.
 
 If several producers share one rounder, prove the completion arbiter has buffering for simultaneous finishes. Otherwise an arithmetically correct unit can drop a result under contention.
+
+#### 14.1.1 Execution-port, scoreboard, and physical-design contract
+
+The request/response interface should expose:
+
+```text
+request  = valid, ready, op, format, operands, rounding/profile, destinationTag
+response = valid, ready, result, supported status/exception bits, destinationTag
+control  = kill/flush, reset, clock/power state, test enable
+```
+
+Choose one of two interior-control styles:
+
+- **elastic stages:** each stage owns a valid bit and advances only when the next stage can accept; easy local composition but ready propagation and enable muxing cost timing/power;
+- **unstalled fixed pipe:** once accepted, a result emerges after a fixed number of cycles; admission and a completion FIFO guarantee space, simplifying stage timing.
+
+A GPU usually prefers predictable fixed arithmetic latency plus scoreboarding, but replay, clock/power transitions, or shared completion resources can still add external backpressure. The scheduler must use the actual port contract, not a diagram's nominal number of stages.
+
+For simultaneous engines, size completion storage from the worst legal coincidence, for example add/FMA, convert, and divider finishing in one cycle. Arbitration alone is insufficient if a losing producer cannot hold its result. Prove:
+
+$$
+N_{\text{accepted}}
+=N_{\text{retired}}+N_{\text{live}}+N_{\text{killed}}.
+$$
+
+Physical sign-off is mode-specific:
+
+| Check | What to inspect |
+|---|---|
+| timing | exponent-compare/align, compressor cut, CPA/LZA, normalize/round, mode-mux and tag paths |
+| congestion | multiplier columns, wide shifters, accumulator feedback, packed-lane routing |
+| power | glitch activity in compressor/aligner, operand isolation, clock-tree load, mode transition |
+| IR drop | simultaneous tensor-lane switching and worst legal instruction mix |
+| DFT | scan control of valid/context registers and test of seed/coefficient ROMs |
+| recovery | disposition of live fixed-pipe and iterative operations on flush/reset/power loss |
+
+Do not quote a pipeline stage in FO4 or picoseconds without the cell library, PVT corner, load, wire estimate, clock uncertainty, and register overhead. Architecture selects candidate cuts; synthesis, place-and-route, STA, and power analysis decide whether they work.
 
 ### 14.2 Verification matrix
 
