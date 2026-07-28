@@ -1,4 +1,4 @@
-# Digital Design for AI — Pipelining, CDC, NoC, Async Copies
+# Digital Design for AI — Pipelining, CDC, DMA/TMA, and Interconnects
 
 > **Layer:** L2 (integration page).
 > **Prerequisites:** [On_Chip_Memory_Hardware](01_On_Chip_Memory_Hardware.md), [FP_Unit_Design](02_FP_Unit_Design.md), [Systolic_Arrays_and_Dataflow](03_Systolic_Arrays_and_Dataflow.md). RTL fluency (FFs, FSMs, FIFOs).
@@ -488,7 +488,7 @@ Counters: command queue depth, generated sectors per command, useful/fabric-byte
 
 ---
 
-## 4. Network-on-chip (NoC)
+## 4. Interconnect hardware — on-die NoC to inter-chip fabrics
 
 ### 4.1 Why the GPU needs several interconnects
 
@@ -703,6 +703,212 @@ every admitted packet eventually ejects or reports an error under fairness assum
 
 Test single-router exhaustively where practical, then multi-router backpressure, hot spots, all source/destination pairs, protocol causal cycles, adaptive routes, TMA/DMA saturation, atomics, multicast, faults, clock ratios, power/reset epochs, and link errors. Count per-VC occupancy, credit starvation, allocator loss, hop/queue/serialization latency, link/cut utilization, endpoint backpressure, class service, reorders, retries, and timeouts.
 
+### 4.10 The path does not end at the die edge
+
+An inter-chip operation traverses two on-die networks plus boundary hardware:
+
+```mermaid
+flowchart LR
+    subgraph GA["GPU/accelerator A"]
+        SM["SM/TMA/DMA"] --> NIA["NoC NI<br/>coalesce, ID, order"]
+        NIA --> PA["Inter-chip protocol adapter<br/>remote read/write/atomic/message"]
+        PA --> LLA["Link layer<br/>VC, credit, sequence, CRC/replay"]
+        LLA --> PHYA["PHY<br/>gearbox, lanes, FEC, training"]
+    end
+    PHYA <--> MED["Package traces, PCB/cable,<br/>retimer, or switch fabric"]
+    subgraph GB["GPU/accelerator B"]
+        PHYB["PHY"] --> LLB["Link layer<br/>integrity + duplicate suppression"]
+        LLB --> PB["Remote protection +<br/>protocol reconstruction"]
+        PB --> NIB["Destination NoC NI"]
+        NIB --> L2B["L2/home/atomic/memory<br/>or collective engine"]
+    end
+    MED <--> PHYB
+    L2B -. "response/completion path" .-> SM
+```
+
+The stages answer different questions:
+
+- **NoC:** how does a transaction reach the local boundary?
+- **protocol adapter:** what remote operation and memory semantics does it mean?
+- **link layer:** did the adjacent endpoint receive the encoded packet exactly once?
+- **PHY:** can bits cross this electrical/optical channel?
+- **switch fabric:** which remote chip/partition is the destination?
+- **destination home/memory:** when is the operation ordered and visible?
+
+A link ACK is not a CUDA event, remote memory fence, or atomic completion. It only retires hop-local replay state.
+
+### 4.11 Inter-chip endpoint state
+
+A scale-up endpoint resembles a NoC NI plus an IOMMU, reliable link, and remote completion engine:
+
+```text
+source GPU/context/process and remote destination
+local virtual pointer -> remote accelerator/address handle
+permissions, key/partition, cache/coherence attributes
+operation, size, byte mask, atomic operand
+scope and acquire/release/SC ordering state
+end-to-end transaction/sequence ID
+chosen route, plane, and packet/chunk sequence
+outstanding response/beat bitmap
+hop-local link sequence and immutable retry copy
+VC credits, timeout, poison/error, reset epoch
+```
+
+Transaction ID and link sequence are not interchangeable. The transaction ID survives switches and completes one remote operation. Each hop's link sequence only detects/replays corrupt or missing units on that hop.
+
+The address path also changes. A remote-memory API first exports an allocation, grants another process/device access, and creates a mapping such as:
+
+```text
+local virtual range -> {destination accelerator,
+                        remote address/handle,
+                        permissions,
+                        mapping generation}
+```
+
+The source MMU/GMMU recognizes that the address is remote and routes it to the scale-up endpoint. The destination validates source identity and generation before admitting the request. Revocation waits for old operations or changes the generation so a stale packet cannot touch reallocated memory.
+
+### 4.12 PHY choices: package-parallel versus long-reach SerDes
+
+| Property | Same-package die-to-die | Board/rack serial link |
+|---|---|---|
+| lanes | many wide parallel wires | fewer high-rate SerDes lanes |
+| clock | often forwarded clock | clock/data recovery or embedded clock |
+| channel | short package/interposer | PCB, connector, copper/optical cable, retimer |
+| main cost | bumps and die-edge “beachfront” | serializer/equalizer/FEC power and latency |
+| repair | spare lanes/down-width | lane repair, retimer, down-rate/down-width |
+
+Transmit hardware can include gearbox/serializer, lane striping, scrambling, FEC, pre-emphasis/FFE, and driver. Receive hardware includes termination, CDR or forwarded-clock capture, CTLE/DFE, deserializer, FEC, alignment-marker detection, lane deskew FIFOs, and integrity checks.
+
+PAM4 carries two bits per symbol but has three decision thresholds and less noise margin than NRZ, so it needs stronger equalization/coding. FEC can correct common channel errors; CRC detects residual corruption; link replay retransmits a unit that remains bad. These are complementary layers.
+
+Report:
+
+$$
+B_{one-way}=N_{lanes}R_{lane}
+\eta_{mod/encoding}\eta_{FEC}\eta_{flit}
+\eta_{protocol}\eta_{retry}.
+$$
+
+Every efficiency factor multiplies the raw rate. Direction matters: adding TX and RX produces a “bidirectional” marketing number that a one-way tensor transfer cannot use.
+
+For chiplets, also report
+
+$$
+B_{edge-density}=\frac{B_{one-way}}{\text{millimeters of die edge}},
+$$
+
+because bump rows, power/ground, keepout, and PHY macros limit how much link can physically fit.
+
+### 4.13 Reliable link protocol and bring-up
+
+The transmitter maintains `next_seq`, `oldest_unacked`, a replay buffer, credits per VC, and an epoch. The receiver maintains expected/accepted sequence state and returns:
+
+- an **ACK** when a unit was received with valid integrity, allowing retry storage to retire;
+- a **credit** when a receive slot is free, allowing new traffic.
+
+Returning a credit with the ACK is only safe if the buffer really became reusable. Otherwise a legal burst can overwrite live data.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Detect
+    Detect --> Negotiate: "peer present + sideband"
+    Negotiate --> Train: "version/profile/rate/width selected"
+    Train --> Deskew: "lanes lock and align"
+    Deskew --> LinkInit: "FEC/framing/replay state ready"
+    LinkInit --> ProtocolInit: "credits, routes, protection, epoch"
+    ProtocolInit --> Active
+    Active --> Retrain: "lane/margin fault"
+    Retrain --> Active: "same session reconciled"
+    Active --> Quiesce: "reset, power, fatal timeout"
+    Quiesce --> Detect: "old work resolved"
+```
+
+Lane fallback changes serialization latency, bandwidth-delay product, and timeouts. Hardware/firmware must update scheduling and advertised performance after negotiation.
+
+### 4.14 Protocol families and what they actually promise
+
+| Family | Boundary/use | Main operations | Coherence model |
+|---|---|---|---|
+| UCIe-class D2D | chiplets in one package | mapped PCIe/CXL or streaming/raw protocol | whatever mapped protocol defines |
+| PCIe | host/device I/O | configuration, DMA, messages, atomics where supported | ordinarily noncoherent DMA |
+| CXL | host/device memory/cache | `.io`, `.cache`, `.mem` | explicit host/home coherent roles |
+| proprietary accelerator scale-up | GPU/accelerator peers and switches | peer loads/stores, atomics, DMA, collectives | vendor/version-specific |
+| UALink | open accelerator scale-up | remote reads, writes, atomics, DMA | I/O-coherent destination-node contract; software coherence across accelerator caches |
+| InfiniBand/RoCE/UEC-class | scale-out networking | messages and RDMA | software/message ownership, not shared cache coherence |
+
+Memory semantics do **not** automatically mean all remote accelerator caches snoop each other. UALink 1.0 deliberately uses software coherence across accelerators while providing remote memory operations and destination system-node I/O-coherency behavior. CXL instead names host/device coherence roles; UCIe can carry CXL but does not itself invent CXL semantics. Proprietary NVLink/Infinity-class guarantees must be read from the product/platform contract rather than inferred from bandwidth.
+
+This distinction decides the software sequence:
+
+```text
+hardware-coherent path:
+    release remote write -> acquire remote read/atomic
+
+software-coherent peer path:
+    producer finishes local writes
+    producer flushes/orders data to the exported domain
+    remote operation or signal is issued
+    consumer waits/acquires
+    consumer invalidates stale cached copies if the contract requires
+    consumer uses data
+```
+
+### 4.15 Switch fabric, routing, and collective offload
+
+A scale-up switch contains ingress PHY/link endpoints, route/partition lookup, per-class buffers, a crossbar or multistage fabric, egress endpoints, and management/telemetry. Several switches may form leaf/spine stages or parallel planes.
+
+```mermaid
+flowchart TB
+    G0["GPU 0"] --> L0["Leaf 0"]
+    G1["GPU 1"] --> L0
+    G2["GPU 2"] --> L1["Leaf 1"]
+    G3["GPU 3"] --> L1
+    L0 <--> S0["Spine/plane 0"]
+    L0 <--> S1["Spine/plane 1"]
+    L1 <--> S0
+    L1 <--> S1
+```
+
+The sum of GPU port rates is not the delivered all-to-all bandwidth. Map the traffic matrix through routes and evaluate every cut. A fabric is nonblocking only for a defined simultaneous traffic set; large systems can deliberately oversubscribe and rely on software placement/scheduling.
+
+Packet striping across planes improves utilization but can reorder. Either pin an ordered flow to one route or carry chunk/sequence metadata and reorder at the endpoint. On failure, reroute cannot let an old-path packet arrive after a new-path completion without epoch/sequence handling.
+
+Collective offload adds reduction/multicast engines to switches. A reduction context stores team/group, collective generation, datatype/op, chunk offset, expected contributor bitmap/count, partial accumulator, output tree, and timeout/error. It reduces network bytes but uses finite switch state and supports only provisioned operations/formats.
+
+### 4.16 Worked remote atomic
+
+GPU A executes a release-qualified fetch-add in GPU B memory:
+
+1. A's ordering ledger waits for selected earlier stores.
+2. GMMU mapping chooses destination B and validates remote-atomic permission.
+3. endpoint allocates transaction `T90`, selects route/plane, and packetizes;
+4. every hop uses its own CRC/sequence/replay state;
+5. B validates the request and sends it through B's NoC to the owning L2/home atomic queue;
+6. the queue serializes the address, reads `old`, writes `old+operand` exactly once, and responds with `old`;
+7. A matches `T90`, applies acquire-side ordering if requested, writes the destination register, and wakes the warp.
+
+If the request was never accepted, retry is safe. If B updated memory but the response was lost, issuing a fresh add is unsafe. End-to-end duplicate suppression or a protocol recovery state must establish performed versus not performed.
+
+### 4.17 Sizing and verification
+
+For end-to-end response or credit latency $L$ and target one-way bandwidth $B$:
+
+$$W_{outstanding}\ge BL.$$
+
+At 200 GB/s and 500 ns, about 100 KB must be in flight. Request IDs, replay buffers, switch credits, destination queues, and response buffers must all cover the window; the smallest stage limits throughput.
+
+Verify and count:
+
+- address import/export, protection, generation revocation, and process isolation;
+- all rate/width/lane-repair states, deskew, FEC, CRC, replay, and sequence wrap;
+- ACK versus credit conservation and immutable retry copies;
+- no lost/duplicate/misrouted transaction through multipath or reset;
+- remote write/atomic exactly-once and acquire/release ordering;
+- coherent versus software-coherent cache ownership sequences;
+- bisection, congestion, QoS, reroute, and head-of-line blocking;
+- collective group/generation separation, missing member, and switch reset;
+- link margin, corrected/uncorrected error, useful/raw bytes, retry traffic, VC occupancy, path latency, remote atomic queues, and retrain/down-width time.
+
 ---
 
 ## 5. Clock and power gating
@@ -883,9 +1089,9 @@ flowchart TD
     B --> C[Pipelined latency = 5 cycles]
     C --> D["L3 warp scheduler must hide via ILP / TLP"]
 
-    E[Multi-die packaging at L0/L1] --> F[Mesochronous CDC required]
-    F --> G[2–4 cycle die-crossing penalty]
-    G --> H[NV-HBI engineered to be ~invisible<br/>to software]
+    E[Multi-die / multi-chip boundary] --> F[Protocol adapter + reliable link<br/>+ PHY + remote endpoint]
+    F --> G[Added serialization, clock crossing,<br/>credit/replay, switch, and target latency]
+    G --> H[Software sees topology, ordering,<br/>coherence, and failure contract]
 
     I[TMA async copies] --> J[Move tile address/layout work out of<br/>the warp issue stream]
     J --> K[Software pipelines copy and compute<br/>with barriers + proxy ordering]
@@ -925,6 +1131,12 @@ flowchart TD
 | NoC link useful bandwidth | $wf\eta$ | width × frequency × efficiency |
 | NoC unloaded packet latency | $L_{srcNI}+HL_{head-hop}+F-1+L_{dstNI}+L_{target}$ | separates hop and serialization costs |
 | VC credit invariant | available + in-flight + occupied = depth | prevents loss/overflow/deadlock |
+| Inter-chip delivered bandwidth | $NR\prod\eta_i$ one way | separates raw lanes from usable payload |
+| Inter-chip outstanding window | $W\ge BL$ | tags, replay, credits, and buffers must all cover the loop |
+| ACK versus completion | adjacent receipt versus remote visibility | prevents early software/buffer reuse |
+| transaction ID versus link sequence | end-to-end operation versus hop retry | enables exactly-once atomics/writes |
+| D2D bandwidth density | one-way GB/s per mm die edge | chiplet shoreline/bump constraint |
+| UALink 1.0 cache coherence | software across accelerator caches | remote memory semantics are not full snoop coherence |
 | ICG cell area overhead | ~5% of gated block | Standard |
 | Power-gating wakeup time | ~10s of cycles | DTC recharge |
 | DVFS granularity | sub-ms | PMU-driven |
@@ -954,6 +1166,10 @@ flowchart TD
 - Choquette et al., *NVIDIA Hopper Architecture*, IEEE Micro 2023 — TMA disclosure.
 - NVIDIA, [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/) — asynchronous copies, TMA, barriers, thread scopes, memory synchronization domains, and CUDA C++ memory model.
 - NVIDIA, [Parallel Thread Execution ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) — bulk/tensor async instructions, `mbarrier`, scoped fences/atomics, and proxy ordering.
+- PCI-SIG, [PCI Express Base Specification Revision 7.0](https://pcisig.com/PCIExpress/Spec/Base/_7.0).
+- Compute Express Link Consortium, [CXL Specification 4.0](https://computeexpresslink.org/).
+- UCIe Consortium, [UCIe Specification 3.0](https://www.uciexpress.org/specifications).
+- UALink Consortium, [UALink specifications](https://ualinkconsortium.org/specification/).
 - Wang et al., *NV-HBI Cross-Die Bridge for Blackwell*, Hot Chips 2024.
 - Foundry-DTCO disclosures from TSMC / Intel — pipelining-friendly cell libraries.
 

@@ -8,15 +8,15 @@
 
 ## 0. Why this page exists
 
-Every AI cluster larger than one GPU is limited by the network, not the silicon. A B200 delivers 4.5 PFLOP/s of FP4 compute but only 1.8 TB/s of NVLink bandwidth and 100 GB/s of PCIe bandwidth. The ratio of compute to communication determines whether a training job scales or stalls. This page builds the interconnect stack from the bottom up: the physics of a single SerDes lane, the protocols built on top of it, the topologies that connect thousands of nodes, and the congestion-control algorithms that keep those topologies from collapsing under incast.
+Once work spans chips, useful scaling is bounded by both compute and communication. The ratio of arithmetic to transferred bytes, the fixed latency of synchronization, topology cuts, endpoint injection, and destination memory bandwidth determine whether another accelerator helps or stalls. This page builds the complete inter-chip stack: endpoint semantics, SerDes/parallel PHYs, link reliability, PCIe/CXL/UCIe and accelerator scale-up protocols, switches/topologies, RDMA, collectives, and congestion control.
 
-The five invariants:
+Five working rules:
 
-1. **SerDes rate doubles every ~4 years** — 56 Gbps (2020) → 112 Gbps (2023) → 224 Gbps (2025) → 448 Gbps (proj. 2028). Each doubling makes signal integrity harder.
-2. **Passive copper trace length is bounded by insertion loss** — at 224 Gbps PAM4, Nyquist is 56 GHz, and FR-4 attenuation ~1 dB/inch limits traces to ~1 m.
-3. **Scale-up (NVLink, UALink) is a rack-scale problem** — the copper constraint means these domains cannot span racks without active optics.
-4. **Scale-out (Ethernet, InfiniBand) is a congestion problem** — Incast from All-to-All collectives overwhelms switch buffers; DCQCN and packet spraying are the mitigations.
-5. **Topology determines bisection bandwidth** — Clos scales linearly with N; torus scales as N^{2/3}; dragonfly is between them with better diameter.
+1. **A lane-rate generation is not payload bandwidth.** Modulation, coding, FEC, FLITs, headers, replay, lane count, and direction all matter.
+2. **Reach comes from the channel budget.** Package loss, PCB material/length, connectors, cable, retimers, equalization, FEC, temperature, and target error rate determine whether a nominal speed works.
+3. **Scale-up and scale-out are semantic as well as physical choices.** Peer memory/atomics and low-latency collectives differ from queued RDMA/messages even when both use high-rate SerDes or optics.
+4. **Flow control and congestion control solve different problems.** Link/VC credits prevent local buffer overflow; end-to-end rate control, routing, admission, and collective scheduling manage shared-fabric congestion.
+5. **Topology must be evaluated with a traffic matrix.** Port sum is not bisection bandwidth, and no topology name alone proves a system is nonblocking.
 
 ---
 
@@ -44,7 +44,7 @@ A typical SerDes receiver needs ~25 dB of equalization budget. Subtracting packa
 
 $$\ell_{max} \approx \frac{18}{5.24} \approx 3.4 \text{ inches} \approx 0.09 \text{ m}$$
 
-With better materials (Megtron-7G, $\alpha \approx 0.4$) and advanced equalization (up to ~35 dB budget), passive copper extends to ~0.5–1.0 m at 224 Gbps — but no further.
+This is an illustrative loss-budget calculation, not a reach guarantee. Real links use measured or simulated S-parameters and allocate loss among package, vias, PCB, connectors, cable, and margin. Better materials, shorter packages, retimers, active copper, or optics can change reach; the protocol name and data rate alone cannot.
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
@@ -54,7 +54,7 @@ flowchart TD
         DSP --> DAC[DAC]
     end
     subgraph CH["Channel"]
-        PCB[PCB Trace 0.5-1 m] --> CTLE_R[CTLE]
+        PCB[Package / PCB / cable channel] --> CTLE_R[CTLE]
     end
     subgraph RX["Receiver"]
         CTLE_R --> DFE[DFE Tap Filter]
@@ -71,20 +71,22 @@ flowchart TD
     class DFE,ADC,DEC rx
 ```
 
-### 1.2 SerDes Generation Table
+### 1.2 Representative lane/port generations
 
-| Generation | Year | Data Rate | Modulation | Nyquist Freq | Max Cu Reach | Standard |
-|---|---|---|---|---|---|---|
-| PCIe Gen3 | 2012 | 8 GT/s | NRZ | 4 GHz | ~20 m | PCIe 3.0 |
-| PCIe Gen4 | 2018 | 16 GT/s | NRZ | 8 GHz | ~5 m | PCIe 4.0 |
-| PCIe Gen5 | 2021 | 32 GT/s | NRZ | 16 GHz | ~2 m | PCIe 5.0 |
-| PCIe Gen6 | 2023 | 64 GT/s | PAM4 | 16 GHz | ~2 m | PCIe 6.0 |
-| NVLink-4 | 2022 | 100 GB/s/link | NRZ | 25 GHz | ~1 m | Proprietary |
-| NVLink-5 | 2024 | 200 GB/s/link | PAM4 | 56 GHz | ~1 m | Proprietary |
-| UALink 1.0 | 2025 | 200 GB/s/link | PAM4 | 56 GHz | ~1 m | UALink Consortium |
-| IB NDR400 | 2025 | 400 Gb/s/port | PAM4 | 56 GHz | ~2 m (active Cu) | InfiniBand |
-| PCIe Gen7 (proj.) | 2027 | 128 GT/s | PAM4 | 32 GHz | ~2 m | PCIe 7.0 |
-| 448G (proj.) | 2028 | 448 Gb/s | PAM4 | 112 GHz | <0.5 m | OIF CEI-112G |
+Keep **per-lane transfer rate**, **payload bandwidth**, and **aggregate port/link bandwidth** in different columns. A protocol “link” can bond a product-specific number of lanes.
+
+| Standard/profile | Raw/data rate named by standard | Modulation/framing | Boundary |
+|---|---:|---|---|
+| PCIe 3.0 | 8 GT/s/lane | NRZ, 128b/130b | board I/O |
+| PCIe 4.0 | 16 GT/s/lane | NRZ, 128b/130b | board I/O |
+| PCIe 5.0 | 32 GT/s/lane | NRZ, 128b/130b | board I/O / CXL PHY base |
+| PCIe 6.x | 64 GT/s/lane | PAM4, 256-byte FLIT + FEC/CRC/replay | board I/O |
+| PCIe 7.0 | 128 GT/s/lane | PAM4, compatible FLIT mode | board I/O |
+| UCIe 3.0 | up to 64 GT/s/lane | short-reach die-to-die profiles | package D2D |
+| UALink 200G 1.0 | 200 Gb/s data per lane | Ethernet-derived PAM4 PHY/FEC profile | accelerator scale-up |
+| InfiniBand NDR | 400 Gb/s per port profile | bonded high-rate serial lanes | scale-out |
+
+Reach is a channel-design result, not a constant of the protocol name. Package traces, PCB material, connectors, retimers, direct-attach copper, active cable, and optics produce different insertion loss and latency at the same nominal rate.
 
 ### 1.3 Equalization: CTLE, FFE, DFE
 
@@ -106,136 +108,265 @@ The main cursor $c_0$ carries most of the energy; pre-cursor taps ($c_{-1}, c_{-
 
 $$y[n] = r[n] - \sum_{k=1}^{N} d_k \cdot \hat{x}[n-k]$$
 
-where $\hat{x}[n-k]$ are previously decided symbols. DFE error propagation is bounded because PAM4 symbols have large enough spacing and FEC catches any residual errors.
+where $\hat{x}[n-k]$ are previously decided symbols. A wrong decision can feed back and cause a burst of errors, so DFE error propagation is a design concern; coding, FEC, adaptation limits, and receiver validation mitigate it.
 
-Total equalization budget: CTLE (~12 dB) + FFE (~8 dB) + DFE (~10 dB) = ~30 dB, sufficient for ~1 m Megtron-6 trace at 224 Gbps.
+An illustrative equalization allocation might assign roughly 12 dB to CTLE, 8 dB to transmitter FFE, and 10 dB to DFE, but these contributions are not freely additive guarantees. Compliance uses a specified channel, transmitter/receiver masks, jitter/noise budget, BER target, and FEC performance.
 
-### 1.4 Forward Error Correction (FEC)
+### 1.4 Forward error correction (FEC), CRC, and replay
 
-PAM4 links require FEC to achieve $<10^{-15}$ post-correction BER. The standard approach is RS(544,514) interleaved with two codewords per 256-bit flit:
+PAM4's lower voltage margin raises raw error probability, so high-rate protocols combine:
 
-- Overhead: $\frac{544 - 514}{544} \approx 5.5\%$
-- Coding gain: ~8–9 dB
-- Latency: ~80–150 ns (encoding + decoding pipeline)
+- **FEC:** correct a bounded error pattern without retransmission;
+- **CRC:** detect residual corruption after FEC;
+- **link replay:** retransmit an uncorrectable FLIT/packet from a retained copy;
+- **end-to-end checks:** detect misroute/corruption beyond one physical hop.
 
-This is why raw 224 Gbps per lane yields effective ~200 Gbps data rate per direction. The 5.5% overhead accounts for the gap between "224 Gbps raw" and "200 GB/s per link" (along with 128b/130b encoding at the MAC layer).
+The code and framing are protocol-specific. PCIe 6.x/7.0 FLIT mode uses a 256-byte FLIT with lightweight FEC, CRC, and low-latency retry; Ethernet-derived UALink physical profiles use their specified Ethernet FEC/framing. Do not apply one RS code, 5.5% overhead, or 80–150 ns latency to every PAM4 link.
+
+FEC decoder depth trades correction strength against latency/area/power. Replay probability consumes bandwidth and sets retry-buffer depth. Architects use the complete efficiency:
+
+$$
+\eta_{delivered}=\eta_{encoding}\eta_{FEC}\eta_{flit}
+\eta_{protocol}\eta_{retry},
+$$
+
+then measure residual undetected-error rate and tail latency under injected error bursts.
 
 ---
 
-## 2. Protocol Layer: PCIe, CXL, NVLink, UALink
+## 2. Protocol layer: PCIe, CXL, UCIe, and accelerator scale-up
+
+### 2.0 One transaction, several independent contracts
+
+An inter-chip operation is not “put bytes on SerDes.” It crosses:
+
+```mermaid
+flowchart LR
+    K["Kernel/runtime/driver<br/>copy, remote load/store,<br/>atomic, collective"] --> MMU["GPU/CPU MMU<br/>local or remote mapping"]
+    MMU --> EP["Endpoint transaction layer<br/>operation, ID, order, protection"]
+    EP --> LL["Data/link layer<br/>flit/TLP, VC, credit,<br/>CRC/FEC/replay"]
+    LL --> PHY["PHY<br/>gearbox, lanes, equalization,<br/>deskew, training"]
+    PHY --> FAB["Direct cable/package<br/>or switch fabric"]
+    FAB --> RLL["Remote link endpoint"]
+    RLL --> REP["Remote protocol endpoint"]
+    REP --> MEM["Remote home/cache/memory,<br/>DMA or collective engine"]
+```
+
+Each layer has a different completion:
+
+| Event | Meaning |
+|---|---|
+| source queue accepted | endpoint owns the command |
+| link ACK | adjacent receiver got one encoded unit intact |
+| destination accepted | remote protocol state exists |
+| remote ordered/atomic point | operation joined destination memory order |
+| architectural completion | source software/hardware may consume result or reuse buffer |
+
+A link ACK is not a remote memory fence. CRC replay is not a retry of the architectural operation. Keeping hop-local link sequence separate from end-to-end transaction identity is the foundation of exactly-once writes and atomics.
 
 ### 2.1 PCIe Hierarchy
 
-PCIe remains the universal host-to-accelerator interconnect. Key math for PCIe Gen5 x16:
+PCIe is the universal discovery and I/O hierarchy: a root complex connects through zero or more switches to endpoints. An endpoint exposes configuration space and functions; software discovers BARs/capabilities, establishes DMA mappings, creates queues, and enables interrupts.
+
+The transaction layer creates TLPs:
+
+- **posted:** a memory write has no ordinary completion, so later software-visible completion needs another ordering/response mechanism;
+- **non-posted:** reads and selected requests receive completions;
+- **completion:** returns status/data and the requester tag;
+- **messages:** interrupts, errors, power-management, and other protocol events.
+
+The data-link layer protects and retries traffic on one adjacent link, while the physical layer trains lanes. PCIe 6.0 and 7.0 use FLIT mode with PAM4, lightweight FEC, strong CRC, and low-latency link retry. As of 2026, PCIe 7.0 is the current approved base generation; compatibility means a real link can negotiate a lower speed/width.
+
+For the familiar Gen5 one-direction payload-rate ceiling:
 
 $$BW_{PCIe\ Gen5\ x16} = 16 \text{ lanes} \times 32 \text{ GT/s} \times \frac{128}{130} \text{ (encoding)} \times \frac{1}{8} \text{ (bytes)} \approx 63.0 \text{ GB/s}$$
 
-PCIe Gen6 doubles this to ~121 GB/s (x16) using PAM4, but adds FEC latency. For AI workloads, PCIe is used for:
+Actual payload bandwidth is lower after TLP/FLIT headers, credit/update traffic, alignment, replay, and small-message effects. For AI systems PCIe commonly carries:
 
-- **Initial model loading**: host RAM → GPU HBM
-- **Control plane**: kernel launches, small host-device transfers
-- **Fallback path**: when NVLink/UALink is not available
+- host↔accelerator DMA and model/checkpoint loading;
+- queue doorbells, completion records, interrupts, page faults, and management;
+- GPU peer transfers when no accelerator scale-up path is selected;
+- NIC/storage traffic through GPUDirect-style mappings.
 
-PCIe is **never** the primary training communication path. At 63 GB/s per GPU, an 8-GPU node doing AllReduce would need $\frac{63}{8} \approx 7.9$ GB/s per-GPU contribution — far below the ~400 GB/s needed for TP across 8 GPUs.
+PCIe can be a training communication path in systems without a dedicated scale-up fabric, but its per-device bandwidth/latency and shared switch/root cuts are usually weaker for fine-grained tensor parallelism. Avoid the absolute claim that it is “never” used.
+
+An endpoint needs request tags, posted/non-posted/completion credits, replay storage, ordering-domain state, ATS/PASID/IOMMU context, poisoned/error completions, and reset epochs. Posted writes make device completion design especially important: “TLP sent” is not proof that a destination DMA write is visible.
 
 ### 2.2 CXL (Compute Express Link)
 
-CXL runs on top of PCIe physical layer and adds three protocols:
+CXL uses PCIe electrical/link infrastructure while adding explicit cache and memory semantics. Current CXL 4.0 still organizes the fundamental roles around:
 
-1. **CXL.io**: equivalent to PCIe I/O (discovery, configuration, interrupts)
-2. **CXL.cache**: coherent cache access — allows an accelerator to cache host memory
-3. **CXL.mem**: allows the host (or any CXL agent) to access accelerator-attached memory
+1. **CXL.io:** PCIe-compatible enumeration, configuration, register access, interrupts, and conventional DMA;
+2. **CXL.cache:** a capable device coherently caches/accesses host memory under a host/home coherence role;
+3. **CXL.mem:** the host accesses device-attached memory through coherent memory semantics.
 
-CXL Type-3 devices (memory expanders) are relevant for AI: they allow a GPU node to address remote CXL-attached DDR5 as if it were local memory. Bandwidth is limited to PCIe Gen5 x16 rates (~63 GB/s), but capacity can reach terabytes — useful for KV cache offload (see [KV_Cache](../L8_Inference_and_Serving/01_KV_Cache.md)).
+The mix defines broad device types:
 
-CXL 3.0 adds multi-level switching and fabric management, but adoption in AI training clusters remains limited because NVLink and UALink provide much higher bandwidth.
+| Device | Protocol mix | Example role |
+|---|---|---|
+| Type 1 | `.io + .cache` | accelerator with no exposed device memory |
+| Type 2 | `.io + .cache + .mem` | accelerator with local memory |
+| Type 3 | `.io + .mem` | memory expander/pool |
 
-### 2.2b CXL 3.1 and CXL Fabric
+“CXL memory” is not one performance class. The path can include a host bridge, switch stages, a device memory controller, media, and RAS/security state. Software sees NUMA capacity with latency/bandwidth/failure properties that must be measured per route.
 
-CXL 3.0 introduced multi-level switching and peer-to-peer communication between devices. CXL 3.1 extends these capabilities with fabric-level features:
+```mermaid
+flowchart LR
+    CPU["CPU cores + host home agents"] --> HB["CXL host bridge<br/>coherence + address decode"]
+    HB --> SW["CXL switch/fabric<br/>route + virtual hierarchy"]
+    SW --> T2["Type 2 accelerator<br/>cache + device memory"]
+    SW --> T3["Type 3 memory device"]
+    FM["Fabric manager<br/>discover, bind, partition,<br/>route, security, telemetry"] -.-> SW
+    FM -.-> T3
+```
 
-- **CXL Fabric**: enables a pool of memory devices accessible by multiple hosts simultaneously. Unlike point-to-point CXL.mem, a fabric allows N hosts to share M memory devices through a switched CXL fabric topology.
-- **Relevance to AI**: disaggregated memory pools for KV cache sharing across inference replicas. A pool of CXL-attached DDR5 can serve as a shared KV cache that multiple GPU nodes read from, avoiding per-node replication. Also enables CPU-offloaded expert storage in MoE serving, where expert weights reside in CXL-attached memory and are fetched on-demand.
-- **Memory sharing**: multiple GPUs/CPUs can access the same CXL-attached memory with cache-coherence guaranteed by the CXL.cache protocol. Coherence traffic flows through the CXL fabric switches.
-- **Latency**: CXL 3.x over PCIe Gen5 yields ~150–250 ns for memory access (vs ~80 ns for local DDR5, ~300 ns for RDMA). The coherence overhead adds ~50–100 ns relative to direct-attached DDR5.
-- **Bandwidth**: CXL x16 Gen5 = 64 GB/s bidirectional, but this bandwidth is shared across all fabric participants accessing the same memory device. With 4 hosts sharing one memory expander, each host gets ~16 GB/s effective.
-- **Deployment status**: 2025–2026 early production, primarily for memory pooling in datacenter servers. Not yet a mainstream component of AI training architectures, but relevant for inference-serving memory disaggregation.
+Coherence is in the relevant physical-address/domain contract; devices still need ATS/IOMMU/PASID translation and protection for virtualized access. A fabric cannot infer object lifetime or application synchronization from an address.
+
+### 2.2b CXL fabrics, pooling, and management
+
+The fabric features introduced across CXL 2.x/3.x and extended in later revisions separate:
+
+- **data plane:** cache/memory/I/O traffic on established routes;
+- **fabric management:** discover components, create virtual hierarchies, bind logical devices/capacity to hosts, program routes, monitor health, and handle reconfiguration;
+- **host software:** online/offline memory, choose NUMA placement/tiering, migrate pages, handle poison and hot-plug.
+
+Pooling, sharing, and coherence are related but not identical:
+
+- **pooling:** capacity can be dynamically assigned among hosts;
+- **sharing:** a region can be simultaneously accessible to more than one host/device under a defined model;
+- **coherence:** caches participating for that region have named home/agent rules.
+
+Do not claim that every CPU/GPU accessing one CXL device automatically forms one flat snoop-coherent cache domain. The configured HDM mode, device capabilities, host/home topology, virtual hierarchy, and software mappings determine the actual semantics.
+
+A Type-3 pool can hold cold model weights, KV-cache tiers, memory-capacity overflow, or checkpoint staging. It is useful when capacity saved exceeds remote-access and fabric-contention cost:
+
+$$
+N_{reuse}(L_{remote}-L_{local})
+< L_{migration}+L_{mapping}+L_{coherence}
+$$
+
+means leave the object remote; reverse the inequality when repeated local use amortizes migration. Exact CXL latency is platform/topology/media dependent, so replace fixed “150–250 ns” rules with measured load-to-use, bandwidth, tail, and failure data.
+
+The fabric manager may reside in a host, switch, or management controller. An established data plane can often continue when management is temporarily unavailable, but new binding/reallocation/recovery may fail. Reassignment must quiesce old traffic, revoke mappings, resolve dirty data, change generations/keys, and zeroize data as required before another tenant receives the capacity.
 
 ### 2.3 NVLink and NVSwitch
 
-NVLink is NVIDIA's proprietary GPU-to-GPU interconnect. NVLink-5 (Blackwell generation) specifications:
+NVLink is NVIDIA's proprietary accelerator/CPU scale-up family; NVSwitch devices build switched NVLink domains. Exact link counts, port rates, topology, remote-memory behavior, and coherency depend on the GPU, switch generation, and platform. Treat a named system such as HGX/NVL as a profile, not as the definition of NVLink.
 
-- **Per-link bandwidth**: 200 GB/s bidirectional (100 GB/s per direction)
-- **Links per GPU**: 18 links on B200/B300
-- **Total NVLink BW per GPU**: $18 \times 100 = 1{,}800$ GB/s = 1.8 TB/s bidirectional
-- **NVLink protocol**: custom, cache-coherent within NVLink domain
+At an architectural level:
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TB
-    subgraph GPUs["NVL72: 72 GPUs"]
-        direction TB
-        subgraph GPU_Row1["GPU Trays 0-3 (36 GPUs)"]
-            G1[GPU 0]:::gpu
-            G2[GPU 1]:::gpu
-            G3[GPU ...]:::gpu
-            G4[GPU 35]:::gpu
-        end
-        subgraph NVS["9 NVSwitch ASICs (spine)"]
-            N1[NVSwitch 0]:::nvs
-            N2[NVSwitch 1]:::nvs
-            N3[NVSwitch ...]:::nvs
-            N4[NVSwitch 8]:::nvs
-        end
-        subgraph GPU_Row2["GPU Trays 4-7 (36 GPUs)"]
-            G5[GPU 36]:::gpu
-            G6[GPU 37]:::gpu
-            G7[GPU ...]:::gpu
-            G8[GPU 71]:::gpu
-        end
-    end
-    GPU_Row1 -->|"18 links each, 1.8 TB/s"| NVS
-    NVS -->|"18 links each, 1.8 TB/s"| GPU_Row2
-    classDef gpu fill:#fde68a,stroke:#b45309,color:#000
-    classDef nvs fill:#bae6fd,stroke:#0369a1,color:#000
+flowchart LR
+    GMMU["GPU virtual memory<br/>peer mapping"] --> P2P["Peer operation engine<br/>read/write/atomic/copy"]
+    P2P --> ORD["CUDA/device ordering<br/>scope + completion"]
+    ORD --> PORT["NVLink port logic<br/>packetize, VC/credit,<br/>CRC/replay"]
+    PORT --> NVS["NVSwitch fabric<br/>route, partition, QoS,<br/>telemetry, optional collective"]
+    NVS --> RP["Remote GPU port"]
+    RP --> RL2["Remote L2/home/HBM path"]
+    FM["Fabric manager / driver<br/>discover, route, partition,<br/>address and error state"] -.-> PORT
+    FM -.-> NVS
 ```
 
-The NVSwitch ASIC is a 144-port crossbar switch, each port at 50 GB/s. Aggregate switching capacity:
+NVSwitch is not “one 144-port crossbar” across every generation. A switch chip/system can use crossbar or multistage internals, and several devices/planes can compose the advertised domain. The correct bandwidth test is:
 
-$$BW_{NVSwitch} = 144 \times 50 = 7{,}200 \text{ GB/s} = 7.2 \text{ TB/s}$$
+1. per-GPU one-way injection/ejection;
+2. per-switch port and internal capacity;
+3. topology bisection for a simultaneous traffic pattern;
+4. destination L2/HBM capacity;
+5. useful payload after protocol/replay.
 
-With 9 NVSwitch ASICs in NVL72, aggregate switch capacity is $9 \times 7.2 = 64.8$ TB/s per direction, or 129.6 TB/s bidirectional — matching $72 \times 1.8 = 129.6$ TB/s total GPU NVLink bandwidth. This is **strictly non-blocking by design**.
+NVIDIA software exposes peer memory, copies, collectives, and on supported platforms memory-fabric management. NCCL may choose NVLink/NVSwitch paths and, where supported, NVLink SHARP-style collective reduction. The programming primitive still carries stream/event ordering and buffer lifetime; a physical link does not infer those.
+
+Link CRC/replay protects delivery, switch ECC protects internal state, and route/partition tables enforce reachability. A failed link can down-width, reroute, or isolate a partition only if ordering epochs and outstanding operations are reconciled; otherwise a late packet can complete after software reused its transaction/buffer state.
 
 ### 2.4 UALink
 
-UALink 1.0 is the industry-standard alternative to NVLink, backed by the Ultra Accelerator Link Consortium (AMD, Broadcom, Google, Intel, Meta, and others). It targets the same rack-scale GPU-to-GPU communication niche as NVLink but with an open protocol, full cache coherence, and a much larger scale-up domain.
+UALink defines an open memory-semantic scale-up fabric for accelerators and switches. UALink 1.0 specifies remote reads, writes, atomics, DMA-oriented behavior, credit flow control, virtual channels, link retry, source/destination routing, and a partitioned global address-space model. Its maximum architectural endpoint scale is not a promise that every deployment has full bisection.
 
-#### NVLink-5 vs. UALink 1.0 Comparison
+The critical correction is coherence: **UALink 1.0 does not define a snoop protocol that keeps all accelerator caches hardware coherent.** It defines an I/O-coherency model at the destination system node and expects software to maintain coherence among accelerator caches across nodes, for example by cache operations and kernel/ownership boundaries.
 
-| Feature | NVLink-5 (B200/B300) | UALink 1.0 (AMD MI400+) |
-|---------|---------------------|------------------------|
-| Bandwidth per link | 200 GB/s per direction | 200 GB/s per direction |
-| Max links per GPU | 18 (1.8 TB/s bidirectional) | 14 (planned for 1.0) |
-| Max scale domain | 72 (NVL72 via NVSwitch) | 1,024 (planned via UALink switches) |
-| Cache coherence | Limited (NVLink-C2C only for GH/GB) | Full memory semantics with cache coherency |
-| Atomic operations | Limited to NVLink-C2C | Full set including fetch-and-add, CAS |
-| Memory semantics | Load/store with remote direct access | Load/store with coherent caching |
-| Multicast | Not supported | Planned for UALink 1.1 |
-| Protocol owner | NVIDIA (proprietary) | Ultra Accelerator Link Consortium (open) |
-| First silicon | B200 (2024) | MI400 (expected 2026) |
-| Switch | NVSwitch (NVIDIA) | UALink switch (Broadcom, Astera) |
+```mermaid
+sequenceDiagram
+    participant PA as "producer accelerator A"
+    participant EA as "A UALink endpoint"
+    participant SW as "UALink switch fabric"
+    participant EB as "B endpoint"
+    participant MB as "B memory/home"
+    PA->>PA: "finish local writes; flush/order exported data"
+    PA->>EA: "remote write or atomic + release intent"
+    EA->>SW: "routed memory-semantic request"
+    SW->>EB: "destination B"
+    EB->>MB: "authorize; make latest B-node copy current"
+    MB-->>EB: "completion / atomic old value"
+    EB-->>EA: "response"
+    EA-->>PA: "completion; acquire as required"
+    Note over PA,MB: "software invalidates/changes ownership before a peer consumes cached data"
+```
 
-UALink's larger scale-up domain (1,024 vs 72) means that tensor parallelism can extend beyond a single rack without traversing the scale-out network. This is critical for AMD's Helios rack, which connects up to 1,024 MI400-class "Altair" GPUs. The **UALoE72** configuration — a 72-GPU UALink domain within a single Helios rack — has been confirmed, directly matching NVIDIA's NVL72 scale.
+#### What is hardware versus software?
 
-#### Key Architectural Differences
+| Hardware | Software/runtime |
+|---|---|
+| link training, FEC/CRC/replay, credits/VCs | fabric discovery and workload partition |
+| routing and protected remote address checks | allocation export/import and lifetime |
+| remote read/write/atomic execution | cache ownership/maintenance between phases |
+| destination-node I/O-coherent memory access | collective algorithm and chunk/plane mapping |
+| completion/error/telemetry | recovery policy and job rescheduling |
 
-**Full cache coherence enables disaggregated memory.** UALink's coherence protocol allows any GPU in the 1,024-accelerator domain to cache any remote memory location, with hardware-maintained consistency. This is fundamentally different from NVLink's point-to-point DMA model, where the remote GPU's memory is accessed as a flat address space without local caching. With UALink, a GPU can hold a remote line in its L2 cache and the protocol ensures invalidation on remote writes — the same programming model as a multi-socket CPU system, scaled to 1,024 nodes.
+Remote atomics still need exactly-once recovery. If the destination performed an add but the response was lost, a new add would duplicate the update. End-to-end transaction identity must survive link-local replay and switch reroute.
 
-**The 1,024-GPU scale domain targets the NVL576 problem space.** NVIDIA's NVL576 connects 576 GPUs via a three-tier NVSwitch fabric (36 NVSwitch trays). UALink targets 1,024 GPUs using a switch-based topology built from UALink switch ASICs (Broadcom, Astera). The switch-based topology simplifies cabling — each GPU connects to a UALink switch leaf, and switches connect in a fabric — but the bisection bandwidth is strictly worse than a full NVSwitch crossbar. At 1,024 GPUs, a full non-blocking crossbar would require $\binom{1024}{2} \times 200$ GB/s of switching capacity, which is infeasible. UALink switches must over-subscribe, meaning not all GPU pairs get full bandwidth simultaneously.
+UALink 200G 1.0 supports high-rate lanes and switched domains; current consortium releases split common/protocol, data-link/physical, chiplet, and management specifications so these layers can evolve independently. The notebook therefore models lane rate, width, switch radix, bisection, and collective support as profile parameters instead of tying the protocol to one announced accelerator.
 
-**Atomic operations over UALink enable fine-grained synchronization.** The full set of atomics — fetch-and-add, compare-and-swap, atomic AND/OR — can be executed on remote memory without moving the entire cache line. This enables distributed synchronization primitives (barrier counters, distributed locks, credit-based flow control) that currently require NCCL over InfiniBand with CPU-mediated atomic operations. For example, a barrier across 1,024 GPUs can be implemented as a shared atomic counter: each GPU increments it via fetch-and-add, and the last GPU to arrive sees the counter reach 1,024 and broadcasts release. Over NVLink, this requires either NCCL (which sends full messages over the interconnect) or NVLink-C2C atomics (limited to Grace-Hopper pairs).
+#### Accelerator scale-up comparison by semantics
 
-**UALink is the interconnect backbone for the Ultra Ethernet Consortium's accelerated computing fabric.** The two standards are designed to compose: UALink handles scale-up (GPU-to-GPU within the rack), while UEC handles scale-out (rack-to-rack). A typical Helios-class system uses UALink for TP within the 1,024-GPU domain and UEC/RoCE for EP and DP across domains.
+| Question | Proprietary NVLink/Infinity-class fabric | UALink | CXL | RDMA scale-out |
+|---|---|---|---|---|
+| primary relationship | accelerator peer / CPU-accelerator, platform-specific | accelerator peer | host ↔ coherent device/memory | independent network endpoints |
+| operation style | peer memory/copy/atomic/collective, product-specific | read/write/atomic/DMA | `.io`, `.cache`, `.mem` | send/receive, RDMA read/write/atomic |
+| cache coherence | platform/version-specific | software across accelerator caches | named host/home coherent roles | software/message ownership |
+| switch management | vendor fabric manager | standardized management profiles | CXL fabric manager | subnet/network control plane |
+| best use | fine-grained scale-up on supported platform | open accelerator scale-up | memory expansion/coherent host-device | rack/cluster scale-out |
+
+The programmer normally reaches these through CUDA/HIP queues, NCCL/RCCL, SHMEM/PGAS libraries, or runtime DMA—not by constructing a wire packet. The library selects paths, chunks tensors, issues remote operations, and turns endpoint completion into stream/event semantics.
+
+### 2.4b UCIe and same-package chiplets
+
+UCIe addresses a shorter boundary: die-to-die connections inside a package. It defines physical/link capabilities and mappings for PCIe/CXL and streaming/raw protocols. UCIe 3.0 supports newer rates, multiprotocol operation, enhanced sideband/manageability, and both 2D/2.5D/3D packaging profiles, but the mapped protocol owns the memory semantics.
+
+```mermaid
+flowchart LR
+    subgraph D0["chiplet 0"]
+        P0["CHI/AXI/PCIe/CXL/stream"] --> A0["protocol adapter<br/>flit + VC"]
+        A0 --> L0["D2D link layer<br/>CRC/retry"]
+        L0 --> H0["parallel PHY<br/>forwarded clock, lane repair"]
+    end
+    H0 <--> PKG["interposer/bridge/package wiring"]
+    subgraph D1["chiplet 1"]
+        H1["parallel PHY"] --> L1["link layer"]
+        L1 --> A1["protocol reconstruction"]
+        A1 --> P1["remote NoC/home/target"]
+    end
+    PKG <--> H1
+```
+
+Compared with board/rack SerDes, same-package D2D spends more bumps and die edge to reduce serialization energy/latency. Architects size bandwidth per millimeter of die edge, retry/credit round trip, adapter queues, lane repair, package escape routing, and thermal/power coupling.
+
+### 2.4c Infinity Fabric and xGMI
+
+AMD Infinity Fabric is a proprietary family spanning on-package/on-system coherent transport; xGMI is its external high-speed interconnect used for CPU socket and GPU peer connections on supported platforms. It can bridge fabric domains and expose peer memory/topology to ROCm, but link count, bandwidth, coherence scope, and whether a route is direct or switched are product/platform properties.
+
+The software path is analogous to other scale-up systems:
+
+```text
+HIP/RCCL peer or collective operation
+-> GPU virtual-memory/peer mapping
+-> source Infinity/xGMI endpoint
+-> direct peer or system fabric path
+-> destination endpoint and L2/HBM
+-> completion ordered into the HIP stream
+```
+
+For an eight-GPU full mesh, seven external links per GPU can provide one direct path to every peer; another product may expose fewer links or a hierarchical path. Topology discovery and NUMA-aware rank placement are therefore mandatory. “Infinity Fabric” names a family, not one fixed wire protocol or universal bandwidth.
 
 ### 2.5 Bandwidth-Delay Product (BDP)
 
@@ -247,7 +378,7 @@ For a 400 Gbps (50 GB/s) InfiniBand NDR link with 2 $\mu$s one-way latency:
 
 $$\text{BDP}_{IB} = 50 \text{ GB/s} \times 2\,\mu\text{s} = 100 \text{ KB}$$
 
-This means 100 KB of data must be buffered in the network pipeline (switches, NIC pipelines, link serialization) before the link reaches steady-state utilization. Messages smaller than the BDP cannot saturate the link — latency dominates.
+This means the sender/path needs roughly 100 KB of outstanding window to sustain the link while feedback or completion is in flight. A single transfer much smaller than the BDP is usually startup-latency dominated; many independent small messages can still fill the link if queue depth, credits, and destinations permit enough aggregate bytes in flight.
 
 #### Implications for Training Collectives
 
@@ -272,13 +403,15 @@ RoCE v2 with DCQCN uses packet pacing and ECN marking for congestion control. Fo
 
 Inline writes are limited to $\sim$64 bytes (the WQE size), so they only help for control messages and synchronization — but those are exactly the messages where BDP overhead is worst.
 
-#### NVLink BDP
+#### Scale-up endpoint BDP
 
-NVLink-5 at 1.8 TB/s bidirectional with $\sim$1 $\mu$s latency across NVSwitch:
+Use **one-way delivered** bandwidth and the specific loop being hidden. For a scale-up path delivering 200 GB/s one way with a 500 ns request-to-response or credit loop:
 
-$$\text{BDP}_{NVLink} = 1{,}800 \text{ GB/s} \times 1\,\mu\text{s} = 1.8 \text{ MB}$$
+$$\text{BDP}_{scaleup} = 200 \text{ GB/s} \times 500\,\text{ns} = 100 \text{ KB}.$$
 
-Even small AllReduce chunks (8 MB for an 8B model layer) fill the pipe easily — the chunk is 4.4× the BDP. This is another reason tensor parallelism stays within the NVLink domain: the BDP-to-message ratio is far more favorable than over InfiniBand, and there is no congestion-control overhead to compound the problem.
+With 256-byte requests, about 391 payloads must be represented in transaction IDs, replay storage, switch credits, destination queues, and return buffers before headroom. Marketing “bidirectional” bandwidth must not be multiplied by a one-way latency; the two directions are separate pipes.
+
+Large collective chunks can cover BDP through streaming, while fine-grained remote loads/atomics remain latency-sensitive even when total bandwidth is enormous. This is why tensor parallelism benefits from scale-up fabrics but still needs chunking, multiple channels, and overlap.
 
 ### 2.6 InfiniBand
 
@@ -602,11 +735,23 @@ Without GDS (staged through host RAM): ~5 s due to the extra copy and CPU overhe
 
 ### 5.3 NVLink Peer-to-Peer
 
-Within an NVL72 rack, GPUs can DMA directly into each other's HBM via NVSwitch, without host involvement. NVLink P2P bandwidth: 1.8 TB/s per GPU. A 70B model in FP16 distributed across 72 GPUs (~1.9 GB per GPU) can be loaded from a peer in:
+On supported systems, a GPU can map peer memory and the runtime can select an NVLink/NVSwitch route instead of staging through host RAM. The hardware path is:
 
-$$T_{P2P} = \frac{1.9 \text{ GB}}{1{,}800 \text{ GB/s}} \approx 1.1 \text{ ms}$$
+```text
+source copy/LSU engine -> source GMMU/peer map -> NVLink endpoint
+-> zero or more NVSwitch stages -> destination endpoint
+-> destination L2/home/HBM
+```
 
-This is the mechanism that enables disaggregated serving architectures (see [Disaggregated_Serving_2025](../L8_Inference_and_Serving/10_Disaggregated_Serving_2025.md)).
+For $M$ bytes:
+
+$$
+T_{P2P}\approx L_{launch}+L_{fabric}+\frac{M}{\min(B_{src},B_{path},B_{dst})}.
+$$
+
+Use the actual platform's **one-way delivered** bandwidth and topology. Aggregate bidirectional GPU bandwidth cannot be inserted as the denominator for one transfer, and a shared destination HBM/L2 or switch cut may be smaller than source port bandwidth.
+
+Peer access removes host staging but not software work: the driver establishes reachability and page mappings, the runtime owns buffer lifetime and stream ordering, and collectives split/stripe tensors across links/planes. See [Disaggregated Serving](../L8_Inference_and_Serving/10_Disaggregated_Serving_2025.md).
 
 ---
 
@@ -738,60 +883,50 @@ Benefits: reduces latency by ~30-50% and avoids the CPU memcpy overhead. The hos
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
 flowchart TD
-    A["224G PAM4 Nyquist = 56 GHz"] --> B["Passive Cu trace ≤ 1 m"]
-    B --> C["Scale-up domain = single rack"]
-    C --> D["NVL72 / Helios rack topology"]
+    A["On-die transaction<br/>address, ID, scope"] --> B["Boundary adapter<br/>remote operation + protection"]
+    B --> C["Reliable link<br/>credit, FEC/CRC, replay"]
+    C --> D["PHY/channel<br/>lanes, deskew, equalization"]
+    D --> E["Switch/topology<br/>route, bisection, QoS"]
+    E --> F["Remote endpoint<br/>home/memory/atomic point"]
+    F --> G["Architectural completion<br/>stream/event/acquire"]
 
-    E["PAM4 sacrifices 9.5 dB SNR"] --> F["Requires CTLE + FFE + DFE + FEC"]
-    F --> G["~150 ns SerDes latency"]
+    H["Same-package D2D"] --> I["many short parallel lanes<br/>high edge density, low energy"]
+    J["Board/rack scale-up"] --> K["SerDes + switches<br/>peer memory and collectives"]
+    L["PCIe/CXL"] --> M["I/O plus named host/device<br/>cache and memory roles"]
+    N["RDMA scale-out"] --> O["queue/message ownership<br/>across routed failure domains"]
 
-    H["Fat-tree: B_bisect ∝ N"] --> I["Linear bisection scaling"]
-    I --> J["Cost: 5120 switches for 65k hosts"]
+    P["PAM4 lowers voltage margin"] --> Q["equalization + FEC + CRC/replay"]
+    Q --> R["coding/replay overhead and latency"]
 
-    K["Torus: B_bisect ∝ N^{2/3}"] --> L["10× less bisection than Clos"]
-    L --> M["Google compensates with OCS + co-design"]
+    S["BDP = one-way B × loop latency"] --> T["IDs + replay + credits +<br/>destination buffers all sized"]
+    T --> U["smallest window sets bandwidth"]
 
-    N["Incast: N-1→1 bursts"] --> O["ToR buffer overflow in <3 ms"]
-    O --> P["DCQCN rate halving on ECN"]
-    P --> Q["30-50% bandwidth overhead for All-to-All"]
-
-    R["GPUDirect RDMA"] --> S["NIC → HBM direct, 1 PCIe hop"]
-    S --> T["2× throughput for parameter loading"]
-
-    U["NVLink Fusion (NVIDIA-Marvell $2B)"] --> V["Third-party ASICs in NVLink domain"]
-    V --> W["Hogeneous NVL72/NVL576 fabrics"]
-
-    X["Spectrum-X MRC (512 × 800GbE)"] --> Y["Gigascale Ethernet for AI"]
-    Y --> Z["100k+ GPU clusters on open Ethernet"]
-
-    AA["OpenAI-Microsoft 'Build A Better Ethernet'"] --> BB["Open congestion control + telemetry for AI"]
-    BB --> CC["Ethernet competitive with IB at extreme scale"]
+    V["Collective traffic hits topology cuts"] --> W["library chunks/stripes or<br/>switch reduction/multicast"]
+    W --> X["measure delivered goodput + tails"]
 ```
 
 ---
 
 ## 7. Numbers to memorize
 
-| Quantity | Value | Why it matters |
+| Quantity/relationship | Value | Why it matters |
 |---|---|---|
-| PCIe Gen5 x16 bandwidth | 63 GB/s (unidirectional) | Host↔GPU data path; model loading bottleneck |
-| NVLink-5 per-GPU BW | 1.8 TB/s bidirectional | 28.6× PCIe; enables TP within rack |
-| NVSwitch radix | 144 ports × 50 GB/s = 7.2 TB/s | Non-blocking crossbar for NVL72 |
-| NVL72 aggregate NVLink BW | 129.6 TB/s | 72 × 1.8 TB/s = 9 NVSwitch × 14.4 TB/s |
-| 224G PAM4 Nyquist | 56 GHz | Sets insertion loss budget; limits Cu trace to ~1 m |
-| PAM4 SNR penalty vs NRZ | 9.5 dB | Requires FEC (RS-544) + CTLE/DFE equalization |
-| FEC overhead | 5.5% (RS-544,514) | Gap between 224 Gbps raw and 200 GB/s data |
-| InfiniBand NDR per-port | 400 Gb/s | Scale-out fabric per-GPU link |
-| NDR 64-port switch capacity | 51.2 Tb/s | ToR building block for fat-tree |
-| Fat-tree k=64 host count | 65,536 | Canonical 65k-GPU cluster |
-| Fat-tree switch count (k=64) | 5,120 | Network capex ~30-50% of total |
-| Dragonfly diameter | 3 hops always | Deterministic latency regardless of scale |
-| 3D Torus bisection BW | ∝ 2bN^{2/3} | 10× less than Clos at N=8960 |
-| DCQCN rate decrease factor | R_c(1 − α/2), α=1 → halving | Recovery takes RTT·log₂N |
-| ToR shared buffer | 32–128 MB SRAM | Overflows in ~2.5 ms under incast |
-| GPUDirect bandwidth gain | 2× (1 PCIe hop vs 2) | Eliminates host RAM staging |
-| GDS per-NVMe throughput | ~7 GB/s | 8 drives → 56 GB/s → 140 GB model in 2.5 s |
-| UALink 1.0 scale-up domain | Up to 1,024 accelerators | 14× larger than NVL72's 72 |
+| PCIe Gen5 x16 raw encoded ceiling | ≈63 GB/s one way before packet overhead | familiar host↔device reference |
+| PCIe 7.0 lane rate | 128 GT/s, PAM4 FLIT mode | current approved PCIe generation in 2026 |
+| UCIe 3.0 lane rate | up to 64 GT/s | same-package D2D profile parameter |
+| UALink 200G 1.0 | 200 Gb/s data per lane; up to 1,024 endpoint addressing | open accelerator scale-up profile, not a bisection guarantee |
+| useful one-way bandwidth | $N R\prod\eta_i$ | raw rate reduced by encoding/FEC/flit/protocol/replay |
+| outstanding window | $W\ge B L$ | every queue/credit/tag stage must cover BDP |
+| transfer time | $L_0+M/B_{delivered}$ | separates latency from streaming bandwidth |
+| topology link load | $L_l=\sum D_{sd}R_{sd,l}$ | finds hot cuts and oversubscription |
+| link ACK | adjacent unit received intact | retires replay state, not memory visibility |
+| credit | downstream slot became reusable | prevents buffer overwrite |
+| transaction ID | end-to-end operation identity | exactly-once remote completion |
+| link sequence | hop-local retry identity | must not be reused as transaction identity |
+| UALink 1.0 coherence | software across accelerator caches | memory semantics do not imply full snoop coherence |
+| CXL sub-protocols | `.io`, `.cache`, `.mem` | explicit host/device I/O, cache, memory roles |
+| D2D edge density | one-way GB/s per mm of die edge | package bump/shoreline limit |
+| collective context | group + generation + chunk + contributor set | prevents mixing late and new reductions |
 
 ---
 
@@ -799,15 +934,18 @@ flowchart TD
 
 **Foundational**
 - InfiniBand Trade Association, *InfiniBand Architecture Specification*, 2024.
-- PCI-SIG, *PCI Express Base Specification 6.0*, 2023.
-- UALink Consortium, *UALink 1.0 Specification*, 2025.
+- PCI-SIG, [PCI Express Base Specification Revision 7.0](https://pcisig.com/PCIExpress/Spec/Base/_7.0), 2025.
+- Compute Express Link Consortium, [CXL Specification 4.0](https://computeexpresslink.org/), 2026.
+- UCIe Consortium, [UCIe Specification 3.0](https://www.uciexpress.org/specifications), 2025.
+- UALink Consortium, [UALink Specifications](https://ualinkconsortium.org/specification/) — common/protocol, data-link/PHY, chiplet, and manageability profiles.
 - J. Kim, W. J. Dally, et al., "Technology-Driven, Highly-Scalable Dragonfly Topology," *ISCA 2008*.
 - M. Alizadeh, et al., "CONGA: Distributed Congestion-Aware Load Balancing for Datacenters," *SIGCOMM 2014*.
 - Y. Zhu, et al., "Congestion Control for Large-Scale RDMA Deployments," *SIGCOMM 2015* (DCQCN paper).
 
 **Recent**
 - Ultra Ethernet Consortium, *UEC Transport Specification v1.0*, 2025.
-- NVIDIA, *NVLink and NVSwitch Architecture White Paper*, 2024.
+- NVIDIA, [NVLink/NVSwitch topology and link documentation](https://docs.nvidia.com/datacenter/dcgm/latest/learn/core-services/topology-and-links.html).
+- NVIDIA, [NVLink Network/IMEX architecture](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/overview.html).
 - Broadcom, *Memory Fabric Architecture for AI*, Hot Chips 2025.
 - Google, "TPU v5p System Architecture," *ISCA 2025*.
 

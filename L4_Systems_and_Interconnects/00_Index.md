@@ -8,17 +8,17 @@
 
 L4 covers the **rack-scale and cluster-scale interconnect** and the **storage subsystem** that feeds it.
 
-1. **Networking and interconnect** — the physical layer (NRZ, PAM4, SerDes generations), the protocol layer (PCIe, CXL, NVLink, UALink, InfiniBand, RoCE v2), the topology layer (fat-tree, Clos, dragonfly, torus, dragonfly-plus), and the congestion-control layer (PFC, ECN, DCQCN, packet spraying, Ultra Ethernet).
+1. **Networking and interconnect** — the complete inter-chip path: remote mapping and endpoint transaction state; package-parallel and SerDes PHYs; FEC/CRC/replay/credits; UCIe, PCIe, CXL, NVLink/Infinity-class and UALink semantic boundaries; switches, bisection, collectives; then InfiniBand/RoCE/Ultra Ethernet scale-out and congestion control.
 2. **Rack-scale design** — the system architecture of a single rack: GB200 NVL72, Helios UALink, TPU v7 pod, Cerebras CS-3. Power distribution (48 V busbars, VRM), thermal (sensible heat, two-phase, CDU), mechanical (floor loading, cabling density).
 3. **Storage and model loading** — how trillion-parameter checkpoints move from NVMe to HBM: GPUDirect Storage, safetensors, sharded checkpoints, NVMe-oF, KV cache offload tiers.
 
-L4 explicitly does **not** cover chip-level interconnects like NVLink lane counts or ICI link widths (→ L3), kernel-level communication primitives (→ L5), or distributed-training collective algorithms (→ L7).
+L4 covers the **system contract** of chip-to-chip links and fabrics. Detailed GPU port counts or vendor core placement remain in L3, gate/PHY/router implementation is introduced in L2, kernel communication primitives remain in L5, and collective algorithms remain in L7.
 
 ---
 
 ## Pages (read in order)
 
-1. [Networking_and_Interconnect](01_Networking_and_Interconnect.md) — the physics and mathematics of the network fabric. Signaling, topologies, congestion control, RDMA. Foundational for understanding everything above.
+1. [Networking_and_Interconnect](01_Networking_and_Interconnect.md) — from a GPU/CPU transaction through remote mapping, endpoint/link/PHY/switch hardware and memory semantics, then into topology, congestion control, RDMA, and collective offload. Foundational for understanding everything above.
 2. [Rack_Scale_Design](02_Rack_Scale_Design.md) — what a single rack looks like: NVL72, Helios, TPU pod, Cerebras. Power, thermal, mechanical constraints that make the topology real.
 3. [Storage_and_Model_Loading](03_Storage_and_Model_Loading.md) — the storage fabric: how checkpoints load in seconds, not minutes. GDS, safetensors, sharded formats, NVMe-oF.
 
@@ -29,7 +29,9 @@ L4 explicitly does **not** cover chip-level interconnects like NVLink lane count
 | L4 fact | Higher-layer consequence |
 |---|---|
 | 224 Gbps PAM4 Nyquist = 56 GHz; passive copper ≤ 1 m | Scale-up domain is rack-bound; scale-out requires optics (L7, L8) |
-| NVL72 is strictly non-blocking at 130 TB/s aggregate | TP ≤ 72 without leaving the rack; no cross-rack TP traffic (L7) |
+| Endpoint port sum is not fabric bisection; link ACK is not remote visibility | collective placement and synchronization must use the actual route/semantic contract (L7) |
+| UALink 1.0 uses software coherence across accelerator caches | kernel/runtime phase boundaries must flush, signal, acquire, and invalidate as required |
+| CXL separates `.io`, `.cache`, and `.mem` roles | pooled/tiered memory is topology- and home-agent-aware, not a flat DRAM extension |
 | 3D torus bisection BW ∝ N^{2/3} vs Clos ∝ N | Google must use OCS + careful scheduling to avoid hotspots (L7) |
 | DCQCN rate halving on ECN mark | AllReduce bandwidth must account for 30–50% congestion backoff (L7) |
 | Incast: N−1→1 bursts overflow 128 MB ToR buffers | Packet spraying + large static buffers required for All-to-All (L7) |
