@@ -85,6 +85,68 @@ Each pipeline boundary inserts $\sim 24 \cdot N_{\text{bits}}$ flip-flops (sum +
 
 ---
 
+---
+
+## 1b. Timing closure in practice — hold, clock trees, and signoff corners
+
+§1.1 gave *one* timing constraint. Real closure has a second one, a clock-distribution problem, and a signoff step across a dozen corners — the parts that actually consume a physical-design team's year.
+
+### 1b.1 The other constraint: hold time
+
+The setup (max-delay) equation says the *slowest* path must fit in a cycle. Its twin, the **hold (min-delay)** constraint, says the *fastest* path must not race through and corrupt the capture flop in the **same** edge:
+
+$$
+t_{c\to q}^{\min} + t_{\text{logic}}^{\min} \;\ge\; t_{\text{hold}} + t_{\text{skew}}
+$$
+
+Two facts make hold the scarier of the pair:
+
+- **It is frequency-independent.** You cannot fix a hold violation by slowing the clock — a hold failure is a race between data and clock at *one* edge. A chip that fails hold is simply broken at any frequency.
+- **It fails on short/fast paths at the *fast* corner** (opposite of setup, which fails on long paths at the slow corner). The fix is to *add* delay — insert buffers ("hold-fixing padding") on the offending fast paths. A modern block can spend a few percent of its cells purely on hold buffers, and positive clock skew toward the capture flop directly eats hold margin.
+
+### 1b.2 The clock tree (CTS)
+
+A 2 GHz edge has to arrive at millions of flip-flops with minimal **skew** (spatial arrival mismatch) and **jitter** (cycle-to-cycle temporal wander). The distribution network is built by **clock-tree synthesis (CTS)**, which inserts balanced buffers so every leaf sees nearly the same **insertion delay** (root-to-leaf latency, tens of ps to >100 ps):
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 40, "htmlLabels": false}}}%%
+flowchart TB
+    PLL["PLL / clock source"]:::src --> ROOT["clock root"]:::src
+    ROOT --> B1["balanced buffers (H-tree spine)"]:::buf
+    ROOT --> B2["balanced buffers (H-tree spine)"]:::buf
+    B1 --> L1["leaf buffer"]:::leaf --> FFa["FF cluster A"]:::ff
+    B1 --> L2["leaf buffer"]:::leaf --> FFb["FF cluster B"]:::ff
+    B2 --> L3["leaf buffer"]:::leaf --> FFc["FF cluster C"]:::ff
+    B2 --> L4["leaf buffer"]:::leaf --> FFd["FF cluster D"]:::ff
+    MESH["(top-level mesh straps<br/>short-circuit leaves → kill skew)"]:::mesh -.-> L1
+    MESH -.-> L2
+    MESH -.-> L3
+    MESH -.-> L4
+    classDef src fill:#fbcfe8,stroke:#9d174d,color:#000
+    classDef buf fill:#bae6fd,stroke:#0369a1,color:#000
+    classDef leaf fill:#bbf7d0,stroke:#15803d,color:#000
+    classDef ff fill:#fde68a,stroke:#b45309,color:#000
+    classDef mesh fill:#e9d5ff,stroke:#7c3aed,color:#000
+```
+
+- **H-tree**: a balanced binary tree — naturally low skew, moderate power.
+- **Clock mesh/grid**: straps that short the leaves together — near-zero skew but high power (the whole mesh switches every cycle). Frontier CPUs/GPUs use a mesh on the top level for the tightest skew.
+- The clock network alone burns **~30% of dynamic power** — which is exactly why clock gating (§5.1) targets it first.
+
+### 1b.3 Useful skew, time borrowing, and retiming
+
+Zero skew is not actually optimal. **Useful skew** *deliberately* delays a capture clock to hand a too-slow stage some of the next stage's slack (clock-skew scheduling). Latch-based pipelines do the analog automatically — **time borrowing**, where a transparent latch lets a fast stage lend slack to a slow neighbor. And **retiming** (Leiserson–Saxe) moves registers *across* combinational logic without changing what the circuit computes — like re-spacing mile-markers so no single stretch is too long — so synthesis can even out the lumpy FMA stages of §1.3 (if stage 3 is the slow one, push a register earlier to hand it some of stage 2's time). These three levers win the last 10–15% of $f_{\max}$ after raw pipelining runs out.
+
+### 1b.4 Signoff: multi-corner, multi-mode (MCMM)
+
+You never close timing *once*. Silicon must work across **process** (slow/typical/fast — SS/TT/FF), **voltage** (Vmin…Vmax), **temperature** (−40 … 125 °C), and RC-extraction corners — the **MCMM** matrix. The rules of thumb:
+
+- **Setup signs off at the slow corner**, **hold at the fast corner** — you must pass *both* simultaneously.
+- **Temperature inversion**: at the low voltages AI chips run (§L0), cells get *slower when cold*, inverting the classic assumption — so both temperature extremes must be checked for *both* setup and hold.
+- **On-chip variation (OCV)**: even on *one* die, no two transistors are identical (Pelgrom mismatch, dopant fluctuation), so two "identical" gates run at slightly different speeds. Signoff **derates** (pads) path delays to cover this — flat margins (OCV), distance/depth-aware margins (AOCV = *advanced* OCV), or statistical ones (POCV = *parametric* OCV). Advanced nodes use POCV because a flat guard-band at N3 would throw away too much frequency.
+
+"The chip runs at 2 GHz" really means "it closes timing across ~a dozen corners with OCV derating and still has margin." That gap between a single-corner number and signoff is where months go.
+
 ## 2. Clock-domain crossing (CDC)
 
 ### 2.1 The mesochronous problem
@@ -182,176 +244,464 @@ where $N$ is the number of sync stages, $T_{\text{slack}}$ is the time per stage
 
 ## 3. Async copy engines (TMA pattern)
 
-### 3.1 Why the warp can't move data efficiently
+### 3.1 First separate three kinds of “DMA”
 
-In the GPU's "classical" model, a warp of 32 threads cooperatively loads a tile from HBM into SMEM via 32 individual loads. Cost:
+All three move data without a thread executing one load/store per word, but their software contracts and hardware placement differ:
 
-- Each thread issues a load instruction → consumes scheduler issue slot.
-- Each load occupies the load-store unit's pipeline.
-- Latency-hiding via warp swap is the only way to absorb HBM's 300-cycle round-trip.
+| Engine | Example use | Command source | Typical endpoints |
+|---|---|---|---|
+| host/device copy engine | `cudaMemcpyAsync`, storage/network transfer | runtime/driver queue | host memory, peer GPU, HBM |
+| conventional on-chip DMA | firmware descriptor ring | CPU or command processor | SRAM, DRAM, peripherals |
+| SM async/tensor copy engine | PTX bulk/tensor async copy (TMA family) | one CUDA thread/warp in a kernel | global memory ↔ shared/cluster memory |
 
-This wastes scheduler bandwidth. NVIDIA's solution: **TMA (Tensor Memory Accelerator)** in Hopper / Blackwell.
+The first two are autonomous device-level masters. The third is part of the GPU execution machinery: a kernel launches a copy, hardware performs multidimensional address generation and data movement, and an async-group or memory barrier communicates completion back to participating threads. NVIDIA documentation deliberately calls TMA operations **bulk-asynchronous copies** and notes that they must not be confused with CPU↔GPU asynchronous copies.
 
-### 3.2 TMA architecture
+### 3.2 Why an SM copy engine exists
 
-```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TB
-    subgraph SM[SM perspective]
-        direction TB
-        WARP[Warp / kernel issues:<br/>cp.async.bulk.tensor.2d]:::warp
-        CMD["TMA descriptor<br/>(global addr, tile shape, swizzle)"]:::cmd
-        BAR["Async barrier<br/>(mbarrier.arrive)"]:::bar
-    end
-    subgraph TMA[TMA hardware engine]
-        direction TB
-        FETCH[Fetch unit<br/>generates HBM addresses]:::tma
-        SWZ[Swizzle / un-swizzle<br/>for SMEM bank-conflict avoidance]:::tma
-        WR[SMEM write port]:::tma
-    end
-    HBM[HBM]:::off
-    SMEM[SMEM tile slot]:::mem
-    WARP --> CMD --> FETCH
-    FETCH -- read --> HBM
-    HBM -- data --> SWZ --> WR --> SMEM
-    BAR -. waits on TMA done .-> SMEM
-    classDef warp fill:#fde68a,stroke:#b45309,color:#000
-    classDef cmd fill:#fbcfe8,stroke:#9d174d,color:#000
-    classDef bar fill:#c7d2fe,stroke:#4338ca,color:#000
-    classDef tma fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef off fill:#fca5a5,stroke:#991b1b,color:#000
-    classDef mem fill:#bae6fd,stroke:#0369a1,color:#000
+In the classical path, a warp cooperatively loads a tile:
+
+```cuda
+int lane = threadIdx.x & 31;
+for (int i = lane; i < tile_elements; i += 32)
+    smem[i] = global[base + layout(i)];
+__syncthreads();
 ```
 
-Properties:
+This consumes:
 
-- **Single instruction** moves an entire 2D / 3D tile (KB to MB scale).
-- **Async**: the warp continues executing other instructions while the TMA fetches.
-- **Hardware-managed addresses, swizzle, and bank-conflict layout** — the kernel writer just describes the tile shape; the TMA generates compatible addresses.
-- **Barrier-synchronized**: an `mbarrier` token indicates completion; the warp waits on the barrier before consuming the data.
+- instruction issue slots for address arithmetic, loads, and stores;
+- 32 per-thread address/data paths even when the access pattern is regular;
+- load-store queue and scoreboard entries;
+- registers for pointers, loop counters, and temporary data;
+- explicit layout/swizzle instructions;
+- a full-block synchronization step.
 
-Performance impact: a Hopper SMEM tile load that previously cost ~50 cycles of warp issue now costs ~2 cycles (just to issue the TMA command). Effective scheduler throughput rises ~25× for memory-heavy kernels.
+A tensor copy engine replaces that instruction stream with a compact descriptor plus a launch. The savings are workload- and implementation-dependent; there is no universal “2-cycle command” or fixed speedup. The architectural advantage is fewer issued instructions and less address/register traffic while the copy overlaps independent work.
 
-### 3.3 The double-buffered TMA pattern
+### 3.3 Hardware hierarchy and state
 
-The canonical kernel:
+The precise proprietary placement is generation-specific. A reconstructable representative design is:
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 45, "htmlLabels": false}}}%%
+flowchart LR
+    subgraph SW["Software-visible state"]
+        TD["Tensor-map descriptor<br/>base, rank, extents, strides,<br/>element size, swizzle, OOB policy"]
+        INS["PTX/SASS bulk-copy launch<br/>coordinates, direction, barrier"]
+    end
+    subgraph SM["SM-side hardware"]
+        DEC["Instruction decode<br/>scope and completion mode"]
+        CQ["Copy command queue<br/>context, barrier, bytes expected"]
+        AGU["Nested-loop AGUs<br/>bounds + address generation"]
+        SPL["Segment/coalesce unit<br/>alignment, sectors, boundaries"]
+        OT["Outstanding-tag table<br/>offset, length, epoch"]
+        DB["Data/reorder buffers<br/>byte valid + transform state"]
+        SWZ["Format/swizzle/OOB unit"]
+        SP["Shared-memory crossbar<br/>banks and write/read ports"]
+        MB["mbarrier / async-group<br/>transaction accounting"]
+    end
+    subgraph MEM["Global-memory path"]
+        NI["SM memory network interface"]
+        L2["Distributed L2 slices"]
+        MC["Memory controllers"]
+        HBM["HBM"]
+    end
+    TD --> DEC
+    INS --> DEC --> CQ --> AGU --> SPL --> OT --> NI
+    NI <--> L2 <--> MC <--> HBM
+    NI --> DB --> SWZ --> SP
+    OT --> MB
+    SP --> MB
+```
+
+A command-queue entry needs at least:
+
+```text
+issuing context/CTA and reset epoch
+descriptor snapshot or stable descriptor reference
+tensor coordinates and copy direction
+source/destination address spaces
+total and remaining transaction bytes
+completion kind: mbarrier or async group
+barrier address/phase and expected-byte contribution
+outstanding request bitmap/count
+fault/poison status
+```
+
+The descriptor encodes a logical tensor, while the instruction supplies tile coordinates. For dimension indices $i_0,\ldots,i_{n-1}$, the generic byte address is
+
+$$
+A=base+\sum_{d=0}^{n-1} i_d\,stride_d.
+$$
+
+Hardware nested-loop counters generate the addresses, split them at supported boundaries, coalesce contiguous sectors, and attach each request to the destination tile offset. Address arithmetic must be widened so overflow is detected before truncation.
+
+### 3.4 From one command to many memory transactions
+
+For a 2D tile with `x_bytes=64`, `y_count=16`, and `global_stride=256`, the engine generates:
+
+```text
+row 0: global base +   0  -> shared tile +   0
+row 1: global base + 256  -> shared tile +  64
+...
+row15: global base +3840  -> shared tile + 960
+```
+
+Each row may split again because of cache-sector, page, interconnect-packet, or alignment limits. Responses can return out of order. The outstanding table therefore maps response tag → command, row, byte offset, length, and epoch. Returned bytes enter data buffers, pass through optional swizzle/format logic, and then request shared-memory banks.
+
+The engine must reserve data-buffer space **before** issuing a read. Otherwise global-memory responses can fill every buffer while shared memory is backpressured, creating a deadlock that also prevents unrelated requests from draining.
+
+For shared→global copies, the direction reverses: shared-memory reads feed global write requests. Completion must distinguish “the engine has finished reading shared memory, so software may reuse that buffer” from “the global writes are visible to later observers.” PTX exposes completion mechanisms appropriate to each operation; kernel code must use the documented one rather than assume kernel issue order is sufficient.
+
+### 3.5 Swizzle, out-of-bounds, and shared-memory banks
+
+The transform block can:
+
+- map a multidimensional logical tile into a bank-friendly shared-memory layout;
+- permute low-order address bits (swizzle) to reduce systematic bank conflicts;
+- fill or suppress out-of-bounds elements according to the instruction contract;
+- expand/pack supported element representations;
+- multicast a global tile into distributed shared memory when supported.
+
+Swizzle does not “remove” bank conflicts for every later access. It chooses a mapping intended to make a specified tensor access pattern distribute across banks. The consumer's lane-to-element mapping still matters.
+
+Every destination beat carries byte-valid metadata. A partial first/last beat must not overwrite neighboring shared-memory bytes. Conflicting writes from ordinary threads and the async engine are a data race unless software establishes the required proxy ordering.
+
+### 3.6 The crucial ordering rule: async work is another proxy
+
+The initiating CUDA thread and the asynchronous copy engine are distinct memory actors. NVIDIA's model describes relevant TMA/tensor operations as an **async proxy**. Ordinary loads/stores use the generic proxy. A barrier can report transaction completion, but proxy fences are required at documented handoff points so the two proxies agree on visibility.
+
+The global→shared pattern is:
+
+1. initialize the shared-memory barrier;
+2. make barrier initialization visible to the async proxy;
+3. launch the bulk/tensor copy and add its expected byte count;
+4. other participating threads arrive;
+5. wait for the barrier phase to complete;
+6. only then read the shared tile with ordinary thread instructions.
+
+For shared→global reuse:
+
+1. finish ordinary thread writes to the shared tile;
+2. use the required generic↔async proxy fence and thread synchronization;
+3. launch the bulk copy;
+4. wait until the async operation has finished **reading** shared memory;
+5. only then let threads overwrite that shared buffer.
+
+```mermaid
+sequenceDiagram
+    participant P as Producer threads (generic proxy)
+    participant B as Shared mbarrier
+    participant T as Tensor copy engine (async proxy)
+    participant C as Consumer threads
+    P->>B: initialize barrier
+    P->>T: proxy fence makes initialization visible
+    P->>T: launch copy; register expected bytes
+    T->>T: generate addresses and move sectors
+    T->>B: decrement transaction bytes as data arrives
+    C->>B: arrive and wait for phase
+    B-->>C: phase complete
+    C->>C: safely consume shared tile
+```
+
+`__syncthreads()` is a thread barrier; a PTX/CUDA memory fence orders memory; an `mbarrier` also tracks asynchronous transaction completion; a proxy fence orders actors using different access mechanisms. They solve related but non-interchangeable problems.
+
+### 3.7 Double buffering as a hardware/software pipeline
+
+With two shared-memory stages, software assigns ownership:
+
+```text
+stage 0: async engine filling tile k+1
+stage 1: tensor core consuming tile k
+```
+
+After the consumer finishes stage 1 and the producer's copy into stage 0 completes, roles rotate. A correct state machine per stage is:
+
+```text
+FREE -> COPY_IN_FLIGHT -> READY_FOR_COMPUTE
+     -> COMPUTE_IN_FLIGHT -> SAFE_TO_REUSE -> FREE
+```
+
+```mermaid
 sequenceDiagram
     autonumber
-    participant Warp
-    participant TMA0 as TMA channel 0
-    participant TMA1 as TMA channel 1
-    participant MMA as wgmma tensor core
-    Note over Warp,MMA: Two-stage software pipeline
-    Warp->>TMA0: launch tile 0 fetch
-    Warp->>TMA1: launch tile 1 fetch
-    TMA0-->>Warp: barrier(0) arrives
-    Warp->>MMA: compute on tile 0
-    TMA1-->>Warp: barrier(1) arrives
-    Warp->>TMA0: launch tile 2 fetch (reuse channel 0)
-    Warp->>MMA: compute on tile 1
-    TMA0-->>Warp: barrier(2) arrives
-    Warp->>TMA1: launch tile 3 fetch
-    Warp->>MMA: compute on tile 2
-    Note over Warp,MMA: ... compute and fetch overlap forever ...
+    participant W as Warp/warpgroup
+    participant E0 as Copy stage 0
+    participant E1 as Copy stage 1
+    participant MMA as Tensor pipeline
+    W->>E0: launch tile 0
+    W->>E1: launch tile 1
+    E0-->>W: barrier phase 0 complete
+    W->>MMA: consume tile 0
+    E1-->>W: barrier phase 1 complete
+    MMA-->>W: stage 0 safe to reuse
+    W->>E0: launch tile 2
+    W->>MMA: consume tile 1
+    MMA-->>W: stage 1 safe to reuse
+    W->>E1: launch tile 3
 ```
 
-This is what gives FlashAttention its >70% utilization on Hopper — the TMA fetches the next $K$ tile while the wgmma computes on the current one.
+The number of stages is a resource trade-off:
+
+$$
+T_{tile}\approx\max(T_{copy}/S,\ T_{compute})
+$$
+
+only when $S$ buffered stages plus outstanding capacity cover copy latency and the memory/SMEM ports sustain the rate. More stages consume shared memory, barrier state, copy queue entries, and registers; beyond latency coverage they reduce occupancy without improving throughput.
+
+### 3.8 Conventional DMA inside an accelerator
+
+Device-level copy engines use the same core mechanisms at larger scope:
+
+```mermaid
+flowchart LR
+    RING["Runtime/driver command ring"] --> DF["Descriptor fetch + validation"]
+    DF --> CS["Channel scheduler"]
+    CS --> AG["1D/2D/scatter-gather AGU"]
+    AG --> VM["GMMU/IOMMU translation<br/>requester/process identity"]
+    VM --> RD["Read issue + reorder"]
+    RD --> NOC["GPU NoC / PCIe / peer fabric"]
+    NOC --> BUF["Data buffers + width/alignment"]
+    BUF --> WR["Write issue + response tracking"]
+    WR --> NOC
+    WR --> CP["Ordered completion record<br/>interrupt/event"]
+```
+
+The descriptor ring uses release/doorbell/acquire rules just like any producer-consumer queue. The engine must split at translation and protocol boundaries, retain exact progress across recoverable page faults, and publish completion only after destination writes reach the promised visibility point. Coherent and noncoherent host/peer paths need different cache-maintenance and ordering contracts.
+
+To sustain $B$ bytes/s across round-trip latency $L$, data in flight must be at least $BL$. At 100 GB/s and 300 ns, about 30 KiB must be outstanding. Request IDs, read-return buffers, write buffers, and NoC credits must all support that amount; sizing just one of them does not deliver bandwidth.
+
+### 3.9 What to verify and count
+
+Assertions and scoreboards:
+
+- every accepted source byte reaches exactly its descriptor-selected destination byte once;
+- no request is issued without reserved response/data capacity;
+- response tags and reset epochs cannot alias;
+- barrier bytes cannot reach zero before all corresponding destination writes complete;
+- a stage cannot transition to compute-ready before the required proxy/transaction completion;
+- shared-buffer reuse cannot precede the documented read-completion point;
+- descriptor bounds, address overflow, alignment, and out-of-bounds behavior are exact;
+- faults, aborts, and retries cannot duplicate visible writes.
+
+Counters: command queue depth, generated sectors per command, useful/fabric-byte ratio, outstanding transactions, global and shared-port stalls, bank conflicts, translation hit/miss/fault, barrier wait, proxy-fence wait, copy/compute overlap, and stage occupancy. Those counters distinguish a poor tensor layout from insufficient outstanding state or a saturated memory network.
 
 ---
 
 ## 4. Network-on-chip (NoC)
 
-### 4.1 Why crossbars don't scale
+### 4.1 Why the GPU needs several interconnects
 
-A direct crossbar between $N$ source SMs and $M$ L2 slices has $N \cdot M$ wires. For 128 SMs × 64 L2 slices = ~8 200 wires per *bit* of payload — at 256-bit transactions, ~2.1 M wires across the chip. Routing density is impossible at frontier nodes; arbitration logic alone exceeds 10% of die area.
+A modern GPU is not one flat network. It commonly has:
 
-### 4.2 Mesh, torus, and hierarchical NoCs
+- an SM-local crossbar connecting operand collectors, LSU ports, shared-memory banks, and L1;
+- cluster-level paths among neighboring SMs or distributed shared memory;
+- a global request/data network from SM clusters and copy engines to distributed L2 slices;
+- response networks returning fills and acknowledgements;
+- coherence/control paths for invalidation, atomics, page-table, interrupt, and system traffic;
+- off-die links to HBM controllers, peer GPUs, CPU/PCIe/CXL, or another die.
+
+Public architecture diagrams expose only some of these boundaries. The hierarchy below is a **design model**, not a claim about one vendor's undisclosed router count:
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 60, "rankSpacing": 60, "htmlLabels": false}}}%%
-flowchart TD
-    subgraph MESH["2D mesh — Cerebras / Tenstorrent"]
-        direction TB
-        M00[PE]:::m
-        M01[PE]:::m
-        M02[PE]:::m
-        M10[PE]:::m
-        M11[PE]:::m
-        M12[PE]:::m
-        M20[PE]:::m
-        M21[PE]:::m
-        M22[PE]:::m
-        M00 --- M01 --- M02
-        M10 --- M11 --- M12
-        M20 --- M21 --- M22
-        M00 --- M10 --- M20
-        M01 --- M11 --- M21
-        M02 --- M12 --- M22
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 45, "htmlLabels": false}}}%%
+flowchart TB
+    subgraph CL0["Compute cluster 0"]
+        SM0["SM 0<br/>LSU + L1/SMEM"]
+        SM1["SM 1<br/>LSU + L1/SMEM"]
+        CNI0["Cluster NI<br/>coalesce, IDs, packetize"]
+        SM0 --> CNI0
+        SM1 --> CNI0
     end
-    subgraph TORUS["2D torus — wraps edges"]
-        direction TB
-        T00[PE]:::t
-        T01[PE]:::t
-        T02[PE]:::t
-        T10[PE]:::t
-        T11[PE]:::t
-        T12[PE]:::t
-        T20[PE]:::t
-        T21[PE]:::t
-        T22[PE]:::t
-        T00 --- T01 --- T02
-        T10 --- T11 --- T12
-        T20 --- T21 --- T22
-        T00 --- T10 --- T20
-        T01 --- T11 --- T21
-        T02 --- T12 --- T22
-        T00 -. wrap .- T02
-        T20 -. wrap .- T22
-        T00 -. wrap .- T20
-        T02 -. wrap .- T22
+    subgraph CL1["Compute cluster 1"]
+        SM2["SM 2"]
+        SM3["SM 3"]
+        CNI1["Cluster NI"]
+        SM2 --> CNI1
+        SM3 --> CNI1
     end
-    subgraph HIER["Hierarchical (NVIDIA / AMD)"]
-        direction TB
-        SMX[SM cluster<br/>4 SMs share L1 xbar]:::h
-        GLOB[Global crossbar / ring]:::h
-        L2[L2 slices]:::h
-        SMX --> GLOB --> L2
+    subgraph FAB["Global packet fabric"]
+        R0["Router"]
+        R1["Router"]
+        R2["Router"]
+        R3["Router"]
+        R0 <--> R1
+        R0 <--> R2
+        R1 <--> R3
+        R2 <--> R3
     end
-    classDef m fill:#fde68a,stroke:#b45309,color:#000
-    classDef t fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef h fill:#bae6fd,stroke:#0369a1,color:#000
+    subgraph MEM["Partitioned memory system"]
+        L20["L2 slice 0<br/>atomic/response queues"]
+        L21["L2 slice 1"]
+        MC0["Memory controller 0"]
+        MC1["Memory controller 1"]
+        L20 <--> MC0
+        L21 <--> MC1
+    end
+    CNI0 <--> R0
+    CNI1 <--> R1
+    R2 <--> L20
+    R3 <--> L21
+    CE["Copy/DMA engines"] <--> R0
+    SYS["GMMU + host/peer I/O"] <--> R3
 ```
 
-| Topology | Bisection BW | Avg hops | Use case |
+A monolithic all-to-all crossbar gives low hop count, but mux/arbiter complexity and global wiring grow rapidly with ports and width. Rings and meshes replace global wires with repeated local links and routers. Hierarchical hybrids match physical clusters and memory partitions but add queues/order boundaries.
+
+### 4.2 The network interface: transactions become packets
+
+The SM LSU produces memory transactions: address sectors, operation, byte mask, warp/context identity, cache policy, scope, and ordering semantics. The network interface:
+
+1. checks/adopts the destination L2 slice or home;
+2. allocates/remaps a globally unique transaction ID;
+3. associates an ordering domain and sequence where required;
+4. packetizes request/data into flow-control units (**flits**);
+5. selects a virtual network and virtual channel;
+6. reserves credits and injects;
+7. reassembles responses and routes each sector to the correct MSHR/warp;
+8. maps poison, faults, retries, and reset epochs.
+
+A representative head flit carries destination, source/return route, transaction ID, operation, address, length, traffic class, ordering/scope attributes, packet length, and error/epoch bits. Body flits carry data and byte validity; a tail releases packet-held routing state.
+
+Coalescing happens before or at the NI: active warp lanes that touch the same cache sector become one transaction. The return metadata still records which byte/word feeds each lane. The NoC transports transactions; it does not know CUDA thread semantics.
+
+### 4.3 Router datapath in hardware
+
+```mermaid
+flowchart LR
+    RX["Input link<br/>framing + ECC/CRC"] --> IB["Input buffers<br/>port × virtual channel"]
+    IB --> RC["Route computation"]
+    RC --> VA["Downstream-VC allocation"]
+    VA --> SA["Switch allocation<br/>QoS + age"]
+    SA --> XB["Crossbar"]
+    XB --> TX["Output register + link"]
+    C["Returned credits<br/>per output VC"] --> VA
+    C --> SA
+    ESC["Escape/progress rules"] --> RC
+    ESC --> VA
+```
+
+Per input VC, RTL stores:
+
+```text
+read/write pointers and occupancy
+head/body/tail state
+decoded candidate output ports
+allocated downstream VC
+packet transaction/epoch identity
+QoS class and age
+error/poison state
+```
+
+The head flit computes a route and reserves a downstream VC. Each cycle, ready input VCs request physical output ports; switch arbitration grants at most one input per output (and normally at most the allowed speedup per input). Body/tail flits follow the reservation. The tail releases it.
+
+Physical pipelines vary. Route computation, VC allocation, switch allocation, crossbar traversal, and link traversal may occupy separate cycles, combine speculatively, or be bypassed when empty. It is therefore misleading to assign a universal cycles-per-hop number to a commercial GPU.
+
+### 4.4 Credit flow control
+
+If the downstream VC has depth $D$, upstream starts with $D$ credits after reset/epoch synchronization. Sending a flit consumes one; freeing the downstream slot returns one. For a clearly chosen boundary:
+
+$$
+C_{available}+F_{in\ flight}+S_{occupied}=D.
+$$
+
+Returning a credit too early can overwrite a full buffer. Losing one permanently reduces capacity and may deadlock. Long pipelined links need enough buffering to cover the delay before backpressure/credits return.
+
+An NI must reserve response or data-buffer capacity before issuing traffic whose response cannot be refused. This is especially important for TMA/DMA: allowing reads to fill every return buffer while shared-memory/global-write destinations are blocked can create a cyclic wait.
+
+### 4.5 Topology, routing, and traffic cuts
+
+| Topology | Strength | Weakness | Good fit |
 |---|---|---|---|
-| 2D mesh ($N×N$) | $O(N)$ | $N/3$ | Cerebras WSE, Tenstorrent |
-| 2D torus | $O(N)$ × 2 | $N/4$ | TPU pod (3D torus extended) |
-| Hierarchical ring + xbar | $O(\sqrt{N})$ | $O(\log N)$ | NVIDIA SM-to-L2 |
-| Fat tree | $O(N)$ | $O(\log N)$ | InfiniBand off-chip (L4) |
+| crossbar | one logical hop | global wires and arbitration scale poorly | small local cluster |
+| ring | compact router ports | distance and cut bottlenecks | moderate clustered fabric |
+| 2D mesh | regular physical replication | multi-hop latency, bisection limits | many tiles |
+| tree/fat tree | hierarchical aggregation | shared ancestors, placement | clustered endpoints |
+| hierarchical hybrid | follows floorplan | boundary queues/order | large GPUs/accelerators |
 
-### 4.3 Routing, virtual channels, deadlock
+For link payload width $w$, clock $f$, and useful utilization $\eta$,
 
-A naïve mesh with adaptive routing can deadlock: cyclic dependencies on buffer space (e.g., NW-SE traffic blocks NE-SW traffic which blocks NW-SE...). Solutions:
+$$B_{link}=wf\eta.$$
 
-- **Dimension-order routing (DOR / XY):** always route X first, then Y. Provably deadlock-free but underutilizes bandwidth.
-- **Virtual channels (VC):** split each physical link into 2–4 logical channels with independent buffer pools. Cycles in dependency graph are broken by routing certain traffic on dedicated VCs.
-- **Adaptive routing with VCs:** combines high utilization with deadlock freedom.
+But aggregate injection bandwidth is irrelevant if a bisection or one L2/DRAM partition saturates. Given source–destination traffic $D_{sd}$ and route indicator $R_{sd,l}$, load on link $l$ is
 
-NVIDIA's hierarchical NoC uses dedicated VCs for: requests, responses, write-acks, snoop traffic, and broadcast. ~5 VCs typical; each VC has 4–8 entry buffers. Per-router area: ~0.05 mm² at N4.
+$$L_l=\sum_{s,d}D_{sd}R_{sd,l}.$$
 
-### 4.4 Latency budget
+Route tensor addresses across L2 slices so common strides use multiple partitions; otherwise many SMs can camp on one slice even while the rest of the fabric is idle.
 
-Per router traversal:
+Deterministic dimension-order routing is easy to prove. Adaptive routing can avoid congestion but may reorder packets and needs a guaranteed acyclic escape path. Ordered domains may use pinned routes or destination reorder buffers.
 
-- Routing computation: 1 cycle.
-- VC arbitration: 1 cycle.
-- Crossbar traversal: 1 cycle.
-- Link traversal: 1 cycle (wire delay across ~1 mm).
+### 4.6 Virtual channels are for progress, not extra wire bandwidth
 
-So 4 cycles per hop is typical. Across a 12-hop diameter (B200 die corner-to-corner): ~48 cycles of NoC latency *just to reach L2*. This is why ALU latency is fully hidden by the warp scheduler but L2 latency is *not* — and why GPU programmers care about L2 hit rate.
+Virtual channels share one physical link but have independent buffer/reservation state. They reduce head-of-line blocking and can break dependency cycles. They do **not** multiply link bandwidth.
+
+Draw a channel-dependency graph. A node is a buffer/VC class; edge `A→B` means a transaction can hold A while requesting B. Coherent GPU traffic might include:
+
+```text
+request -> home/L2 entry
+home entry -> invalidate/probe
+probe -> acknowledgement/writeback
+response -> SM ejection/MSHR
+```
+
+If requests consume all storage required for responses or probes that release those requests, the machine can freeze. Separate virtual networks, reserved response/probe slots, and an acyclic escape VC are structural solutions. Merely adding arbitrary VCs is not a proof.
+
+Progress extends into endpoints: L2 miss queues, atomic queues, DMA buffers, GMMU walkers, and SM response queues belong in the same dependency analysis. Router-level deadlock freedom cannot fix a target controller that holds a request while waiting for a response buffer occupied by that same class.
+
+### 4.7 GPU memory ordering and atomics cross the NoC
+
+The NoC may reorder unrelated transactions. Correctness is reconstructed by:
+
+- per-address serialization at the owning L2/home slice;
+- per-scope/domain sequence tracking where the ISA requires order;
+- fence packets or acknowledgement ledgers that wait for prior traffic's ordering points;
+- response reordering at the NI;
+- separate device/system routes for operations whose scope extends beyond the GPU.
+
+A global atomic can be implemented by acquiring exclusive cache ownership at the requester or by executing in an L2/home atomic unit. In either case, one serialization point must return the old value and apply the update exactly once. A retry must distinguish “never executed” from “executed but response lost.”
+
+A release store cannot publish its flag packet until selected earlier writes reach the required GPU/system ordering point. An acquire load cannot allow younger dependent observations to become irrevocable before the acquire response. The warp scheduler and LSU may speculate, but the NI/L2 completion state must support validation or replay. Section 6 of [ISA and Execution Model](../L3_Microarchitecture/01_ISA_and_Execution_Model.md) connects these hardware events to CUDA/PTX.
+
+### 4.8 Latency and throughput model
+
+For a packet of $F$ flits across $H$ unloaded wormhole hops:
+
+$$
+L\approx L_{source\ NI}+H L_{head-hop}+(F-1)+L_{destination\ NI}+L_{target}.
+$$
+
+Under load add queueing at injection, every allocator, ejection, and the L2/DRAM target. The `F-1` term is serialization behind the head. A cache miss's user-visible latency also includes TLB/GMMU, L2 lookup, memory-controller scheduling, HBM, fill, and warp wakeup—NoC traversal is only one component.
+
+Average utilization near 100% causes steep queueing. Design with headroom against realistic bursts and hot spots, then report latency percentiles, not only average bandwidth.
+
+### 4.9 QoS, multicast, reset, and verification
+
+GPU traffic classes include demand loads, writebacks, atomics, page walks, TMA/DMA, display/real-time traffic, coherence/control, interrupts, and debug. QoS requires:
+
+- source admission/outstanding caps;
+- class mapping that cannot be forged across security contexts;
+- byte- or flit-aware weighted service;
+- age promotion/starvation bounds;
+- reserved progress resources for control/response traffic;
+- matching policy at L2 and memory controllers.
+
+Probe, TLB-invalidation, cluster-shared, and control traffic may multicast. Replicate at branch routers to save link bandwidth, while tracking every branch so one blocked output cannot corrupt or duplicate another.
+
+Reset/power transitions stop injection, drain or terminate outstanding traffic, exchange epochs, restore credit counts, and reject late old-epoch flits. Initializing credit counters at one end before the downstream buffers are ready is a silicon bring-up bug.
+
+Core assertions:
+
+```text
+credit is always between zero and buffer depth
+send implies positive prior credit
+one output has at most one granted input per transfer slot
+no flit is created, lost, duplicated, or misrouted
+head/body/tail and downstream-VC reservation are consistent
+ordered-domain sequence is not released out of order
+every admitted packet eventually ejects or reports an error under fairness assumptions
+```
+
+Test single-router exhaustively where practical, then multi-router backpressure, hot spots, all source/destination pairs, protocol causal cycles, adaptive routes, TMA/DMA saturation, atomics, multicast, faults, clock ratios, power/reset epochs, and link errors. Count per-VC occupancy, credit starvation, allocator loss, hop/queue/serialization latency, link/cut utilization, endpoint backpressure, class service, reorders, retries, and timeouts.
 
 ---
 
@@ -399,6 +749,37 @@ The chip can drop $V_{dd}$ when it doesn't need peak frequency. Power scales as 
 Modern GPUs DVFS at sub-millisecond granularity, with ~10 distinct V/f operating points selected by the on-die power-management controller (PMU) responding to telemetry from MAC utilization counters.
 
 ---
+
+---
+
+## 5b. The physical-design flow
+
+Everything above is RTL and cells; turning that into a mask set is the **physical-design (PD) / place-and-route** flow. A chip-design student should know its shape because every earlier constraint (SRAM macros, datapath regularity, the power grid that fights the voltage droop of L0) lands here.
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk", "nodeSpacing": 45, "rankSpacing": 40, "htmlLabels": false}}}%%
+flowchart TB
+    RTL["synthesized netlist"]:::a --> FP["floorplan<br/>(macros, power grid, IO)"]:::b
+    FP --> PL["placement<br/>(std cells, congestion)"]:::b
+    PL --> CTS["clock tree synthesis<br/>(balance insertion delay/skew)"]:::c
+    CTS --> RT["routing (detailed + DRC-clean)"]:::b
+    RT --> SIGN["signoff STA (MCMM corners)<br/>+ DRC + LVS + EM/IR"]:::d
+    SIGN -->|violations| PL
+    SIGN --> GDS["GDSII → tape-out"]:::e
+    classDef a fill:#fde68a,stroke:#b45309,color:#000
+    classDef b fill:#bae6fd,stroke:#0369a1,color:#000
+    classDef c fill:#e9d5ff,stroke:#7c3aed,color:#000
+    classDef d fill:#fbcfe8,stroke:#9d174d,color:#000
+    classDef e fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+1. **Floorplan.** Place the big hard macros first — the SRAM banks (§2b), HBM PHYs, NoC routers — then define the **power delivery network (PDN)** and I/O. For an AI die this step is macro-dominated: SMEM/RF/L2 arrays are most of the area, and the PDN must deliver ~1 kW without the IR-drop / $L\,di/dt$ droop that L0 warns about.
+2. **Placement.** Standard cells are placed under simultaneous timing- and congestion-driven optimization. Regular datapaths (the multiplier arrays, the systolic PEs) are often **structured/relationally placed** by hand or datapath tools so the bit-slice regularity of §FP survives into silicon.
+3. **CTS** (§1b.2) builds the balanced clock network.
+4. **Routing.** Detailed routing over a dozen-plus metal layers, DRC-clean, honoring the same wire-dominated reality that made 4:2 compressors and Booth attractive in the first place.
+5. **Signoff.** MCMM STA (§1b.4) **plus** DRC (design rules), LVS (layout-vs-schematic), and **EM/IR** (electromigration + IR-drop on the PDN). Violations loop back into placement/routing. Only a clean signoff yields **GDSII** for tape-out.
+
+The reticle limit (~858 mm²) caps a single die here — which is precisely why the biggest accelerators go multi-die and pay the CDC cost of §2 (and the packaging cost of L1).
 
 ## 6. Verification reality
 
@@ -506,11 +887,11 @@ flowchart TD
     F --> G[2–4 cycle die-crossing penalty]
     G --> H[NV-HBI engineered to be ~invisible<br/>to software]
 
-    I[TMA async copies] --> J[Decouple HBM 300-cyc latency from<br/>compute]
-    J --> K[FlashAttention-3 hits 70%+<br/>utilization on Hopper]
+    I[TMA async copies] --> J[Move tile address/layout work out of<br/>the warp issue stream]
+    J --> K[Software pipelines copy and compute<br/>with barriers + proxy ordering]
 
-    L[NoC hierarchical: hops × 4 cyc] --> M[L2 access latency 30–80 cycles]
-    M --> N["Why GPU programmers care about L2 hit rate (L8)"]
+    L[NoC latency = NI + hops + serialization<br/>+ queueing + target] --> M[L2/memory access is load- and<br/>topology-dependent]
+    M --> N["Why programmers care about locality,<br/>partition balance, and L2 hit rate"]
 
     O["Power = αCV²f"] --> P[Clock gating at idle clusters]
     O --> Q[Power gating at idle SMs]
@@ -539,16 +920,23 @@ flowchart TD
 | Typical FMA pipeline depth | 4–6 stages | Latency vs $f_{\max}$ |
 | Multi-flop sync stages for MTBF > 10⁹ y | 3 | Async CDC standard |
 | NV-HBI mesochronous CDC penalty | 2–4 cycles | Cross-die access |
-| TMA tile size | KB to MB | One instruction per tile |
-| TMA scheduler issue cost | ~2 cycles | vs ~50 for naïve loads |
-| NoC router latency | ~4 cycles/hop | Routing + arb + xbar + link |
-| Hierarchical NoC diameter (B200 die) | ~12 hops | ~48 cycle latency to far L2 |
+| Async-copy address | $base+\sum i_d stride_d$ | nested-loop AGU |
+| Data required in flight | $BL$ | bandwidth × round-trip latency |
+| NoC link useful bandwidth | $wf\eta$ | width × frequency × efficiency |
+| NoC unloaded packet latency | $L_{srcNI}+HL_{head-hop}+F-1+L_{dstNI}+L_{target}$ | separates hop and serialization costs |
+| VC credit invariant | available + in-flight + occupied = depth | prevents loss/overflow/deadlock |
 | ICG cell area overhead | ~5% of gated block | Standard |
 | Power-gating wakeup time | ~10s of cycles | DTC recharge |
 | DVFS granularity | sub-ms | PMU-driven |
 | Formal verification scaling ceiling | ~10⁷ states | Why FSMs escape |
 | Block-level UVM cycles | 10⁹–10¹² | Months on farm |
 | Errata count per major GPU launch | 50–200 | Documented post-tape-out |
+| Hold constraint | t_cq,min + t_logic,min ≥ t_hold + t_skew | frequency-independent; fixed by padding |
+| Clock insertion delay | tens–>100 ps | root-to-leaf latency |
+| Clock-network power share | ~30% of dynamic | why clock gating targets it |
+| Signoff matrix | MCMM: SS/TT/FF × Vmin..max × T | setup@slow, hold@fast |
+| Temperature inversion | slower when cold at low V | check both T extremes |
+| PD signoff checks | STA + DRC + LVS + EM/IR | all must be clean for GDSII |
 
 ---
 
@@ -558,9 +946,14 @@ flowchart TD
 - Dally & Towles, *Principles and Practices of Interconnection Networks* — NoC topology, deadlock, VCs.
 - Dally & Poulton, *Digital Systems Engineering* — CDC, signaling, PI design.
 - Weste & Harris, *CMOS VLSI Design* — pipelining, clock-tree, ICG patterns.
+- Kahng, Lienig, Markov & Hu, *VLSI Physical Design: From Graph Partitioning to Timing Closure* — floorplan → place → CTS → route → signoff.
+- Bhasker & Chadha, *Static Timing Analysis for Nanometer Designs* — setup/hold, OCV, MCMM corners.
+- Leiserson & Saxe, *Retiming Synchronous Circuitry*, Algorithmica 1991 — register balancing.
 
 **Recent**
 - Choquette et al., *NVIDIA Hopper Architecture*, IEEE Micro 2023 — TMA disclosure.
+- NVIDIA, [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/) — asynchronous copies, TMA, barriers, thread scopes, memory synchronization domains, and CUDA C++ memory model.
+- NVIDIA, [Parallel Thread Execution ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) — bulk/tensor async instructions, `mbarrier`, scoped fences/atomics, and proxy ordering.
 - Wang et al., *NV-HBI Cross-Die Bridge for Blackwell*, Hot Chips 2024.
 - Foundry-DTCO disclosures from TSMC / Intel — pipelining-friendly cell libraries.
 

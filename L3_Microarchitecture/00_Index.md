@@ -8,7 +8,7 @@
 
 L3 covers the **chip-level architecture**: how SMs/cores are organized, how the warp/wave/wavefront scheduler works, how the ISA exposes execution to compilers, and how the roofline analytical framework predicts achievable throughput on each design.
 
-1. **The execution model and ISA** — SIMT (NVIDIA, AMD), VLIW (TPU, Trainium), spatial dataflow (Cerebras, Tenstorrent). PTX vs SASS. Warp / wave / wavefront semantics.
+1. **The execution model and ISA** — SIMT (NVIDIA, AMD), VLIW (TPU, Trainium), spatial dataflow (Cerebras, Tenstorrent); PTX vs SASS; warp/wave semantics; and CUDA/PTX scope, acquire/release/SC, fence-ledger, atomic-serialization, and async-proxy behavior.
 2. **The reference architecture** — the NVIDIA SM (Hopper / Blackwell). Warp scheduler, register file, tensor cores, SMEM, TMEM, TMA, async wgmma.
 3. **The roofline framework** — derivation, ridge point, why decode is memory-bound and prefill is compute-bound. Worked examples on every chip.
 4. **Per-vendor deep dives** — Blackwell (canonical), MI300/MI355 (AMD), TPU v5p/v6e/v7 (Google systolic), Ascend 910 (Huawei DaVinci 3D Cube), Trainium (AWS VLIW), MTIA (Meta), Cerebras WSE-3 (wafer-scale mesh), Groq LPU (SRAM-only deterministic), Tenstorrent (NoC-coupled tiles).
@@ -20,7 +20,7 @@ L3 explicitly does **not** cover system / rack-scale interconnects (→ L4), ker
 
 ## Pages (read in order)
 
-1. [ISA_and_Execution_Model](01_ISA_and_Execution_Model.md) — what code looks like at the hardware boundary. Foundational; every later page assumes this.
+1. [ISA_and_Execution_Model](01_ISA_and_Execution_Model.md) — what code looks like at the hardware boundary, including the full CUDA/PTX memory-ordering path from source atomics/fences to SM, NoC, L2, and system ordering points. Foundational; every later page assumes this.
 2. [GPU_Architecture](02_GPU_Architecture.md) — the canonical SIMT chip in one complete chapter: host/front end, GPC/TPC/SM hierarchy, CUDA kernel/grid/block/warp/thread mapping, registers/shared memory/caches/GMMU/NoC/L2/controllers/HBM, tensor cores, and generation-specific features.
 3. [Memory_Hierarchy_and_Roofline](03_Memory_Hierarchy_and_Roofline.md) — the analytical framework that predicts throughput on every chip below. **Memorize the ridge-point math here.**
 4. [Blackwell_Architecture](04_Blackwell_Architecture.md) — the 2025–2026 frontier NVIDIA part. Specialization of the GPU page with FP4/MX, TMEM, NV-HBI, NVL72.
