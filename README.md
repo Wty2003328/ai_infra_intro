@@ -61,7 +61,7 @@ ai_infra_intro/                       AI infrastructure (silicon → inference s
 |-------|-------|-------|----------|
 | L0 — Silicon & Process | 1 | 800 | CMOS scaling, process nodes, wafer economics |
 | L1 — Packaging & Memory | 2 | 1,234 | CoWoS, HBM3/3E/4, chiplets, TSVs |
-| L2 — Digital Design | 4 | 2,095 | FP units, systolic arrays, SRAM, RTL |
+| L2 — Digital Design | 4 | 3,116 | FP units, systolic arrays, SRAM, RTL |
 | L3 — Microarchitecture | 10 | 4,872 | GPU hardware/software and memory hierarchy, H100/B200/Rubin, TPU 8t/8i, AMD MI455X, roofline |
 | L4 — Systems & Interconnects | 3 | 1,986 | NVLink, InfiniBand, NVL72, liquid cooling |
 | L5 — Kernels & Programming | 7 | 4,969 | CUDA, tensor-core programming (WGMMA/TMA/warp specialization), Triton, FlashAttention v1–v4, CUTLASS 3.x, ML compilers (torch.compile/XLA/MLIR) |

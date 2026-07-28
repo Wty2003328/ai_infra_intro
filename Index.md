@@ -32,7 +32,7 @@ Three layers of preparation are interwoven:
 ## L2 — Digital Design for AI
 
 4. [On-Chip Memory Hardware](L2_Digital_Design_for_AI/01_On_Chip_Memory_Hardware.md) — SRAM cell design, register files, TMEM (Blackwell), scratchpad vs cache, area/energy per bit, bank conflict hardware, emerging on-chip memory.
-5. [FP Unit Design](L2_Digital_Design_for_AI/02_FP_Unit_Design.md) — IEEE 754, FP16/BF16/FP8/FP4/INT8 hardware, BitNet 1-bit multiplier considerations, multiplier trees, fused multiply-add, denormal handling.
+5. [FP Unit Design](L2_Digital_Design_for_AI/02_FP_Unit_Design.md) — from CLA/CRA to IEEE-style FP add, multiply, FMA, SRT/Newton divide, sqrt/rsqrt, conversions, comparisons, SFUs, rounding/flags, multi-format and MX tensor arithmetic, and verification.
 6. [Systolic Arrays and Dataflow](L2_Digital_Design_for_AI/03_Systolic_Arrays_and_Dataflow.md) — weight-stationary / output-stationary / row-stationary dataflow, tiling, mapping convolutions and matmuls, throughput modeling.
 7. [Digital Design For AI](L2_Digital_Design_for_AI/04_Digital_Design_For_AI.md) — RTL for accelerators, dataflow vs von Neumann, control-flow design, clock gating, power domains, FPGA AI acceleration patterns.
 
